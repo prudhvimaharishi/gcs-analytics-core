@@ -27,7 +27,7 @@ public abstract class GcsReadOptions {
   private static final String PROJECT_ID_KEY = "project.id";
   private static final String FOOTER_PREFETCH_SIZE = "footer.prefetch.size";
 
-  private static final long DEFAULT_FOOTER_PREFETCH_SIZE = 2097152; // 2mb
+  private static final long DEFAULT_FOOTER_PREFETCH_SIZE = 102400; // 100kib
 
   public abstract Optional<Integer> getChunkSize();
 

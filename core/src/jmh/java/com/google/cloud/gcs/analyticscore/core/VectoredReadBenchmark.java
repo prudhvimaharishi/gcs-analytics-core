@@ -1,30 +1,18 @@
-/*
- * Copyright 2025 Google LLC
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.google.cloud.gcs.analyticscore.core;
 
+import org.apache.parquet.filter2.predicate.FilterPredicate;
+import org.apache.parquet.io.api.Binary;
 import org.openjdk.jmh.annotations.*;
 
-        import java.io.IOException;
+import java.io.IOException;
 import java.net.URI;
 import java.util.concurrent.TimeUnit;
 
-@State(Scope.Benchmark)
-public class GoogleCloudStorageInputStreamBenchmark {
+import static org.apache.parquet.filter2.predicate.FilterApi.binaryColumn;
+import static org.apache.parquet.filter2.predicate.FilterApi.eq;
 
+@State(Scope.Benchmark)
+public class VectoredReadBenchmark {
     @Setup(Level.Invocation)
     public void uploadSampleFiles() throws IOException {
         uploadBundledResourceToGcs("tpcds_customer_sf1.parquet");
@@ -43,10 +31,10 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_3mbFile_withVectoredReadAndFooterPrefetchEnabled() throws IOException {
+    public void read_3mbFile_withVectoredReadEnabled() throws IOException {
+        FilterPredicate byCountryFilter = eq(binaryColumn("c_birth_country"), Binary.fromString("EGYPT"));
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf1.parquet");
-    ParquetHelper.readParquetObjectRecords(
-        uri, null, /* enableFooterPrefetch= */ true, /* readVectorEnabled= */ true);
+        ParquetHelper.readParquetObjectRecords(uri, byCountryFilter,false, true);
     }
 
     @Benchmark
@@ -55,10 +43,10 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_3mbFile_withVectoredReadAndFooterPrefetchDisabled() throws IOException {
+    public void read_3mbFile_withVectoredReadDisabled() throws IOException {
+        FilterPredicate byCountryFilter = eq(binaryColumn("c_birth_country"), Binary.fromString("EGYPT"));
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf1.parquet");
-        ParquetHelper.readParquetObjectRecords(
-               uri, null, /* enableFooterPrefetch= */ false, /* readVectorEnabled= */ false);
+        ParquetHelper.readParquetObjectRecords(uri, byCountryFilter,false, false);
     }
 
     @Benchmark
@@ -67,10 +55,10 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_18mbFile_withVectoredReadAndFooterPrefetchEnabled() throws IOException {
+    public void read_18mbFile_withVectoredReadEnabled() throws IOException {
+        FilterPredicate byCountryFilter = eq(binaryColumn("c_birth_country"), Binary.fromString("EGYPT"));
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf10.parquet");
-        ParquetHelper.readParquetObjectRecords(
-                uri, null, /* enableFooterPrefetch= */ true, /* readVectorEnabled= */ true);
+        ParquetHelper.readParquetObjectRecords(uri, byCountryFilter,false, true);
     }
 
     @Benchmark
@@ -79,34 +67,34 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_18mbFile_withVectoredReadAndFooterPrefetchDisabled() throws IOException {
+    public void read_18mbFile_withVectoredReadDisabled() throws IOException {
+        FilterPredicate byCountryFilter = eq(binaryColumn("c_birth_country"), Binary.fromString("EGYPT"));
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf10.parquet");
-        ParquetHelper.readParquetObjectRecords(
-                uri, null, /* enableFooterPrefetch= */ false, /* readVectorEnabled= */ false);
+        ParquetHelper.readParquetObjectRecords(uri, byCountryFilter,false, false);
     }
 
     @Benchmark
     @BenchmarkMode(Mode.AverageTime)
     @OutputTimeUnit(TimeUnit.MILLISECONDS)
     @Warmup(iterations = 1, time = 1)
-    @Measurement(iterations = 2, time = 1)
+    @Measurement(iterations = 5, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_50mbFile_withVectoredReadAndFooterPrefetchEnabled() throws IOException {
+    public void read_50mbFile_withVectoredReadEnabled() throws IOException {
+        FilterPredicate byCountryFilter = eq(binaryColumn("c_birth_country"), Binary.fromString("EGYPT"));
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf100.parquet");
-        ParquetHelper.readParquetObjectRecords(
-                uri, null, /* enableFooterPrefetch= */ true, /* readVectorEnabled= */ true);
+        ParquetHelper.readParquetObjectRecords(uri, byCountryFilter, false, true);
     }
 
     @Benchmark
     @BenchmarkMode(Mode.AverageTime)
     @OutputTimeUnit(TimeUnit.MILLISECONDS)
     @Warmup(iterations = 1, time = 1)
-    @Measurement(iterations = 2, time = 1)
+    @Measurement(iterations = 5, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_50mbFile_withVectoredReadAndFooterPrefetchDisabled() throws IOException {
+    public void read_50mbFile_withVectoredReadDisabled() throws IOException {
+        FilterPredicate byCountryFilter = eq(binaryColumn("c_birth_country"), Binary.fromString("EGYPT"));
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf100.parquet");
-        ParquetHelper.readParquetObjectRecords(
-               uri, null, /* enableFooterPrefetch= */ false, /* readVectorEnabled= */ false);
+        ParquetHelper.readParquetObjectRecords(uri, byCountryFilter, false, false);
     }
 
     private void uploadBundledResourceToGcs(String fileName) {

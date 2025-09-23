@@ -18,12 +18,12 @@ package com.google.cloud.gcs.analyticscore.core;
 
 import org.openjdk.jmh.annotations.*;
 
-        import java.io.IOException;
+import java.io.IOException;
 import java.net.URI;
 import java.util.concurrent.TimeUnit;
 
 @State(Scope.Benchmark)
-public class GoogleCloudStorageInputStreamBenchmark {
+public class ParquetFooterPrefetchingBenchmark {
 
     @Setup(Level.Invocation)
     public void uploadSampleFiles() throws IOException {
@@ -43,10 +43,9 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_3mbFile_withVectoredReadAndFooterPrefetchEnabled() throws IOException {
+    public void parquetFooterParsing_3mbFile_withFooterPrefetchingEnabled() throws IOException {
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf1.parquet");
-    ParquetHelper.readParquetObjectRecords(
-        uri, null, /* enableFooterPrefetch= */ true, /* readVectorEnabled= */ true);
+        ParquetHelper.readParquetMetadata(uri, true);
     }
 
     @Benchmark
@@ -55,10 +54,9 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_3mbFile_withVectoredReadAndFooterPrefetchDisabled() throws IOException {
+    public void parquetFooterParsing_3mbFile_withFooterPrefetchingDisabled() throws IOException {
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf1.parquet");
-        ParquetHelper.readParquetObjectRecords(
-               uri, null, /* enableFooterPrefetch= */ false, /* readVectorEnabled= */ false);
+        ParquetHelper.readParquetMetadata(uri, false);
     }
 
     @Benchmark
@@ -67,10 +65,9 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_18mbFile_withVectoredReadAndFooterPrefetchEnabled() throws IOException {
+    public void parquetFooterParsing_18mbFile_withFooterPrefetchingEnabled() throws IOException {
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf10.parquet");
-        ParquetHelper.readParquetObjectRecords(
-                uri, null, /* enableFooterPrefetch= */ true, /* readVectorEnabled= */ true);
+        ParquetHelper.readParquetMetadata(uri, true);
     }
 
     @Benchmark
@@ -79,10 +76,9 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_18mbFile_withVectoredReadAndFooterPrefetchDisabled() throws IOException {
+    public void parquetFooterParsing_18mbFile_withFooterPrefetchingDisabled() throws IOException {
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf10.parquet");
-        ParquetHelper.readParquetObjectRecords(
-                uri, null, /* enableFooterPrefetch= */ false, /* readVectorEnabled= */ false);
+        ParquetHelper.readParquetMetadata(uri, false);
     }
 
     @Benchmark
@@ -91,10 +87,9 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_50mbFile_withVectoredReadAndFooterPrefetchEnabled() throws IOException {
+    public void parquetFooterParsing_50mbFile_withFooterPrefetchingEnabled() throws IOException {
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf100.parquet");
-        ParquetHelper.readParquetObjectRecords(
-                uri, null, /* enableFooterPrefetch= */ true, /* readVectorEnabled= */ true);
+        ParquetHelper.readParquetMetadata(uri, true);
     }
 
     @Benchmark
@@ -103,10 +98,9 @@ public class GoogleCloudStorageInputStreamBenchmark {
     @Warmup(iterations = 1, time = 1)
     @Measurement(iterations = 2, time = 1)
     @Fork(value = 2, warmups = 1)
-    public void read_50mbFile_withVectoredReadAndFooterPrefetchDisabled() throws IOException {
+    public void parquetFooterParsing_50mbFile_withFooterPrefetchingDisabled() throws IOException {
         URI uri = IntegrationTestHelper.getGcsObjectUriForFile("tpcds_customer_sf100.parquet");
-        ParquetHelper.readParquetObjectRecords(
-               uri, null, /* enableFooterPrefetch= */ false, /* readVectorEnabled= */ false);
+        ParquetHelper.readParquetMetadata(uri, false);
     }
 
     private void uploadBundledResourceToGcs(String fileName) {

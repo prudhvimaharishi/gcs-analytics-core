@@ -20,6 +20,8 @@ import com.google.common.collect.ImmutableList;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.example.data.Group;
+import org.apache.parquet.filter2.compat.FilterCompat;
+import org.apache.parquet.filter2.predicate.FilterPredicate;
 import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.hadoop.ParquetFileReader;
@@ -92,18 +94,23 @@ public class ParquetHelper {
     /**
      * Reads the records from a Parquet file and returns the total record count.
      *
-     * @param readVectoredEnabled Whether to use vectored read or not.
      * @param fileUri The URI of the Parquet file.
+     * @param filterPredicate The where clause for the read.
+     * @param enableFooterPrefetch Whether to prefetch footer or not.
+     * @param readVectoredEnabled Whether to use vectored read or not.
      * @return The total number of records in the file.
      */
-    public static long readParquetObjectRecords(boolean readVectoredEnabled, URI fileUri)  {
+    public static long readParquetObjectRecords(URI fileUri, FilterPredicate filterPredicate, boolean enableFooterPrefetch, boolean readVectoredEnabled)  {
         logger.info("Reading parquet file:{} with vectoredIOEnabled={}", fileUri, readVectoredEnabled);
         try {
-            InputFile inputFile = new TestInputStreamInputFile(fileUri, readVectoredEnabled);
+            InputFile inputFile = new TestInputStreamInputFile(fileUri, readVectoredEnabled, enableFooterPrefetch);
             long recordCount = 0;
-            try (ParquetReader<Group> reader = new GroupParquetReaderBuilder(inputFile)
-                    .withConf(new Configuration()) // Use default Hadoop config
-                    .build()) {
+            ParquetReader.Builder readerBuilder =
+                     new GroupParquetReaderBuilder(inputFile).withConf(new Configuration());
+            if(filterPredicate!=null){
+                readerBuilder.withFilter(FilterCompat.get(filterPredicate));
+            }
+            try (ParquetReader<Group> reader = readerBuilder.build()) {
                 Group group;
                 while ((group = reader.read()) != null) {
                     recordCount += 1;

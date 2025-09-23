@@ -61,7 +61,7 @@ class GcsReadOptionsTest {
     assertThat(readOptions.getChunkSize()).isEqualTo(Optional.empty());
     assertThat(readOptions.getDecryptionKey()).isEqualTo(Optional.empty());
     assertThat(readOptions.getProjectId()).isEqualTo(Optional.empty());
-    assertThat(readOptions.getFooterPrefetchSize()).isEqualTo(2 * 1024 * 1024); // Default value
+    assertThat(readOptions.getFooterPrefetchSize()).isEqualTo(102400); // Default value
     assertThat(vectoredReadOptions.getMaxMergeGap()).isEqualTo(4 * 1024); // Default value
     assertThat(vectoredReadOptions.getMaxMergeSize()).isEqualTo(8 * 1024 * 1024); // Default value
   }
