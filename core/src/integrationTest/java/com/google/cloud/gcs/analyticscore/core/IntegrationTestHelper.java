@@ -36,9 +36,9 @@ public class IntegrationTestHelper {
     public static final String TPCDS_CUSTOMER_MEDIUM_FILE = "tpcds_customer_medium.parquet";
     public static final String TPCDS_CUSTOMER_LARGE_FILE = "tpcds_customer_large.parquet";
 
-    public static final String BUCKET_NAME = System.getProperty("gcs.integration.test.bucket");
-    public static final String PROJECT_ID = System.getProperty("gcs.integration.test.project-id");
-    private static final String FOLDER_NAME  = getFolderName();
+    public static final String BUCKET_NAME = "pbeerelly-iceberg";
+    public static final String PROJECT_ID = "pbeerelly-test-sandbox-629413";
+    private static final String FOLDER_NAME  = "random/";
 
     private static final Logger logger = LoggerFactory.getLogger(IntegrationTestHelper.class);
     private static final Storage storage = StorageOptions.newBuilder().setProjectId(PROJECT_ID).build().getService();

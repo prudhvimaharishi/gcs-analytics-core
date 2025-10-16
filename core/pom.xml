@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!---
+<!--
 Copyright 2025 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,6 +29,8 @@ limitations under the License.
         <maven.compiler.source>11</maven.compiler.source>
         <maven.compiler.target>11</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <io.opentelemetry.version>1.40.0</io.opentelemetry.version>
+        <com.google.cloud.opentelemetry.version>0.36.0</com.google.cloud.opentelemetry.version>
     </properties>
 
     <dependencies>
@@ -36,6 +38,31 @@ limitations under the License.
             <groupId>com.google.cloud.gcs.analytics</groupId>
             <artifactId>client</artifactId>
             <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-logging</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-metrics</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.cloud.opentelemetry</groupId>
+            <artifactId>exporter-trace</artifactId>
+            <version>${com.google.cloud.opentelemetry.version}</version>
         </dependency>
         <!--Test Dependencies-->
         <dependency>
