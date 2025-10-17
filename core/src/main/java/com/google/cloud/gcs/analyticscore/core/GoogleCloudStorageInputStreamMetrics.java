@@ -29,20 +29,16 @@ public final class GoogleCloudStorageInputStreamMetrics {
       GoogleCloudStorageInputStreamMetrics.class.getName();
   private static final Meter METER;
 
-    static {
-        try {
-            METER = GoogleCloudMonitoringMetricsManager.getMeter();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
+  static {
+      METER = GlobalOpenTelemetry.getMeter(INSTRUMENTATION_NAME);
+  }
 
-    private static final LongCounter SEEK_COUNT =
-      METER
-          .counterBuilder("gcs.input_stream.seek.count")
-          .setDescription("Number of seek operations.")
-          .setUnit("1")
-          .build();
+  private static final LongCounter SEEK_COUNT =
+    METER
+        .counterBuilder("gcs.input_stream.seek.count")
+        .setDescription("Number of seek operations.")
+        .setUnit("1")
+        .build();
 
   private static final LongCounter READ_COUNT =
       METER

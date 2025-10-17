@@ -18,6 +18,9 @@ package com.google.cloud.gcs.analyticscore.core;
 import static com.google.common.base.Preconditions.*;
 
 import com.google.cloud.gcs.analyticscore.client.*;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
+
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.URI;
@@ -25,10 +28,13 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.function.IntFunction;
 import javax.annotation.Nonnull;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** This is a seekable input stream for GCS objects. It is backed by a GcsFileSystem instance. */
+/**
+ * This is a seekable input stream for GCS objects. It is backed by a GcsFileSystem instance.
+ */
 public class GoogleCloudStorageInputStream extends SeekableInputStream {
   private static final Logger LOG = LoggerFactory.getLogger(GoogleCloudStorageInputStream.class);
 
@@ -51,23 +57,29 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
 
   public static GoogleCloudStorageInputStream create(
       GcsFileSystem gcsFileSystem, GcsFileInfo gcsFileInfo) throws IOException {
-    checkState(gcsFileInfo != null, "GcsFileInfo shouldn't be null");
-    VectoredSeekableByteChannel channel =
-        gcsFileSystem.open(
-            gcsFileInfo,
-            gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions());
-    return new GoogleCloudStorageInputStream(gcsFileSystem, channel, gcsFileInfo);
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("create");
+    try (Scope scope = span.makeCurrent()) {
+      checkState(gcsFileInfo != null, "GcsFileInfo shouldn't be null");
+      VectoredSeekableByteChannel channel =
+          gcsFileSystem.open(
+              gcsFileInfo,
+              gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions());
+      return new GoogleCloudStorageInputStream(gcsFileSystem, channel, gcsFileInfo);
+    }
   }
 
   public static GoogleCloudStorageInputStream create(GcsFileSystem gcsFileSystem, URI path)
       throws IOException {
-    checkState(gcsFileSystem != null, "GcsFileSystem shouldn't be null");
-    GcsFileInfo fileInfo = gcsFileSystem.getFileInfo(path);
-    return create(gcsFileSystem, fileInfo);
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("create");
+    try (Scope scope = span.makeCurrent()) {
+      checkState(gcsFileSystem != null, "GcsFileSystem shouldn't be null");
+      GcsFileInfo fileInfo = gcsFileSystem.getFileInfo(path);
+      return create(gcsFileSystem, fileInfo);
+    }
   }
 
   private GoogleCloudStorageInputStream(
-      GcsFileSystem gcsFileSystem, VectoredSeekableByteChannel channel, GcsFileInfo gcsFileInfo) throws IOException {
+      GcsFileSystem gcsFileSystem, VectoredSeekableByteChannel channel, GcsFileInfo gcsFileInfo) {
     this.gcsFileSystem = gcsFileSystem;
     this.channel = channel;
     this.position = 0;
@@ -86,73 +98,87 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
 
   @Override
   public void seek(long newPos) throws IOException {
-    GoogleCloudStorageInputStreamMetrics.recordSeek();
-    checkArgument(newPos >= 0, "position can't be negative: %s", newPos);
-    checkNotClosed("Cannot seek: already closed");
-    position = newPos;
-    channel.position(newPos);
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("seek");
+    try (Scope scope = span.makeCurrent()) {
+      GoogleCloudStorageInputStreamMetrics.recordSeek();
+      checkArgument(newPos >= 0, "position can't be negative: %s", newPos);
+      checkNotClosed("Cannot seek: already closed");
+      position = newPos;
+      channel.position(newPos);
+    }
   }
 
   @Override
   public int read() throws IOException {
-    checkNotClosed("Cannot read: already closed");
-    // Delegate to the byte array read method to reuse the cache logic.
-    int bytesRead = read(singleByteBuffer.array(), 0, 1);
-    if (bytesRead == -1) {
-      return -1;
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("read");
+    try (Scope scope = span.makeCurrent()) {
+      checkNotClosed("Cannot read: already closed");
+      // Delegate to the byte array read method to reuse the cache logic.
+      int bytesRead = read(singleByteBuffer.array(), 0, 1);
+      if (bytesRead == -1) {
+        return -1;
+      }
+      return singleByteBuffer.array()[0] & 0xFF;
     }
-    return singleByteBuffer.array()[0] & 0xFF;
   }
 
   public int read(ByteBuffer byteBuffer) throws IOException {
-    checkNotClosed("Cannot read: already closed");
-    if (prefetchBuffer == null && position >= fileSize - prefetchSize) {
-      cacheObjectOrFooter();
-    }
-    int bytesRead;
-    if (prefetchBuffer != null && (position >= fileSize - prefetchSize)) {
-      bytesRead = serveFromCache(byteBuffer);
-    } else {
-      long channelPosition = channel.position();
-      checkState(
-          channelPosition == position,
-          "Channel position (%s) and stream position (%s) should be the same",
-          channelPosition,
-          position);
-
-      bytesRead = channel.read(byteBuffer);
-      if (bytesRead > 0) {
-        position += bytesRead;
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("read");
+    try (Scope scope = span.makeCurrent()) {
+      checkNotClosed("Cannot read: already closed");
+      if (prefetchBuffer == null && position >= fileSize - prefetchSize) {
+        cacheObjectOrFooter();
       }
+      int bytesRead;
+      if (prefetchBuffer != null && (position >= fileSize - prefetchSize)) {
+        bytesRead = serveFromCache(byteBuffer);
+      } else {
+        long channelPosition = channel.position();
+        checkState(
+            channelPosition == position,
+            "Channel position (%s) and stream position (%s) should be the same",
+            channelPosition,
+            position);
+
+        bytesRead = channel.read(byteBuffer);
+        if (bytesRead > 0) {
+          position += bytesRead;
+        }
+      }
+      GoogleCloudStorageInputStreamMetrics.recordRead(bytesRead);
+      return bytesRead;
     }
-    GoogleCloudStorageInputStreamMetrics.recordRead(bytesRead);
-    return bytesRead;
   }
 
   @Override
   public int read(@Nonnull byte[] buffer, int offset, int length) throws IOException {
-    checkNotClosed("Cannot read: already closed");
-    checkNotNull(buffer, "buffer must not be null");
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("read");
+    try (Scope scope = span.makeCurrent()) {
+      checkNotClosed("Cannot read: already closed");
+      checkNotNull(buffer, "buffer must not be null");
 
-    if (offset < 0 || length < 0 || length > buffer.length - offset) {
-      throw new IndexOutOfBoundsException();
+      if (offset < 0 || length < 0 || length > buffer.length - offset) {
+        throw new IndexOutOfBoundsException();
+      }
+      if (length == 0) {
+        return 0;
+      }
+      return read(ByteBuffer.wrap(buffer, offset, length));
     }
-    if (length == 0) {
-      return 0;
-    }
-    return read(ByteBuffer.wrap(buffer, offset, length));
   }
 
   @Override
   public void close() throws IOException {
-    if (!closed) {
-      GoogleCloudStorageInputStreamMetrics.recordClose();
-      closed = true;
-      if (channel != null) {
-        channel.close();
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("close");
+    try (Scope scope = span.makeCurrent()) {
+      if (!closed) {
+        GoogleCloudStorageInputStreamMetrics.recordClose();
+        closed = true;
+        if (channel != null) {
+          channel.close();
+        }
       }
     }
-//      GoogleCloudMonitoringMetricsManager.shutdown();
   }
 
   private void checkNotClosed(String msg) throws IOException {
@@ -163,59 +189,68 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
 
   @Override
   public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
-    try (VectoredSeekableByteChannel byteChannel =
-        gcsFileSystem.open(
-            gcsFileInfo,
-            gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions())) {
-      byteChannel.position(position);
-      int numberOfBytesRead = byteChannel.read(ByteBuffer.wrap(buffer, offset, length));
-      GoogleCloudStorageInputStreamMetrics.recordReadFully(numberOfBytesRead);
-      if (numberOfBytesRead < length) {
-        throw new EOFException(
-            "Reached the end of stream with "
-                + (length - numberOfBytesRead)
-                + " bytes left to read");
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("readFully");
+    try (Scope scope = span.makeCurrent()) {
+      try (VectoredSeekableByteChannel byteChannel =
+               gcsFileSystem.open(
+                   gcsFileInfo,
+                   gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions())) {
+        byteChannel.position(position);
+        int numberOfBytesRead = byteChannel.read(ByteBuffer.wrap(buffer, offset, length));
+        GoogleCloudStorageInputStreamMetrics.recordReadFully(numberOfBytesRead);
+        if (numberOfBytesRead < length) {
+          throw new EOFException(
+              "Reached the end of stream with "
+                  + (length - numberOfBytesRead)
+                  + " bytes left to read");
+        }
       }
     }
   }
 
   @Override
   public int readTail(byte[] buffer, int offset, int length) throws IOException {
-    try (VectoredSeekableByteChannel byteChannel =
-        gcsFileSystem.open(
-            gcsFileInfo,
-            gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions())) {
-      long size = gcsFileInfo.getItemInfo().getSize();
-      long startPosition = Math.max(0, size - offset);
-      byteChannel.position(startPosition);
-      int bytesRead = byteChannel.read(ByteBuffer.wrap(buffer, offset, length));
-      GoogleCloudStorageInputStreamMetrics.recordReadTail(bytesRead);
-      return bytesRead;
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("readTail");
+    try (Scope scope = span.makeCurrent()) {
+      try (VectoredSeekableByteChannel byteChannel =
+               gcsFileSystem.open(
+                   gcsFileInfo,
+                   gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions())) {
+        long size = gcsFileInfo.getItemInfo().getSize();
+        long startPosition = Math.max(0, size - offset);
+        byteChannel.position(startPosition);
+        int bytesRead = byteChannel.read(ByteBuffer.wrap(buffer, offset, length));
+        GoogleCloudStorageInputStreamMetrics.recordReadTail(bytesRead);
+        return bytesRead;
+      }
     }
   }
 
   @Override
   public void readVectored(List<GcsObjectRange> fileRanges, IntFunction<ByteBuffer> alloc)
       throws IOException {
-    GoogleCloudStorageInputStreamMetrics.recordReadVectored();
-    if (prefetchBuffer != null && prefetchSize == fileSize) {
-      // Entire object is cached, serve from prefetchBuffer
-      for (GcsObjectRange range : fileRanges) {
-        ByteBuffer dest = alloc.apply(range.getLength());
-        int bytesRead = serveFromCacheWithoutSeek(range.getOffset(), dest);
-        if (bytesRead < range.getLength()) {
-          range
-              .getByteBufferFuture()
-              .completeExceptionally(
-                  new EOFException(
-                      String.format("Error while populating range: %s, unexpected EOF", range)));
-        } else {
-          dest.flip();
-          range.getByteBufferFuture().complete(dest);
+    Span span = GoogleCloudStorageInputStreamTracer.startSpan("readVectored");
+    try (Scope scope = span.makeCurrent()) {
+      GoogleCloudStorageInputStreamMetrics.recordReadVectored();
+      if (prefetchBuffer != null && prefetchSize == fileSize) {
+        // Entire object is cached, serve from prefetchBuffer
+        for (GcsObjectRange range : fileRanges) {
+          ByteBuffer dest = alloc.apply(range.getLength());
+          int bytesRead = serveFromCacheWithoutSeek(range.getOffset(), dest);
+          if (bytesRead < range.getLength()) {
+            range
+                .getByteBufferFuture()
+                .completeExceptionally(
+                    new EOFException(
+                        String.format("Error while populating range: %s, unexpected EOF", range)));
+          } else {
+            dest.flip();
+            range.getByteBufferFuture().complete(dest);
+          }
         }
+      } else {
+        channel.readVectored(fileRanges, alloc);
       }
-    } else {
-      channel.readVectored(fileRanges, alloc);
     }
   }
 
