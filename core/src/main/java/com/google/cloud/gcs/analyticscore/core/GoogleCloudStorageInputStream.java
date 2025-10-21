@@ -122,6 +122,7 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
     if (bytesRead > 0) {
       position += bytesRead;
     }
+    GcsAnalyticsCoreInstrumentation.get().metrics().recordBytesRead(bytesRead);
     return bytesRead;
   }
 
@@ -136,6 +137,7 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
     if (length == 0) {
       return 0;
     }
+    GcsAnalyticsCoreInstrumentation.get().metrics().recordBytesRead(length);
     return read(ByteBuffer.wrap(buffer, offset, length));
   }
 
@@ -144,6 +146,7 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
     if (!closed) {
       closed = true;
       if (channel != null) {
+        GcsAnalyticsCoreInstrumentation.get().flush();
         channel.close();
       }
     }
@@ -158,9 +161,9 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
   @Override
   public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
     try (VectoredSeekableByteChannel byteChannel =
-        gcsFileSystem.open(
-            gcsFileInfo,
-            gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions())) {
+             gcsFileSystem.open(
+                 gcsFileInfo,
+                 gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions())) {
       byteChannel.position(position);
       int numberOfBytesRead = byteChannel.read(ByteBuffer.wrap(buffer, offset, length));
       if (numberOfBytesRead < length) {
@@ -175,9 +178,9 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
   @Override
   public int readTail(byte[] buffer, int offset, int length) throws IOException {
     try (VectoredSeekableByteChannel byteChannel =
-        gcsFileSystem.open(
-            gcsFileInfo,
-            gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions())) {
+             gcsFileSystem.open(
+                 gcsFileInfo,
+                 gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions())) {
       long size = gcsFileInfo.getItemInfo().getSize();
       long startPosition = Math.max(0, size - offset);
       byteChannel.position(startPosition);

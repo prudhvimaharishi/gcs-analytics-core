@@ -29,6 +29,8 @@ limitations under the License.
         <maven.compiler.source>11</maven.compiler.source>
         <maven.compiler.target>11</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <io.opentelemetry.version>1.40.0</io.opentelemetry.version>
+        <com.google.cloud.opentelemetry.version>0.36.0</com.google.cloud.opentelemetry.version>
     </properties>
 
     <dependencies>
@@ -78,6 +80,46 @@ limitations under the License.
             <groupId>org.mockito</groupId>
             <artifactId>mockito-junit-jupiter</artifactId>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-trace</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-logging</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-metrics</artifactId>
+            <version>${io.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.cloud.opentelemetry</groupId>
+            <artifactId>exporter-metrics</artifactId>
+            <version>${com.google.cloud.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.cloud.opentelemetry</groupId>
+            <artifactId>exporter-trace</artifactId>
+            <version>${com.google.cloud.opentelemetry.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.cloud.opentelemetry</groupId>
+            <artifactId>propagators-gcp</artifactId>
+            <version>0.36.0-alpha</version>
         </dependency>
     </dependencies>
 </project>
