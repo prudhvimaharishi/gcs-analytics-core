@@ -212,8 +212,10 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     readOptions
         .getDecryptionKey()
         .ifPresent(key -> sourceOptions.add(Storage.BlobSourceOption.decryptionKey(key)));
-
-    return storage.reader(blobId, sourceOptions.toArray(new Storage.BlobSourceOption[0]));
+    ReadChannel readChannel = storage.reader(blobId, sourceOptions.toArray(new Storage.BlobSourceOption[0]));
+    readOptions.getChunkSize().ifPresent(readChannel::setChunkSize);
+    
+    return readChannel;
   }
 
   private void validatePosition(long position) throws IOException {

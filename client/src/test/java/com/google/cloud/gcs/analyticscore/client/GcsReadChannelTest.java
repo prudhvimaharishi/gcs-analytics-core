@@ -18,6 +18,7 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.google.cloud.ReadChannel;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
@@ -95,6 +96,29 @@ class GcsReadChannelTest {
                 new GcsReadChannel(storage, null, TEST_GCS_READ_OPTIONS, executorServiceSupplier));
 
     assertThat(e).hasMessageThat().isEqualTo("Item info cannot be null");
+  }
+
+  @Test
+  void constructor_withChunkSize_setsChunkSizeOnReadChannel() throws IOException {
+    GcsItemId itemId =
+        GcsItemId.builder().setBucketName("test-bucket").setObjectName("test-object").build();
+    GcsItemInfo itemInfo =
+        GcsItemInfo.builder()
+            .setItemId(itemId)
+            .setSize(100)
+            .setContentGeneration(0L)
+            .build();
+    GcsReadOptions readOptions =
+        GcsReadOptions.builder().setProjectId(TEST_PROJECT_ID).setChunkSize(1024).build();
+    Storage mockStorage = Mockito.mock(Storage.class);
+    ReadChannel mockReadChannel = Mockito.mock(ReadChannel.class);
+    Mockito.when(mockStorage.reader(Mockito.any(BlobId.class), Mockito.any(Storage.BlobSourceOption[].class)))
+        .thenReturn(mockReadChannel);
+    Mockito.when(mockReadChannel.isOpen()).thenReturn(true);
+
+    new GcsReadChannel(mockStorage, itemInfo, readOptions, executorServiceSupplier);
+
+    Mockito.verify(mockReadChannel).setChunkSize(1024);
   }
 
   @Test
