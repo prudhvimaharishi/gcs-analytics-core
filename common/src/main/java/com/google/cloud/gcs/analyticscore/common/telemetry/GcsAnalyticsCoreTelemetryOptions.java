@@ -16,36 +16,25 @@
 package com.google.cloud.gcs.analyticscore.common.telemetry;
 
 import com.google.auto.value.AutoValue;
-import java.util.Optional;
+import com.google.common.collect.ImmutableList;
+import java.util.List;
 
-/** Represents a set of attributes for telemetry context. */
+/** Options for Telemetry. */
 @AutoValue
-public abstract class TelemetryAttributes {
+public abstract class GcsAnalyticsCoreTelemetryOptions {
 
-  public abstract Optional<String> className();
-
-  public abstract Optional<Integer> readOffset();
-
-  public abstract Optional<Integer> readLength();
-
-  public abstract Optional<String> threadId();
-
-  public abstract Builder toBuilder();
+  public abstract ImmutableList<GcsOperationMetricsListener> getGcsOperationMetricsListeners();
 
   public static Builder builder() {
-    return new AutoValue_TelemetryAttributes.Builder();
+    return new AutoValue_GcsAnalyticsCoreTelemetryOptions.Builder()
+        .setGcsOperationMetricsListeners(ImmutableList.of());
   }
 
   @AutoValue.Builder
   public abstract static class Builder {
-    public abstract Builder setClassName(String className);
+    public abstract Builder setGcsOperationMetricsListeners(
+        List<GcsOperationMetricsListener> gcsOperationMetricsListeners);
 
-    public abstract Builder setReadOffset(Integer readOffset);
-
-    public abstract Builder setReadLength(Integer readLength);
-
-    public abstract Builder setThreadId(String threadId);
-
-    public abstract TelemetryAttributes build();
+    public abstract GcsAnalyticsCoreTelemetryOptions build();
   }
 }
