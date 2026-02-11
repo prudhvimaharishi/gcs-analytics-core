@@ -142,8 +142,12 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     }
     fileSystemOptions
         .getAnalyticsCoreTelemetryOptions()
-        .getOperationListeners()
-        .forEach(Telemetry.getInstance()::removeListener);
+        .getCustomTelemetryOptions()
+        .ifPresent(
+            customTelemetryOptions ->
+                customTelemetryOptions
+                    .getOperationListeners()
+                    .forEach(Telemetry.getInstance()::removeListener));
     gcsClient.close();
   }
 
@@ -155,7 +159,13 @@ public class GcsFileSystemImpl implements GcsFileSystem {
 
   @VisibleForTesting
   void initializeTelemetry(TelemetryOptions telemetryOptions) {
-    telemetryOptions.getOperationListeners().forEach(Telemetry.getInstance()::addListener);
+    telemetryOptions
+        .getCustomTelemetryOptions()
+        .ifPresent(
+            customTelemetryOptions ->
+                customTelemetryOptions
+                    .getOperationListeners()
+                    .forEach(Telemetry.getInstance()::addListener));
   }
 
   @VisibleForTesting

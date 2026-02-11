@@ -16,22 +16,22 @@
 package com.google.cloud.gcs.analyticscore.common.telemetry;
 
 import com.google.auto.value.AutoValue;
-import com.google.common.collect.ImmutableList;
-import java.util.List;
+import java.util.Optional;
 
 /** Options for Telemetry. */
 @AutoValue
 public abstract class TelemetryOptions {
 
-  public abstract ImmutableList<OperationListener> getOperationListeners();
+  public abstract Optional<CustomTelemetryOptions> getCustomTelemetryOptions();
 
   public static Builder builder() {
-    return new AutoValue_TelemetryOptions.Builder().setOperationListeners(ImmutableList.of());
+    return new AutoValue_TelemetryOptions.Builder();
   }
 
   @AutoValue.Builder
   public abstract static class Builder {
-    public abstract Builder setOperationListeners(List<OperationListener> operationListeners);
+
+    public abstract Builder setCustomTelemetryOptions(CustomTelemetryOptions options);
 
     public abstract TelemetryOptions build();
   }
