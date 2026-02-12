@@ -20,6 +20,9 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auth.Credentials;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants;
+import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryOptions;
+import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryReporter;
+import com.google.cloud.gcs.analyticscore.common.telemetry.OperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.gcs.analyticscore.common.telemetry.TelemetryOptions;
 import com.google.cloud.storage.BlobId;
@@ -29,7 +32,9 @@ import com.google.common.base.Suppliers;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.io.IOException;
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -40,6 +45,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
   private final GcsClient gcsClient;
   private final GcsFileSystemOptions fileSystemOptions;
   private final Supplier<ExecutorService> executorServiceSupplier;
+  private final List<OperationListener> registeredListeners = new ArrayList<>();
 
   public GcsFileSystemImpl(GcsFileSystemOptions fileSystemOptions) {
     this.fileSystemOptions = fileSystemOptions;
@@ -148,17 +154,26 @@ public class GcsFileSystemImpl implements GcsFileSystem {
                 customTelemetryOptions
                     .getOperationListeners()
                     .forEach(Telemetry.getInstance()::removeListener));
-    gcsClient.close();
-  }
 
-  private static GcsClientOptions getGcsClientOptions(GcsFileSystemOptions fileSystemOptions) {
-    return fileSystemOptions.getGcsClientOptions() == null
-        ? GcsClientOptions.builder().build()
-        : fileSystemOptions.getGcsClientOptions();
+    for (OperationListener listener : registeredListeners) {
+      Telemetry.getInstance().removeListener(listener);
+    }
+    registeredListeners.clear();
+
+    gcsClient.close();
   }
 
   @VisibleForTesting
   void initializeTelemetry(TelemetryOptions telemetryOptions) {
+    telemetryOptions
+        .getLoggingTelemetryOptions()
+        .filter(LoggingTelemetryOptions::isEnabled)
+        .map(LoggingTelemetryReporter::new)
+        .ifPresent(
+            reporter -> {
+              this.registeredListeners.add(reporter);
+              Telemetry.getInstance().addListener(reporter);
+            });
     telemetryOptions
         .getCustomTelemetryOptions()
         .ifPresent(
@@ -182,5 +197,16 @@ public class GcsFileSystemImpl implements GcsFileSystem {
                     .setNameFormat("gcs-filesystem-range-pool-%d")
                     .setDaemon(true)
                     .build()));
+  }
+
+  @VisibleForTesting
+  List<OperationListener> getRegisteredListeners() {
+    return registeredListeners;
+  }
+
+  private static GcsClientOptions getGcsClientOptions(GcsFileSystemOptions fileSystemOptions) {
+    return fileSystemOptions.getGcsClientOptions() == null
+        ? GcsClientOptions.builder().build()
+        : fileSystemOptions.getGcsClientOptions();
   }
 }

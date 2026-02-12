@@ -24,6 +24,8 @@ public abstract class TelemetryOptions {
 
   public abstract Optional<CustomTelemetryOptions> getCustomTelemetryOptions();
 
+  public abstract Optional<LoggingTelemetryOptions> getLoggingTelemetryOptions();
+
   public static Builder builder() {
     return new AutoValue_TelemetryOptions.Builder();
   }
@@ -32,6 +34,8 @@ public abstract class TelemetryOptions {
   public abstract static class Builder {
 
     public abstract Builder setCustomTelemetryOptions(CustomTelemetryOptions options);
+
+    public abstract Builder setLoggingTelemetryOptions(LoggingTelemetryOptions options);
 
     public abstract TelemetryOptions build();
   }
