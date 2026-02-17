@@ -47,6 +47,8 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   protected GcsItemId itemId;
   private long position = 0;
   private Supplier<ExecutorService> executorServiceSupplier;
+  private static final ImmutableMap<String, String> COMMON_ATTRIBUTES =
+      ImmutableMap.of(Attribute.CLASS_NAME.name(), GcsReadChannel.class.getName());
 
   GcsReadChannel(
       Storage storage,
@@ -140,7 +142,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
         Operation.builder()
             .setName(GcsAnalyticsCoreTelemetryConstants.Operation.VECTORED_READ.name())
             .setDurationMetricName(Metric.READ_DURATION.name())
-            .setAttributes(buildCommonAttributes())
+            .setAttributes(COMMON_ATTRIBUTES)
             .build();
     ExecutorService executorService = executorServiceSupplier.get();
     checkNotNull(executorService, "Thread pool must not be null");
@@ -275,7 +277,4 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     }
   }
 
-  private static ImmutableMap<String, String> buildCommonAttributes() {
-    return ImmutableMap.of(Attribute.CLASS_NAME.name(), GcsReadChannel.class.getName());
-  }
 }
