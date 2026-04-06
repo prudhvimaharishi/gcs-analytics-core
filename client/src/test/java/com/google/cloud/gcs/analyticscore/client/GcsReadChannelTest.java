@@ -56,6 +56,13 @@ class GcsReadChannelTest {
   private static GcsReadOptions TEST_GCS_READ_OPTIONS =
       GcsReadOptions.builder().setUserProjectId(TEST_PROJECT_ID).build();
 
+  private static GcsReadOptions ADAPTIVE_GCS_READ_OPTIONS =
+      GcsReadOptions.builder()
+          .setUserProjectId(TEST_PROJECT_ID)
+          .setAdaptiveRangeReadEnabled(true)
+          .setFileAccessPattern(FileAccessPattern.AUTO)
+          .build();
+
   private final Supplier<ExecutorService> executorServiceSupplier =
       Suppliers.memoize(() -> Executors.newFixedThreadPool(30));
   private final Storage storage = Mockito.spy(LocalStorageHelper.getOptions().getService());
@@ -671,6 +678,31 @@ class GcsReadChannelTest {
     assertThat(e.getCause().getCause())
         .hasMessageThat()
         .contains("EOF reached while reading combinedObjectRange");
+  }
+
+  @Test
+  void read_adaptive_fillsBuffers() throws IOException {
+    GcsItemId itemId =
+        GcsItemId.builder().setBucketName("test-bucket").setObjectName("test-object").build();
+    String objectData = "hello world";
+    GcsItemInfo itemInfo =
+        GcsItemInfo.builder()
+            .setItemId(itemId)
+            .setSize(objectData.length())
+            .setContentGeneration(0L)
+            .build();
+    createBlobInStorage(
+        BlobId.of(itemId.getBucketName(), itemId.getObjectName().get(), 0L), objectData);
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage, itemInfo, ADAPTIVE_GCS_READ_OPTIONS, executorServiceSupplier, telemetry);
+    ByteBuffer buffer = ByteBuffer.allocate(objectData.length());
+
+    int bytesRead = gcsReadChannel.read(buffer);
+
+    assertThat(bytesRead).isEqualTo(objectData.length());
+    assertThat(new String(buffer.array(), StandardCharsets.UTF_8)).isEqualTo(objectData);
+    assertThat(gcsReadChannel.position()).isEqualTo(objectData.length());
   }
 
   private GcsObjectRange createRange(long offset, int length) {
