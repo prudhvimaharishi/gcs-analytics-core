@@ -105,11 +105,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
       GcsItemInfo itemInfo,
       long position)
       throws IOException {
-    if (readOptions.getFileAccessPattern() == FileAccessPattern.RANDOM) {
-      return new RandomReadStrategy(storage, itemId, readOptions, itemInfo);
-    } else {
-      return new SequentialReadStrategy(storage, itemId, readOptions, itemInfo);
-    }
+    return new AdaptiveReadStrategy(storage, itemId, readOptions, itemInfo);
   }
 
   @Override

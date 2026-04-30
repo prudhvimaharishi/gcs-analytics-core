@@ -896,7 +896,9 @@ class GcsReadChannelTest {
     try (FakeGcsReadChannel gcsReadChannel =
         new FakeGcsReadChannel(
             storage, itemInfo, readOptions, executorServiceSupplier, telemetry)) {
-      assertThat(gcsReadChannel.getTrackingReadStrategy().getDelegate())
+      ReadStrategy strategy = gcsReadChannel.getTrackingReadStrategy().getDelegate();
+      assertThat(strategy).isInstanceOf(AdaptiveReadStrategy.class);
+      assertThat(((AdaptiveReadStrategy) strategy).getDelegateStrategy())
           .isInstanceOf(RandomReadStrategy.class);
     }
   }
@@ -914,7 +916,9 @@ class GcsReadChannelTest {
     try (FakeGcsReadChannel gcsReadChannel =
         new FakeGcsReadChannel(
             storage, itemInfo, readOptions, executorServiceSupplier, telemetry)) {
-      assertThat(gcsReadChannel.getTrackingReadStrategy().getDelegate())
+      ReadStrategy strategy = gcsReadChannel.getTrackingReadStrategy().getDelegate();
+      assertThat(strategy).isInstanceOf(AdaptiveReadStrategy.class);
+      assertThat(((AdaptiveReadStrategy) strategy).getDelegateStrategy())
           .isInstanceOf(SequentialReadStrategy.class);
     }
   }
