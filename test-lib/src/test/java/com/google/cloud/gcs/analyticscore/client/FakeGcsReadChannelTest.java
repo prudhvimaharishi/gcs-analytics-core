@@ -97,11 +97,10 @@ class FakeGcsReadChannelTest {
               Storage storage,
               GcsItemId itemId,
               GcsReadOptions readOptions,
-              GcsItemInfo itemInfo,
-              long position)
+              GcsItemInfo itemInfo)
               throws IOException {
             ReadStrategy strategy =
-                super.createReadStrategy(storage, itemId, readOptions, itemInfo, position);
+                super.createReadStrategy(storage, itemId, readOptions, itemInfo);
             ((TrackingReadStrategy) strategy).setEofAtCall(1);
             return strategy;
           }

@@ -58,6 +58,13 @@ class GcsReadOptionsTest {
     assertThat(readOptions.getSmallObjectCacheSize()).isEqualTo(102400);
     assertThat(readOptions.getInplaceSeekLimit()).isEqualTo(16777216);
     assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.RANDOM);
+    properties =
+        ImmutableMap.<String, String>builder()
+            .put("gcs.analytics-core.read.file-access-pattern", "auto_sequential")
+            .build();
+    readOptions = GcsReadOptions.createFromOptions(properties, prefix);
+    
+    assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.AUTO_SEQUENTIAL);
     assertThat(vectoredReadOptions.getMaxMergeGap()).isEqualTo(1024);
     assertThat(vectoredReadOptions.getMaxMergeSize()).isEqualTo(2048);
   }

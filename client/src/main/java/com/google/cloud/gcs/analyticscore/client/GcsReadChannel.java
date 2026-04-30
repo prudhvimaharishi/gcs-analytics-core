@@ -95,21 +95,16 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     this.executorServiceSupplier = executorServiceSupplier;
     this.telemetry = telemetry;
     this.strategy =
-        createReadStrategy(storage, itemId, readOptions, itemInfo, gcsReadChannelPosition);
+        createReadStrategy(storage, itemId, readOptions, itemInfo);
   }
 
   protected ReadStrategy createReadStrategy(
       Storage storage,
       GcsItemId itemId,
       GcsReadOptions readOptions,
-      GcsItemInfo itemInfo,
-      long position)
+      GcsItemInfo itemInfo)
       throws IOException {
-    if (readOptions.getFileAccessPattern() == FileAccessPattern.RANDOM) {
-      return new RandomReadStrategy(storage, itemId, readOptions, itemInfo);
-    } else {
-      return new SequentialReadStrategy(storage, itemId, readOptions, itemInfo);
-    }
+    return new AdaptiveReadStrategy(storage, itemId, readOptions, itemInfo);
   }
 
   @Override

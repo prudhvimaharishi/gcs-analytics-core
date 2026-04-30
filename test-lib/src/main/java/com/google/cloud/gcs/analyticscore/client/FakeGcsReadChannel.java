@@ -54,11 +54,10 @@ public class FakeGcsReadChannel extends GcsReadChannel {
       Storage storage,
       GcsItemId itemId,
       GcsReadOptions readOptions,
-      GcsItemInfo itemInfo,
-      long position)
+      GcsItemInfo itemInfo)
       throws IOException {
     ReadStrategy realStrategy =
-        super.createReadStrategy(storage, itemId, readOptions, itemInfo, position);
+        super.createReadStrategy(storage, itemId, readOptions, itemInfo);
 
     trackingStrategy = new TrackingReadStrategy(realStrategy);
     return trackingStrategy;
@@ -74,7 +73,7 @@ public class FakeGcsReadChannel extends GcsReadChannel {
 
   public ReadChannel openSdkReadChannel(GcsItemId itemId, GcsReadOptions readOptions)
       throws IOException {
-    ReadStrategy strategy = createReadStrategy(storage, itemId, readOptions, itemInfo, 0);
+    ReadStrategy strategy = createReadStrategy(storage, itemId, readOptions, itemInfo);
     return strategy.getReadChannel(0, 0);
   }
 
