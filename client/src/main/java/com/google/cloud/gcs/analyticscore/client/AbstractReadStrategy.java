@@ -32,8 +32,7 @@ abstract class AbstractReadStrategy implements ReadStrategy {
   protected final GcsItemInfo itemInfo;
 
   private static final int SKIP_BUFFER_SIZE = 128 * 1024; // 128 KiB
-  protected static final ThreadLocal<ByteBuffer> SKIP_BUFFER_HOLDER =
-      ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(SKIP_BUFFER_SIZE));
+  private ByteBuffer skipBuffer;
 
   protected ReadChannel channel;
   protected long position = 0;
@@ -92,7 +91,9 @@ abstract class AbstractReadStrategy implements ReadStrategy {
   }
 
   boolean skipInPlace(long seekDistance) throws IOException {
-    ByteBuffer skipBuffer = SKIP_BUFFER_HOLDER.get();
+    if (skipBuffer == null) {
+      skipBuffer = ByteBuffer.allocate(SKIP_BUFFER_SIZE);
+    }
     while (seekDistance > 0) {
       int bufferSize = (int) Math.min((long) skipBuffer.capacity(), seekDistance);
       skipBuffer.clear();
