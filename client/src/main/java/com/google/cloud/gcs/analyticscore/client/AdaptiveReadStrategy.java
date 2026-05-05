@@ -22,12 +22,15 @@ import java.io.IOException;
 class AdaptiveReadStrategy extends AbstractReadStrategy {
   private ReadStrategy currentStrategy;
   private boolean isRandomMode = false;
+  private int sequentialReadCount = 0;
+  private long lastReadEndPosition = 0;
 
   AdaptiveReadStrategy(
       Storage storage, GcsItemId itemId, GcsReadOptions options, GcsItemInfo itemInfo)
       throws IOException {
     super(storage, itemId, options, itemInfo);
-    this.isRandomMode = options.getFileAccessPattern() == FileAccessPattern.RANDOM;
+    this.isRandomMode = options.getFileAccessPattern() == FileAccessPattern.RANDOM
+        || options.getFileAccessPattern() == FileAccessPattern.AUTO_RANDOM;
     this.currentStrategy =
         isRandomMode
             ? new RandomReadStrategy(storage, itemId, options, itemInfo)
@@ -53,6 +56,7 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
   public void position(long newPosition) {
     super.position(newPosition);
     currentStrategy.position(newPosition);
+    this.lastReadEndPosition = newPosition;
   }
 
   @Override
@@ -67,6 +71,8 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
   private void updateStrategy(long requestedPosition) throws IOException {
     if (shouldSwitchToRandom(requestedPosition)) {
       switchToRandom();
+    } else if (shouldSwitchToSequential(requestedPosition)) {
+      switchToSequential();
     }
   }
 
@@ -74,7 +80,7 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
     if (isRandomMode || options.getFileAccessPattern() != FileAccessPattern.AUTO_SEQUENTIAL) {
       return false;
     }
-    long seekDistance = requestedPosition - position;
+    long seekDistance = requestedPosition - lastReadEndPosition;
 
     return seekDistance < 0 || seekDistance > options.getInplaceSeekLimit();
   }
@@ -83,5 +89,26 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
     isRandomMode = true;
     currentStrategy.close();
     currentStrategy = new RandomReadStrategy(storage, itemId, options, itemInfo);
+  }
+
+  private boolean shouldSwitchToSequential(long requestedPosition) {
+    if (!isRandomMode || options.getFileAccessPattern() != FileAccessPattern.AUTO_RANDOM) {
+      return false;
+    }
+    long seekDistance = requestedPosition - lastReadEndPosition;
+    if (seekDistance < 0 || seekDistance > options.getInplaceSeekLimit()) {
+      sequentialReadCount = 0;
+      return false;
+    }
+    sequentialReadCount++;
+
+    return sequentialReadCount >= options.getAdaptiveReadSequentialReadThreshold();
+  }
+
+  private void switchToSequential() throws IOException {
+    isRandomMode = false;
+    sequentialReadCount = 0;
+    currentStrategy.close();
+    currentStrategy = new SequentialReadStrategy(storage, itemId, options, itemInfo);
   }
 }
