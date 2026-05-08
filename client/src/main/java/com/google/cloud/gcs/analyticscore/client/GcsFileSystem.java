@@ -19,6 +19,8 @@ import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.util.Optional;
 
 public interface GcsFileSystem extends AutoCloseable {
 
@@ -66,6 +68,10 @@ public interface GcsFileSystem extends AutoCloseable {
   Telemetry getTelemetry();
 
   /** Close the file system. */
+  Optional<ByteBuffer> getCachedFooter(GcsItemId itemId);
+
+  void cacheFooter(GcsItemId itemId, ByteBuffer footer);
+
   @Override
   void close();
 }
