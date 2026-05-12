@@ -18,5 +18,6 @@ package com.google.cloud.gcs.analyticscore.client;
 
 public enum FileAccessPattern {
   RANDOM,
-  SEQUENTIAL
+  SEQUENTIAL,
+  AUTO_SEQUENTIAL
 }

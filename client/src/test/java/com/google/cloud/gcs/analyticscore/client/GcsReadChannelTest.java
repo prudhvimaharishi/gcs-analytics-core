@@ -800,11 +800,10 @@ class GcsReadChannelTest {
               Storage storage,
               GcsItemId itemId,
               GcsReadOptions readOptions,
-              GcsItemInfo itemInfo,
-              long position)
+              GcsItemInfo itemInfo)
               throws IOException {
             ReadStrategy strategy =
-                super.createReadStrategy(storage, itemId, readOptions, itemInfo, position);
+                super.createReadStrategy(storage, itemId, readOptions, itemInfo);
             ((TrackingReadStrategy) strategy).setEofAtCall(1);
             return strategy;
           }
@@ -838,11 +837,10 @@ class GcsReadChannelTest {
               Storage storage,
               GcsItemId itemId,
               GcsReadOptions readOptions,
-              GcsItemInfo itemInfo,
-              long position)
+              GcsItemInfo itemInfo)
               throws IOException {
             ReadStrategy strategy =
-                super.createReadStrategy(storage, itemId, readOptions, itemInfo, position);
+                super.createReadStrategy(storage, itemId, readOptions, itemInfo);
             ((TrackingReadStrategy) strategy).setEofAtCall(1);
             return strategy;
           }
@@ -875,8 +873,7 @@ class GcsReadChannelTest {
                       Storage storage,
                       GcsItemId itemId,
                       GcsReadOptions readOptions,
-                      GcsItemInfo itemInfo,
-                      long position) {
+                      GcsItemInfo itemInfo) {
                     throw new RuntimeException("Simulated IO error");
                   }
                 });
@@ -896,7 +893,10 @@ class GcsReadChannelTest {
     try (FakeGcsReadChannel gcsReadChannel =
         new FakeGcsReadChannel(
             storage, itemInfo, readOptions, executorServiceSupplier, telemetry)) {
-      assertThat(gcsReadChannel.getTrackingReadStrategy().getDelegate())
+      ReadStrategy strategy = gcsReadChannel.getTrackingReadStrategy().getDelegate();
+
+      assertThat(strategy).isInstanceOf(AdaptiveReadStrategy.class);
+      assertThat(((AdaptiveReadStrategy) strategy).getDelegateStrategy())
           .isInstanceOf(RandomReadStrategy.class);
     }
   }
@@ -914,7 +914,10 @@ class GcsReadChannelTest {
     try (FakeGcsReadChannel gcsReadChannel =
         new FakeGcsReadChannel(
             storage, itemInfo, readOptions, executorServiceSupplier, telemetry)) {
-      assertThat(gcsReadChannel.getTrackingReadStrategy().getDelegate())
+      ReadStrategy strategy = gcsReadChannel.getTrackingReadStrategy().getDelegate();
+      
+      assertThat(strategy).isInstanceOf(AdaptiveReadStrategy.class);
+      assertThat(((AdaptiveReadStrategy) strategy).getDelegateStrategy())
           .isInstanceOf(SequentialReadStrategy.class);
     }
   }
@@ -936,11 +939,10 @@ class GcsReadChannelTest {
               Storage storage,
               GcsItemId itemId,
               GcsReadOptions readOptions,
-              GcsItemInfo itemInfo,
-              long position)
+              GcsItemInfo itemInfo)
               throws IOException {
             ReadStrategy strategy =
-                super.createReadStrategy(storage, itemId, readOptions, itemInfo, position);
+                super.createReadStrategy(storage, itemId, readOptions, itemInfo);
             ((TrackingReadStrategy) strategy).setEofAtCall(1);
             return strategy;
           }
