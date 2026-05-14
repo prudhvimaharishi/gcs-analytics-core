@@ -797,10 +797,7 @@ class GcsReadChannelTest {
         new FakeGcsReadChannel(storage, itemInfo, readOptions, executorServiceSupplier, telemetry) {
           @Override
           protected ReadStrategy createReadStrategy(
-              Storage storage,
-              GcsItemId itemId,
-              GcsReadOptions readOptions,
-              GcsItemInfo itemInfo)
+              Storage storage, GcsItemId itemId, GcsReadOptions readOptions, GcsItemInfo itemInfo)
               throws IOException {
             ReadStrategy strategy =
                 super.createReadStrategy(storage, itemId, readOptions, itemInfo);
@@ -834,10 +831,7 @@ class GcsReadChannelTest {
         new FakeGcsReadChannel(storage, itemId, readOptions, executorServiceSupplier, telemetry) {
           @Override
           protected ReadStrategy createReadStrategy(
-              Storage storage,
-              GcsItemId itemId,
-              GcsReadOptions readOptions,
-              GcsItemInfo itemInfo)
+              Storage storage, GcsItemId itemId, GcsReadOptions readOptions, GcsItemInfo itemInfo)
               throws IOException {
             ReadStrategy strategy =
                 super.createReadStrategy(storage, itemId, readOptions, itemInfo);
@@ -915,7 +909,7 @@ class GcsReadChannelTest {
         new FakeGcsReadChannel(
             storage, itemInfo, readOptions, executorServiceSupplier, telemetry)) {
       ReadStrategy strategy = gcsReadChannel.getTrackingReadStrategy().getDelegate();
-      
+
       assertThat(strategy).isInstanceOf(AdaptiveReadStrategy.class);
       assertThat(((AdaptiveReadStrategy) strategy).getDelegateStrategy())
           .isInstanceOf(SequentialReadStrategy.class);
@@ -936,10 +930,7 @@ class GcsReadChannelTest {
         new FakeGcsReadChannel(storage, itemInfo, readOptions, executorServiceSupplier, telemetry) {
           @Override
           protected ReadStrategy createReadStrategy(
-              Storage storage,
-              GcsItemId itemId,
-              GcsReadOptions readOptions,
-              GcsItemInfo itemInfo)
+              Storage storage, GcsItemId itemId, GcsReadOptions readOptions, GcsItemInfo itemInfo)
               throws IOException {
             ReadStrategy strategy =
                 super.createReadStrategy(storage, itemId, readOptions, itemInfo);
