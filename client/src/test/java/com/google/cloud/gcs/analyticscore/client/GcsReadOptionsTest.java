@@ -44,6 +44,7 @@ class GcsReadOptionsTest {
             .put("gcs.analytics-core.read.inplace-seek-limit-bytes", "16777216")
             .put("gcs.analytics-core.read.file-access-pattern", "random")
             .put("gcs.analytics-core.adaptive-read.sequential-read-threshold", "5")
+            .put("gcs.analytics-core.random-read.min-request-size", "65536")
             .build();
     String prefix = "gcs.";
 
@@ -60,12 +61,13 @@ class GcsReadOptionsTest {
     assertThat(readOptions.getInplaceSeekLimit()).isEqualTo(16777216);
     assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.RANDOM);
     assertThat(readOptions.getAdaptiveReadSequentialReadThreshold()).isEqualTo(5);
+    assertThat(readOptions.getRandomReadMinRequestSize()).isEqualTo(65536);
     properties =
         ImmutableMap.<String, String>builder()
             .put("gcs.analytics-core.read.file-access-pattern", "auto_sequential")
             .build();
     readOptions = GcsReadOptions.createFromOptions(properties, prefix);
-    
+
     assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.AUTO_SEQUENTIAL);
     assertThat(vectoredReadOptions.getMaxMergeGap()).isEqualTo(1024);
     assertThat(vectoredReadOptions.getMaxMergeSize()).isEqualTo(2048);
@@ -89,6 +91,7 @@ class GcsReadOptionsTest {
     assertThat(readOptions.getInplaceSeekLimit()).isEqualTo(128 * 1024);
     assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.SEQUENTIAL);
     assertThat(readOptions.getAdaptiveReadSequentialReadThreshold()).isEqualTo(3);
+    assertThat(readOptions.getRandomReadMinRequestSize()).isEqualTo(0);
     assertThat(vectoredReadOptions.getMaxMergeGap()).isEqualTo(4 * 1024);
     assertThat(vectoredReadOptions.getMaxMergeSize()).isEqualTo(8 * 1024 * 1024);
   }
@@ -101,6 +104,7 @@ class GcsReadOptionsTest {
         "gcs.analytics-core.large-file.footer.prefetch.size-bytes",
         "gcs.analytics-core.read.inplace-seek-limit-bytes",
         "gcs.analytics-core.adaptive-read.sequential-read-threshold",
+        "gcs.analytics-core.random-read.min-request-size",
       })
   void createFromOptions_integerValuesGreaterThanIntegerMax_throwsIllegalArgumentException(
       String propertyKey) {
