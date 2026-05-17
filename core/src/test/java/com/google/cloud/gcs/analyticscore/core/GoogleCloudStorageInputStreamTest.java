@@ -715,7 +715,7 @@ class GoogleCloudStorageInputStreamTest {
   void readVectored_delegatesToReadChannelAndDoesNotChangeState() throws IOException {
     googleCloudStorageInputStream = defaultGcsInputStream();
     long positionBeforeVectoredRead = googleCloudStorageInputStream.getPos();
-    googleCloudStorageInputStream.readVectored(any(), any());
+    googleCloudStorageInputStream.readVectored(List.of(), size -> ByteBuffer.allocate(size));
 
     verify(mockChannel).readVectored(any(), any());
     assertThat(mockChannel.position()).isEqualTo(positionBeforeVectoredRead);
@@ -1140,8 +1140,8 @@ class GoogleCloudStorageInputStreamTest {
     googleCloudStorageInputStream =
         GoogleCloudStorageInputStream.create(
             fakeGcsFileSystem, URI.create("gs://test-bucket/test-object"));
-    GcsObjectRange range1 = createGcsObjectRange(/* offset= */ 1000, /* length= */ 100);
-    googleCloudStorageInputStream.read(); // caches the object
+    GcsObjectRange range1 = createGcsObjectRange(1000, 100);
+    googleCloudStorageInputStream.read();
 
     googleCloudStorageInputStream.readVectored(
         List.of(range1), (size) -> ByteBuffer.allocate(size));

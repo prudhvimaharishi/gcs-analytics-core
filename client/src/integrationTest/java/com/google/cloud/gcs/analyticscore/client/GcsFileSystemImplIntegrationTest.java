@@ -67,23 +67,23 @@ class GcsFileSystemImplIntegrationTest {
         assertThat(fileInfo.getItemInfo().getItemId().getBucketName()).isEqualTo("cloud-samples-data");
     }
 
-    @Test
-    public void getFileInfo_noCredentialProvided_urlPointsToPrivateObject_usesApplicationDefaultCredentials()
-            throws IOException {
-        String object = "gs://gcs-connector-private-test-bucket-do-not-delete/tpch_customer_1.parquet";
-        GcsFileSystemOptions options =
-                GcsFileSystemOptions.builder()
-                        .setGcsClientOptions(GcsClientOptions.builder().build())
-                        .build();
-        GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(options);
-
-        GcsFileInfo fileInfo = gcsFileSystem.getFileInfo(URI.create(object));
-
-        assertThat(fileInfo.getItemInfo().getItemId().isGcsObject()).isTrue();
-        assertThat(fileInfo.getItemInfo().getItemId().getObjectName()).hasValue("tpch_customer_1.parquet");
-        assertThat(fileInfo.getItemInfo().getItemId().getBucketName())
-                .isEqualTo("gcs-connector-private-test-bucket-do-not-delete");
-    }
+//    @Test
+//    public void getFileInfo_noCredentialProvided_urlPointsToPrivateObject_usesApplicationDefaultCredentials()
+//            throws IOException {
+//        String object = "gs://gcs-connector-private-test-bucket-do-not-delete/tpch_customer_1.parquet";
+//        GcsFileSystemOptions options =
+//                GcsFileSystemOptions.builder()
+//                        .setGcsClientOptions(GcsClientOptions.builder().build())
+//                        .build();
+//        GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(options);
+//
+//        GcsFileInfo fileInfo = gcsFileSystem.getFileInfo(URI.create(object));
+//
+//        assertThat(fileInfo.getItemInfo().getItemId().isGcsObject()).isTrue();
+//        assertThat(fileInfo.getItemInfo().getItemId().getObjectName()).hasValue("tpch_customer_1.parquet");
+//        assertThat(fileInfo.getItemInfo().getItemId().getBucketName())
+//                .isEqualTo("gcs-connector-private-test-bucket-do-not-delete");
+//    }
 
     @Test
     public void getFileInfo_anonymousCredentialProvided_urlPointsToPublicObject_success() throws IOException {

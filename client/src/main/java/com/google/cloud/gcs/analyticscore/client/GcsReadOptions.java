@@ -33,11 +33,17 @@ public abstract class GcsReadOptions {
   private static final String LARGE_FILE_FOOTER_PREFETCH_SIZE_KEY =
       "analytics-core.large-file.footer.prefetch.size-bytes";
   private static final String USER_PROJECT_KEY = "user-project";
+  private static final String PARQUET_METADATA_CACHE_ENABLED_KEY =
+      "analytics-core.parquet-metadata-cache.enabled";
+  private static final String CACHED_PARQUET_METADATA_ENABLED_KEY =
+      "analytics-core.cached-parquet-metadata.enabled";
 
   private static final boolean DEFAULT_FOOTER_PREFETCH_ENABLED = true;
   private static final int DEFAULT_SMALL_FILE_FOOTER_PREFETCH_SIZE = 100 * 1024; // 100kb
   private static final int DEFAULT_LARGE_FILE_FOOTER_PREFETCH_SIZE = 1024 * 1024; // 1mb
   private static final int DEFAULT_SMALL_FILE_CACHE_THRESHOLD = 0; // 0 bytes = disabled
+  private static final boolean DEFAULT_PARQUET_METADATA_CACHE_ENABLED = false;
+  private static final boolean DEFAULT_CACHED_PARQUET_METADATA_ENABLED = true;
 
   public abstract Optional<Integer> getChunkSize();
 
@@ -57,13 +63,19 @@ public abstract class GcsReadOptions {
 
   public abstract Builder toBuilder();
 
+  public abstract boolean isParquetMetadataCacheEnabled();
+
+  public abstract boolean isCachedParquetMetadataEnabled();
+
   public static Builder builder() {
     return new AutoValue_GcsReadOptions.Builder()
         .setGcsVectoredReadOptions(GcsVectoredReadOptions.builder().build())
         .setFooterPrefetchEnabled(DEFAULT_FOOTER_PREFETCH_ENABLED)
         .setFooterPrefetchSizeSmallFile(DEFAULT_SMALL_FILE_FOOTER_PREFETCH_SIZE)
         .setFooterPrefetchSizeLargeFile(DEFAULT_LARGE_FILE_FOOTER_PREFETCH_SIZE)
-        .setSmallObjectCacheSize(DEFAULT_SMALL_FILE_CACHE_THRESHOLD);
+        .setSmallObjectCacheSize(DEFAULT_SMALL_FILE_CACHE_THRESHOLD)
+        .setParquetMetadataCacheEnabled(DEFAULT_PARQUET_METADATA_CACHE_ENABLED)
+        .setCachedParquetMetadataEnabled(DEFAULT_CACHED_PARQUET_METADATA_ENABLED);
   }
 
   public static GcsReadOptions createFromOptions(
@@ -95,6 +107,17 @@ public abstract class GcsReadOptions {
       optionsBuilder.setSmallObjectCacheSize(
           safeParseInteger(analyticsCoreOptions, prefix + SMALL_FILE_CACHE_THRESHOLD_KEY));
     }
+    if (analyticsCoreOptions.containsKey(prefix + PARQUET_METADATA_CACHE_ENABLED_KEY)) {
+      optionsBuilder.setParquetMetadataCacheEnabled(
+          Boolean.parseBoolean(
+              analyticsCoreOptions.get(prefix + PARQUET_METADATA_CACHE_ENABLED_KEY)));
+    }
+    if (analyticsCoreOptions.containsKey(prefix + CACHED_PARQUET_METADATA_ENABLED_KEY)) {
+      optionsBuilder.setCachedParquetMetadataEnabled(
+          Boolean.parseBoolean(
+              analyticsCoreOptions.get(prefix + CACHED_PARQUET_METADATA_ENABLED_KEY)));
+    }
+
     optionsBuilder.setGcsVectoredReadOptions(
         GcsVectoredReadOptions.createFromOptions(analyticsCoreOptions, prefix));
 
@@ -131,6 +154,10 @@ public abstract class GcsReadOptions {
     public abstract Builder setFooterPrefetchSizeLargeFile(int footerPrefetchSizeLargeFile);
 
     public abstract Builder setSmallObjectCacheSize(int smallObjectCacheSize);
+
+    public abstract Builder setParquetMetadataCacheEnabled(boolean enabled);
+
+    public abstract Builder setCachedParquetMetadataEnabled(boolean enabled);
 
     public abstract GcsReadOptions build();
   }

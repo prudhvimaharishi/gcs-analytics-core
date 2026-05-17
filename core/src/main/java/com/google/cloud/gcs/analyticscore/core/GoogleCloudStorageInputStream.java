@@ -21,6 +21,7 @@ import com.google.cloud.gcs.analyticscore.client.*;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Attribute;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Operation;
+import com.google.cloud.gcs.analyticscore.core.ParquetMetadataCache.ParquetObjectMetadata;
 import com.google.cloud.storage.BlobId;
 import com.google.common.collect.ImmutableMap;
 import java.io.EOFException;
@@ -30,6 +31,7 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.IntFunction;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
@@ -51,10 +53,11 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
 
   private volatile boolean closed;
 
-  // Unified cache for small objects or footers.
-  private long prefetchSize;
   private long fileSize;
-  private volatile ByteBuffer prefetchBuffer;
+  private ParquetMetadataCache parquetMetadataCache;
+  private Optional<ParquetObjectMetadata> cachedParquetMetadata;
+  private ByteBuffer prefetchBuffer;
+  private long prefetchSize;
 
   private GcsFileInfo gcsFileInfo;
 
@@ -95,6 +98,13 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
     this.gcsItemId = itemId;
     this.position = 0;
     this.commonAttributes = buildCommonAttributes();
+    GcsReadOptions readOptions =
+        gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions();
+    if (readOptions.isParquetMetadataCacheEnabled()) {
+      this.parquetMetadataCache = ParquetMetadataCache.getInstance(itemId, "gcsio");
+    } else {
+      this.parquetMetadataCache = null;
+    }
   }
 
   @Override
@@ -149,7 +159,51 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
             telemetryAttributes,
             recorder -> {
               checkNotClosed("Cannot read: already closed");
+
+              GcsReadOptions readOptions =
+                  gcsFileSystem.getFileSystemOptions().getGcsClientOptions().getGcsReadOptions();
+              if (readOptions.isParquetMetadataCacheEnabled()
+                  && isParquetFile()
+                  && parquetMetadataCache != null) {
+                ParquetObjectMetadata metadata = null;
+                if (readOptions.isCachedParquetMetadataEnabled()) {
+                  if (cachedParquetMetadata == null) {
+                    cachedParquetMetadata = parquetMetadataCache.getMetadata(gcsPath.toString());
+                  }
+                  if (cachedParquetMetadata.isPresent()) {
+                    metadata = cachedParquetMetadata.get();
+                  }
+                } else {
+                  Optional<ParquetObjectMetadata> metadataOpt =
+                      parquetMetadataCache.getMetadata(gcsPath.toString());
+                  if (metadataOpt.isPresent()) {
+                    metadata = metadataOpt.get();
+                  }
+                }
+                if (metadata != null) {
+                  byte[] rawMetadata = metadata.getRawMetadata();
+                  long cachedFileSize = metadata.getFileSize();
+                  int footerLength = rawMetadata.length;
+
+                  if (rawMetadata != null && position >= cachedFileSize - footerLength) {
+                    int offsetInFooter = (int) (position - (cachedFileSize - footerLength));
+                    int bytesToRead =
+                        Math.min(byteBuffer.remaining(), rawMetadata.length - offsetInFooter);
+
+                    if (bytesToRead > 0) {
+                      byteBuffer.put(rawMetadata, offsetInFooter, bytesToRead);
+                      position += bytesToRead;
+                      channel.position(position);
+                      recorder.record(Metric.READ_BYTES, bytesToRead, Collections.emptyMap());
+                      recorder.record(Metric.READ_CACHE_HIT, 1, Collections.emptyMap());
+                      return bytesToRead;
+                    }
+                  }
+                }
+              }
+
               if (isMetadataInitialized()
+                  && prefetchSize > 0
                   && prefetchBuffer == null
                   && position >= fileSize - prefetchSize) {
                 cacheObjectOrFooter();
@@ -177,6 +231,10 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
               }
               return bytesRead;
             });
+  }
+
+  private boolean isParquetFile() {
+    return this.gcsPath.toString().endsWith(".parquet") || this.gcsPath.toString().endsWith(".pq");
   }
 
   @Override
@@ -273,7 +331,6 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
   public void readVectored(List<GcsObjectRange> fileRanges, IntFunction<ByteBuffer> alloc)
       throws IOException {
     if (prefetchBuffer != null && prefetchSize == fileSize) {
-      // Entire object is cached, serve from prefetchBuffer
       for (GcsObjectRange range : fileRanges) {
         ByteBuffer dest = alloc.apply(range.getLength());
         int bytesRead = serveFromCacheWithoutSeek(range.getOffset(), dest);
@@ -288,9 +345,10 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
           range.getByteBufferFuture().complete(dest);
         }
       }
-    } else {
-      channel.readVectored(fileRanges, alloc);
+      return;
     }
+
+    channel.readVectored(fileRanges, alloc);
   }
 
   private boolean isMetadataInitialized() {
