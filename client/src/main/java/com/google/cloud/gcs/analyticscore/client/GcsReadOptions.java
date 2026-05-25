@@ -26,6 +26,7 @@ public abstract class GcsReadOptions {
   private static final String DECRYPTION_KEY_KEY = "decryption-key";
   private static final String FOOTER_PREFETCH_ENABLED_KEY =
       "analytics-core.footer.prefetch.enabled";
+  private static final String FOOTER_CACHE_ENABLED_KEY = "analytics-core.footer.cache.enabled";
   private static final String SMALL_FILE_FOOTER_PREFETCH_SIZE_KEY =
       "analytics-core.small-file.footer.prefetch.size-bytes";
   private static final String SMALL_FILE_CACHE_THRESHOLD_KEY =
@@ -35,6 +36,8 @@ public abstract class GcsReadOptions {
   private static final String USER_PROJECT_KEY = "user-project";
 
   private static final boolean DEFAULT_FOOTER_PREFETCH_ENABLED = true;
+  private static final boolean DEFAULT_FOOTER_CACHE_ENABLED = false;
+  private static final int DEFAULT_INPLACE_SEEK_LIMIT = 128 * 1024; // 128kb
   private static final int DEFAULT_SMALL_FILE_FOOTER_PREFETCH_SIZE = 100 * 1024; // 100kb
   private static final int DEFAULT_LARGE_FILE_FOOTER_PREFETCH_SIZE = 1024 * 1024; // 1mb
   private static final int DEFAULT_SMALL_FILE_CACHE_THRESHOLD = 0; // 0 bytes = disabled
@@ -51,6 +54,8 @@ public abstract class GcsReadOptions {
 
   public abstract boolean isFooterPrefetchEnabled();
 
+  public abstract boolean isFooterCacheEnabled();
+
   public abstract int getSmallObjectCacheSize();
 
   public abstract GcsVectoredReadOptions getGcsVectoredReadOptions();
@@ -61,6 +66,7 @@ public abstract class GcsReadOptions {
     return new AutoValue_GcsReadOptions.Builder()
         .setGcsVectoredReadOptions(GcsVectoredReadOptions.builder().build())
         .setFooterPrefetchEnabled(DEFAULT_FOOTER_PREFETCH_ENABLED)
+        .setFooterCacheEnabled(DEFAULT_FOOTER_CACHE_ENABLED)
         .setFooterPrefetchSizeSmallFile(DEFAULT_SMALL_FILE_FOOTER_PREFETCH_SIZE)
         .setFooterPrefetchSizeLargeFile(DEFAULT_LARGE_FILE_FOOTER_PREFETCH_SIZE)
         .setSmallObjectCacheSize(DEFAULT_SMALL_FILE_CACHE_THRESHOLD);
@@ -82,6 +88,10 @@ public abstract class GcsReadOptions {
     if (analyticsCoreOptions.containsKey(prefix + FOOTER_PREFETCH_ENABLED_KEY)) {
       optionsBuilder.setFooterPrefetchEnabled(
           Boolean.parseBoolean(analyticsCoreOptions.get(prefix + FOOTER_PREFETCH_ENABLED_KEY)));
+    }
+    if (analyticsCoreOptions.containsKey(prefix + FOOTER_CACHE_ENABLED_KEY)) {
+      optionsBuilder.setFooterCacheEnabled(
+          Boolean.parseBoolean(analyticsCoreOptions.get(prefix + FOOTER_CACHE_ENABLED_KEY)));
     }
     if (analyticsCoreOptions.containsKey(prefix + SMALL_FILE_FOOTER_PREFETCH_SIZE_KEY)) {
       optionsBuilder.setFooterPrefetchSizeSmallFile(
@@ -125,6 +135,8 @@ public abstract class GcsReadOptions {
     public abstract Builder setGcsVectoredReadOptions(GcsVectoredReadOptions vectoredReadOptions);
 
     public abstract Builder setFooterPrefetchEnabled(boolean footerPrefetchEnabled);
+
+    public abstract Builder setFooterCacheEnabled(boolean footerCacheEnabled);
 
     public abstract Builder setFooterPrefetchSizeSmallFile(int footerPrefetchSizeSmallFile);
 

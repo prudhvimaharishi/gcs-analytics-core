@@ -139,9 +139,9 @@ implementation:
                 .setGcsClientOption(GcsClientOptions.builder().setProjectId("my-project-id").build())
                 .build();
         ```
- 
+
     3. Create configuration object with telemetry (Combinations):
-        
+
         * **Logging Telemetry Only**:
             ```java
             ImmutableMap<String, String> loggingOnly = ImmutableMap.of(
@@ -150,7 +150,7 @@ implementation:
                     "gcs.analytics-core.telemetry.logging.level", "INFO");
             GcsAnalyticsCoreOptions options = new GcsAnalyticsCoreOptions("gcs.", loggingOnly);
             ```
-        
+
         * **OpenTelemetry Only (Logging Provider)**:
             ```java
             ImmutableMap<String, String> otelOnly = ImmutableMap.of(
@@ -160,7 +160,7 @@ implementation:
                     "gcs.analytics-core.telemetry.opentelemetry.export-interval-seconds", "30");
             GcsAnalyticsCoreOptions options = new GcsAnalyticsCoreOptions("gcs.", otelOnly);
             ```
-            
+
         * **Custom Telemetry (Operation Listener)**:
             ```java
             OperationListener myListener = new OperationListener() {
@@ -168,7 +168,7 @@ implementation:
                 public void onOperationStart(Operation operation) {
                     // custom logic when operation starts
                 }
-                
+
                 @Override
                 public void onOperationEnd(Operation operation, Map<MetricKey, Long> metrics) {
                     // custom logic when operation ends with metrics

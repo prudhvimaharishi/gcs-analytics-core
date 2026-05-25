@@ -21,6 +21,7 @@ import com.google.cloud.gcs.analyticscore.client.*;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Attribute;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Operation;
+import com.google.cloud.gcs.analyticscore.common.telemetry.MetricsRecorder;
 import com.google.cloud.storage.BlobId;
 import com.google.common.collect.ImmutableMap;
 import java.io.EOFException;
@@ -30,6 +31,7 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.IntFunction;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
@@ -149,18 +151,9 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
             telemetryAttributes,
             recorder -> {
               checkNotClosed("Cannot read: already closed");
-              if (isMetadataInitialized()
-                  && prefetchBuffer == null
-                  && position >= fileSize - prefetchSize) {
-                cacheObjectOrFooter();
-              }
-              if (prefetchBuffer != null && (position >= fileSize - prefetchSize)) {
-                int bytesRead = serveFromCache(byteBuffer);
-                if (bytesRead > 0) {
-                  recorder.record(Metric.READ_BYTES, bytesRead, Collections.emptyMap());
-                  recorder.record(Metric.READ_CACHE_HIT, 1, Collections.emptyMap());
-                }
-                return bytesRead;
+              Optional<Integer> cachedBytesRead = tryReadFromCache(byteBuffer, recorder);
+              if (cachedBytesRead.isPresent()) {
+                return cachedBytesRead.get();
               }
               recorder.record(Metric.READ_CACHE_MISS, 1, Collections.emptyMap());
               long channelPosition = channel.position();
@@ -326,6 +319,9 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
       }
       cacheBuffer.flip();
       this.prefetchBuffer = cacheBuffer;
+      if (isFooterCacheEnabled()) {
+        gcsFileSystem.cacheFooter(gcsItemId, cacheBuffer);
+      }
     } catch (IOException e) {
       LOG.warn(
           "Error while caching object {} from position: {} length: {}. Error : {}",
@@ -336,6 +332,14 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
     } finally {
       seek(originalPosition);
     }
+  }
+
+  private boolean isFooterCacheEnabled() {
+    return gcsFileSystem
+        .getFileSystemOptions()
+        .getGcsClientOptions()
+        .getGcsReadOptions()
+        .isFooterCacheEnabled();
   }
 
   private int serveFromCache(ByteBuffer buffer) throws IOException {
@@ -357,6 +361,35 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
     cacheView.limit(cacheView.position() + bytesToRead);
     buffer.put(cacheView);
     return bytesToRead;
+  }
+
+  private void ensureCacheLoaded() throws IOException {
+    if (prefetchBuffer != null) {
+      return;
+    }
+    if (isFooterCacheEnabled()) {
+      prefetchBuffer = gcsFileSystem.getCachedFooter(gcsItemId).orElse(null);
+    }
+    if (prefetchBuffer == null) {
+      cacheObjectOrFooter();
+    }
+  }
+
+  private Optional<Integer> tryReadFromCache(ByteBuffer byteBuffer, MetricsRecorder recorder)
+      throws IOException {
+    if (!isMetadataInitialized() || position < fileSize - prefetchSize) {
+      return Optional.empty();
+    }
+    ensureCacheLoaded();
+    if (prefetchBuffer == null) {
+      return Optional.empty();
+    }
+    int bytesRead = serveFromCache(byteBuffer);
+    if (bytesRead > 0) {
+      recorder.record(Metric.READ_BYTES, bytesRead, Collections.emptyMap());
+      recorder.record(Metric.READ_CACHE_HIT, 1, Collections.emptyMap());
+    }
+    return Optional.of(bytesRead);
   }
 
   private static VectoredSeekableByteChannel openReadChannel(
