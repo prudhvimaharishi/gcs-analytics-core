@@ -41,6 +41,8 @@ class GcsReadOptionsTest {
             .put("gcs.analytics-core.large-file.footer.prefetch.size-bytes", "4194304")
             .put("gcs.analytics-core.small-file.footer.prefetch.size-bytes", "41943")
             .put("gcs.analytics-core.small-file.cache.threshold-bytes", "102400")
+            .put("gcs.analytics-core.read.inplace-seek-limit-bytes", "16777216")
+            .put("gcs.analytics-core.read.file-access-pattern", "random")
             .build();
     String prefix = "gcs.";
 
@@ -54,6 +56,15 @@ class GcsReadOptionsTest {
     assertThat(readOptions.getFooterPrefetchSizeSmallFile()).isEqualTo(41943);
     assertThat(readOptions.getFooterPrefetchSizeLargeFile()).isEqualTo(4194304);
     assertThat(readOptions.getSmallObjectCacheSize()).isEqualTo(102400);
+    assertThat(readOptions.getInplaceSeekLimit()).isEqualTo(16777216);
+    assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.RANDOM);
+    properties =
+        ImmutableMap.<String, String>builder()
+            .put("gcs.analytics-core.read.file-access-pattern", "auto_sequential")
+            .build();
+    readOptions = GcsReadOptions.createFromOptions(properties, prefix);
+
+    assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.AUTO_SEQUENTIAL);
     assertThat(vectoredReadOptions.getMaxMergeGap()).isEqualTo(1024);
     assertThat(vectoredReadOptions.getMaxMergeSize()).isEqualTo(2048);
   }
@@ -73,6 +84,8 @@ class GcsReadOptionsTest {
     assertThat(readOptions.getFooterPrefetchSizeSmallFile()).isEqualTo(100 * 1024);
     assertThat(readOptions.getFooterPrefetchSizeLargeFile()).isEqualTo(1024 * 1024);
     assertThat(readOptions.getSmallObjectCacheSize()).isEqualTo(0);
+    assertThat(readOptions.getInplaceSeekLimit()).isEqualTo(128 * 1024);
+    assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.SEQUENTIAL);
     assertThat(vectoredReadOptions.getMaxMergeGap()).isEqualTo(4 * 1024);
     assertThat(vectoredReadOptions.getMaxMergeSize()).isEqualTo(8 * 1024 * 1024);
   }
@@ -83,6 +96,7 @@ class GcsReadOptionsTest {
         "gcs.analytics-core.small-file.footer.prefetch.size-bytes",
         "gcs.analytics-core.small-file.cache.threshold-bytes",
         "gcs.analytics-core.large-file.footer.prefetch.size-bytes",
+        "gcs.analytics-core.read.inplace-seek-limit-bytes",
       })
   void createFromOptions_integerValuesGreaterThanIntegerMax_throwsIllegalArgumentException(
       String propertyKey) {
@@ -101,5 +115,22 @@ class GcsReadOptionsTest {
             String.format(
                 "%s=%s cannot be greater than Integer.MAX_VALUE (%d)",
                 propertyKey, outOfBoundValue, Integer.MAX_VALUE));
+  }
+
+  @Test
+  void createFromOptions_withInvalidFileAccessPattern_throwsIllegalArgumentException() {
+    Map<String, String> properties =
+        ImmutableMap.of("gcs.analytics-core.read.file-access-pattern", "invalid");
+    String prefix = "gcs.";
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GcsReadOptions.createFromOptions(properties, prefix));
+
+    assertThat(exception)
+        .hasMessageThat()
+        .contains(
+            "No enum constant com.google.cloud.gcs.analyticscore.client.FileAccessPattern.INVALID");
   }
 }
