@@ -37,6 +37,11 @@ limitations under the License.
             <artifactId>client</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.45.3.0</version>
+        </dependency>
         <!--Test Dependencies-->
         <dependency>
             <groupId>com.google.truth</groupId>

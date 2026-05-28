@@ -31,17 +31,24 @@ import com.google.cloud.storage.BlobId;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.ByteBuffer;
 import java.util.Collections;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 public class GcsFileSystemImpl implements GcsFileSystem {
+
+  private static final Cache<GcsItemId, ByteBuffer> FOOTER_CACHE =
+      CacheBuilder.newBuilder().maximumSize(1000).expireAfterAccess(10, TimeUnit.MINUTES).build();
 
   private final GcsClient gcsClient;
   private final GcsFileSystemOptions fileSystemOptions;
@@ -150,6 +157,20 @@ public class GcsFileSystemImpl implements GcsFileSystem {
   }
 
   @Override
+  public Optional<ByteBuffer> getCachedFooter(GcsItemId itemId) {
+    return isFooterCacheEnabled()
+        ? Optional.ofNullable(FOOTER_CACHE.getIfPresent(itemId))
+        : Optional.empty();
+  }
+
+  @Override
+  public void cacheFooter(GcsItemId itemId, ByteBuffer footer) {
+    if (isFooterCacheEnabled()) {
+      FOOTER_CACHE.put(itemId, footer.asReadOnlyBuffer());
+    }
+  }
+
+  @Override
   public void close() {
     ExecutorService executorService = executorServiceSupplier.get();
     executorService.shutdown();
@@ -196,5 +217,9 @@ public class GcsFileSystemImpl implements GcsFileSystem {
                     .setNameFormat("gcs-filesystem-range-pool-%d")
                     .setDaemon(true)
                     .build()));
+  }
+
+  private boolean isFooterCacheEnabled() {
+    return fileSystemOptions.getGcsClientOptions().getGcsReadOptions().isFooterCacheEnabled();
   }
 }

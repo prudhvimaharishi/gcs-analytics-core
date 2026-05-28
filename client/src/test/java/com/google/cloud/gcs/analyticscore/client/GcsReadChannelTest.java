@@ -19,6 +19,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.google.cloud.ReadChannel;
+import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Attribute;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.telemetry.MetricKey;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Operation;
@@ -509,7 +510,11 @@ class GcsReadChannelTest {
             if (operation.getName().equals("VECTORED_READ")) {
               totalBytesReadFromMetrics.addAndGet(
                   metrics.getOrDefault(
-                      MetricKey.builder().setMetric(Metric.READ_BYTES).build(), 0L));
+                      MetricKey.builder()
+                          .setMetric(Metric.READ_BYTES)
+                          .setAttributes(ImmutableMap.of(Attribute.READ_SOURCE.name(), "NETWORK"))
+                          .build(),
+                      0L));
               latch.countDown();
             }
           }

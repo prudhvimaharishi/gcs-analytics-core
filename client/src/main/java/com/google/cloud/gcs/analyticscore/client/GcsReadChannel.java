@@ -34,7 +34,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.function.IntFunction;
@@ -182,8 +181,21 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
       GcsObjectCombinedRange combinedObjectRange,
       IntFunction<ByteBuffer> allocate,
       Operation operation) {
+    Operation localOperation =
+        operation.toBuilder()
+            .setAttributes(
+                ImmutableMap.<String, String>builder()
+                    .putAll(operation.getAttributes())
+                    .put(
+                        Attribute.READ_POSITION.name(),
+                        String.valueOf(combinedObjectRange.getOffset()))
+                    .put(
+                        Attribute.READ_LENGTH.name(),
+                        String.valueOf(combinedObjectRange.getLength()))
+                    .build())
+            .build();
     telemetry.measure(
-        operation,
+        localOperation,
         recorder -> {
           try (ReadChannel channel = openReadChannel(itemId, readOptions)) {
             validatePosition(combinedObjectRange.getOffset());
@@ -197,7 +209,10 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
                 // EOF reached.
                 break;
               }
-              recorder.record(Metric.READ_BYTES, bytesRead, Collections.emptyMap());
+              recorder.record(
+                  Metric.READ_BYTES,
+                  bytesRead,
+                  ImmutableMap.of(Attribute.READ_SOURCE.name(), "NETWORK"));
               numOfBytesRead += bytesRead;
             }
             if (numOfBytesRead < combinedObjectRange.getLength()) {

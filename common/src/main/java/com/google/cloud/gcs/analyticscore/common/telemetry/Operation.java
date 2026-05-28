@@ -39,6 +39,8 @@ public abstract class Operation {
         .setOperationId(UUID.randomUUID().toString());
   }
 
+  public abstract Builder toBuilder();
+
   @AutoValue.Builder
   public abstract static class Builder {
     public abstract Builder setName(String name);

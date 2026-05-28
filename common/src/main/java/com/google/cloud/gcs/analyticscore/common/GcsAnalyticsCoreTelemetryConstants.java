@@ -19,7 +19,10 @@ public class GcsAnalyticsCoreTelemetryConstants {
   public enum Attribute {
     CLASS_NAME,
     READ_LENGTH,
-    READ_OFFSET;
+    READ_OFFSET,
+    READ_POSITION,
+    CACHE_TYPE,
+    READ_SOURCE;
   }
 
   public enum Metric implements com.google.cloud.gcs.analyticscore.common.telemetry.Metric {
@@ -31,7 +34,17 @@ public class GcsAnalyticsCoreTelemetryConstants {
     READ_CACHE_HIT("gcs.analytics-core.client.read.cache.hits", MetricType.COUNTER),
     READ_CACHE_MISS("gcs.analytics-core.client.read.cache.misses", MetricType.COUNTER),
     CLOSE_DURATION("gcs.analytics-core.client.close.duration", MetricType.DURATION),
-    GCS_CLIENT_CREATE_DURATION("gcs.analytics-core.client.create.duration", MetricType.DURATION);
+    GCS_CLIENT_CREATE_DURATION("gcs.analytics-core.client.create.duration", MetricType.DURATION),
+    FOOTER_INDEX_DOWNLOAD_DURATION(
+        "gcs.analytics-core.client.footer-index.download.duration", MetricType.DURATION),
+    FOOTER_INDEX_DOWNLOAD_COUNT(
+        "gcs.analytics-core.client.footer-index.download.count", MetricType.COUNTER),
+    FOOTER_INDEX_DOWNLOAD_BYTES(
+        "gcs.analytics-core.client.footer-index.download.size", MetricType.COUNTER),
+    FOOTER_INDEX_LIST_DURATION(
+        "gcs.analytics-core.client.footer-index.list.duration", MetricType.DURATION),
+    FOOTER_INDEX_LIST_COUNT(
+        "gcs.analytics-core.client.footer-index.list.count", MetricType.COUNTER);
 
     private final String name;
     private final MetricType type;
@@ -60,6 +73,8 @@ public class GcsAnalyticsCoreTelemetryConstants {
     READ_TAIL,
     OPEN,
     VECTORED_READ,
-    GCS_CLIENT_CREATE;
+    GCS_CLIENT_CREATE,
+    FOOTER_INDEX_DOWNLOAD,
+    FOOTER_INDEX_LIST;
   }
 }
