@@ -44,6 +44,9 @@ public class OpenTelemetryReporter implements OperationListener {
       case LOGGING:
         openTelemetryProvider = new LoggingOpenTelemetryProvider(options);
         break;
+      case CLOUD_MONITORING:
+        openTelemetryProvider = new CloudMonitoringOpenTelemetryProvider(options);
+        break;
       case PRE_CONFIGURED:
         OpenTelemetry otel =
             options
@@ -99,13 +102,19 @@ public class OpenTelemetryReporter implements OperationListener {
     }
   }
 
+  private static final java.util.Set<String> EXCLUDED_METRIC_ATTRIBUTES =
+      java.util.Set.of("READ_LENGTH", "READ_OFFSET");
+
   private Attributes toOpenTelemetryAttributes(Map<String, String> attributes) {
     if (attributes == null || attributes.isEmpty()) {
       return Attributes.empty();
     }
     AttributesBuilder builder = Attributes.builder();
     for (Map.Entry<String, String> entry : attributes.entrySet()) {
-      builder.put(AttributeKey.stringKey(entry.getKey()), entry.getValue());
+      String key = entry.getKey();
+      if (!EXCLUDED_METRIC_ATTRIBUTES.contains(key)) {
+        builder.put(AttributeKey.stringKey(key), entry.getValue());
+      }
     }
     return builder.build();
   }
