@@ -111,4 +111,41 @@ class OpenTelemetryReporterTest {
       assertThat(counterAttributes.get(AttributeKey.stringKey("status"))).isEqualTo("OK");
     }
   }
+
+  @Test
+  void testOperationEnd_filtersOutExcludedAttributes() {
+    OpenTelemetryOptions options =
+        OpenTelemetryOptions.builder()
+            .setEnabled(true)
+            .setProviderType(OpenTelemetryOptions.ProviderType.PRE_CONFIGURED)
+            .setPreconfiguredOpenTelemetryInstance(mockOpenTelemetry)
+            .build();
+    try (OpenTelemetryReporter reporter = new OpenTelemetryReporter(options)) {
+      Map<String, String> opAttrs = new HashMap<>();
+      opAttrs.put("opId", "123");
+      opAttrs.put("READ_LENGTH", "1024");
+      opAttrs.put("READ_OFFSET", "2048");
+      Operation operation =
+          Operation.builder()
+              .setName("testOp")
+              .setDurationMetric(TestMetric.of("testOp.duration", Metric.MetricType.DURATION))
+              .setAttributes(opAttrs)
+              .build();
+      Map<MetricKey, Long> metrics = new HashMap<>();
+      metrics.put(
+          MetricKey.builder()
+              .setMetric(TestMetric.of("testOp.duration", Metric.MetricType.DURATION))
+              .build(),
+          1500L);
+
+      reporter.onOperationEnd(operation, metrics);
+
+      ArgumentCaptor<Attributes> histogramAttrsCaptor = ArgumentCaptor.forClass(Attributes.class);
+      verify(mockHistogram).record(eq(1500L), histogramAttrsCaptor.capture());
+      Attributes attributes = histogramAttrsCaptor.getValue();
+      assertThat(attributes.get(AttributeKey.stringKey("opId"))).isEqualTo("123");
+      assertThat(attributes.get(AttributeKey.stringKey("READ_LENGTH"))).isNull();
+      assertThat(attributes.get(AttributeKey.stringKey("READ_OFFSET"))).isNull();
+    }
+  }
 }
