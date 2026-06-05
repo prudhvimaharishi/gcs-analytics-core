@@ -111,4 +111,6 @@ class OpenTelemetryReporterTest {
       assertThat(counterAttributes.get(AttributeKey.stringKey("status"))).isEqualTo("OK");
     }
   }
+
+
 }
