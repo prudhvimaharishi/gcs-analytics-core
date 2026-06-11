@@ -17,6 +17,7 @@
 package com.google.cloud.gcs.analyticscore.client;
 
 import com.google.cloud.ReadChannel;
+import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.Storage;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -27,7 +28,21 @@ public class FakeRandomReadStrategy extends RandomReadStrategy {
 
   public FakeRandomReadStrategy(
       Storage storage, GcsItemId itemId, GcsReadOptions options, GcsItemInfo itemInfo) {
-    super(storage, itemId, options, itemInfo);
+    this(
+        storage,
+        itemId,
+        options,
+        itemInfo,
+        new Telemetry(com.google.common.collect.ImmutableList.of()));
+  }
+
+  public FakeRandomReadStrategy(
+      Storage storage,
+      GcsItemId itemId,
+      GcsReadOptions options,
+      GcsItemInfo itemInfo,
+      Telemetry telemetry) {
+    super(storage, itemId, options, itemInfo, telemetry);
   }
 
   @Override

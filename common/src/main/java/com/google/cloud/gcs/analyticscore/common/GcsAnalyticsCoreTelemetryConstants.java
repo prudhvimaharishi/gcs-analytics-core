@@ -31,7 +31,16 @@ public class GcsAnalyticsCoreTelemetryConstants {
     READ_CACHE_HIT("gcs.analytics-core.client.read.cache.hits", MetricType.COUNTER),
     READ_CACHE_MISS("gcs.analytics-core.client.read.cache.misses", MetricType.COUNTER),
     CLOSE_DURATION("gcs.analytics-core.client.close.duration", MetricType.DURATION),
-    GCS_CLIENT_CREATE_DURATION("gcs.analytics-core.client.create.duration", MetricType.DURATION);
+    GCS_CLIENT_CREATE_DURATION("gcs.analytics-core.client.create.duration", MetricType.DURATION),
+    HARD_SEEK_COUNT("gcs.analytics-core.client.seek.hard.count", MetricType.COUNTER),
+    HARD_SEEK_BYTES("gcs.analytics-core.client.seek.hard.bytes", MetricType.COUNTER),
+    INPLACE_SEEK_COUNT("gcs.analytics-core.client.seek.inplace.count", MetricType.COUNTER),
+    INPLACE_SEEK_BYTES("gcs.analytics-core.client.seek.inplace.bytes", MetricType.COUNTER),
+    CHANNEL_OPEN_COUNT("gcs.analytics-core.client.channel.open.count", MetricType.COUNTER),
+    STRATEGY_SWITCH_TO_RANDOM_COUNT(
+        "gcs.analytics-core.client.strategy.switch.random.count", MetricType.COUNTER),
+    STRATEGY_SWITCH_TO_SEQUENTIAL_COUNT(
+        "gcs.analytics-core.client.strategy.switch.sequential.count", MetricType.COUNTER);
 
     private final String name;
     private final MetricType type;

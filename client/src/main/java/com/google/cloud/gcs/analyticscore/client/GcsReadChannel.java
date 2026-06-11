@@ -100,7 +100,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   protected ReadStrategy createReadStrategy(
       Storage storage, GcsItemId itemId, GcsReadOptions readOptions, GcsItemInfo itemInfo)
       throws IOException {
-    return new AdaptiveReadStrategy(storage, itemId, readOptions, itemInfo);
+    return new AdaptiveReadStrategy(storage, itemId, readOptions, itemInfo, telemetry);
   }
 
   @Override
@@ -109,16 +109,22 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     if (dst.remaining() == 0) {
       return 0;
     }
-    int totalBytesRead = 0;
-    while (dst.hasRemaining()) {
-      int bytesRead = readNextChunk(dst);
-      if (bytesRead < 0) {
-        return totalBytesRead == 0 ? -1 : totalBytesRead;
-      }
-      totalBytesRead += bytesRead;
-    }
-
-    return totalBytesRead;
+    return telemetry.measure(
+        GcsAnalyticsCoreTelemetryConstants.Operation.READ.name(),
+        Metric.READ_DURATION,
+        COMMON_ATTRIBUTES,
+        recorder -> {
+          int totalBytesRead = 0;
+          while (dst.hasRemaining()) {
+            int bytesRead = readNextChunk(dst);
+            if (bytesRead < 0) {
+              return totalBytesRead == 0 ? -1 : totalBytesRead;
+            }
+            totalBytesRead += bytesRead;
+          }
+          recorder.record(Metric.READ_BYTES, totalBytesRead, Collections.emptyMap());
+          return totalBytesRead;
+        });
   }
 
   private int readNextChunk(ByteBuffer dst) throws IOException {
@@ -232,7 +238,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
         operation,
         recorder -> {
           ReadStrategy readStrategy =
-              new RandomReadStrategy(storage, itemId, readOptions, itemInfo);
+              new RandomReadStrategy(storage, itemId, readOptions, itemInfo, telemetry);
           try (ReadChannel channel =
               readStrategy.getReadChannel(
                   combinedObjectRange.getOffset(), combinedObjectRange.getLength())) {

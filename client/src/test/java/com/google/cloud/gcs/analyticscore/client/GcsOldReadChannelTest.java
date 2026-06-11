@@ -41,6 +41,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -680,6 +681,61 @@ class GcsOldReadChannelTest {
     assertThat(e.getCause().getCause())
         .hasMessageThat()
         .contains("EOF reached while reading combinedObjectRange");
+  }
+
+  @Test
+  void readAndSeek_recordsTelemetryCorrectly() throws IOException {
+    GcsItemId itemId =
+        GcsItemId.builder()
+            .setBucketName("test-bucket")
+            .setObjectName("test-object")
+            .setContentGeneration(0L)
+            .build();
+    String objectData = "abcdefghijklmnopqrstuvwxyz1234567890";
+    GcsItemInfo itemInfo =
+        GcsItemInfo.builder()
+            .setItemId(itemId)
+            .setSize(objectData.length())
+            .setContentGeneration(0L)
+            .build();
+    BlobId blobId = BlobId.of(itemId.getBucketName(), itemId.getObjectName().get(), 0L);
+    createBlobInStorage(blobId, objectData);
+    Map<Metric, Long> accumulatedMetrics = new ConcurrentHashMap<>();
+    OperationListener listener =
+        new OperationListener() {
+          @Override
+          public void onOperationStart(Operation operation) {}
+
+          @Override
+          public void onOperationEnd(Operation operation, Map<MetricKey, Long> metrics) {
+            metrics.forEach(
+                (key, value) ->
+                    accumulatedMetrics.merge((Metric) key.getMetric(), value, Long::sum));
+          }
+        };
+    Telemetry telemetry = new Telemetry(Collections.singletonList(listener));
+    GcsOldReadChannel gcsReadChannel =
+        new GcsOldReadChannel(
+            storage, itemInfo, TEST_GCS_READ_OPTIONS, executorServiceSupplier, telemetry);
+    ByteBuffer buffer = ByteBuffer.allocate(5);
+
+    gcsReadChannel.read(buffer);
+    gcsReadChannel.position(8);
+    buffer.clear();
+    gcsReadChannel.read(buffer);
+    gcsReadChannel.position(20);
+    buffer.clear();
+    gcsReadChannel.read(buffer);
+    gcsReadChannel.close();
+
+    assertThat(accumulatedMetrics.getOrDefault(Metric.READ_BYTES, 0L)).isEqualTo(15L);
+    assertThat(accumulatedMetrics.getOrDefault(Metric.CHANNEL_OPEN_COUNT, 0L)).isEqualTo(1L);
+    assertThat(accumulatedMetrics.getOrDefault(Metric.HARD_SEEK_COUNT, 0L)).isEqualTo(2L);
+    assertThat(accumulatedMetrics.getOrDefault(Metric.HARD_SEEK_BYTES, 0L)).isEqualTo(10L);
+    assertThat(accumulatedMetrics.getOrDefault(Metric.INPLACE_SEEK_COUNT, 0L)).isEqualTo(0L);
+    assertThat(accumulatedMetrics.getOrDefault(Metric.INPLACE_SEEK_BYTES, 0L)).isEqualTo(0L);
+    assertThat(accumulatedMetrics.containsKey(Metric.SEEK_DURATION)).isTrue();
+    assertThat(accumulatedMetrics.containsKey(Metric.READ_DURATION)).isTrue();
   }
 
   private GcsObjectRange createRange(long offset, int length) {

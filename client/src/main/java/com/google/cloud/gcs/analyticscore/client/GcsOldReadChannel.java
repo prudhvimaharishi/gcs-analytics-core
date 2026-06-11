@@ -101,10 +101,18 @@ class GcsOldReadChannel implements VectoredSeekableByteChannel {
 
   @Override
   public int read(ByteBuffer dst) throws IOException {
-    int bytesRead = readChannel.read(dst);
-    position += bytesRead;
-
-    return bytesRead;
+    return telemetry.measure(
+        GcsAnalyticsCoreTelemetryConstants.Operation.READ.name(),
+        Metric.READ_DURATION,
+        COMMON_ATTRIBUTES,
+        recorder -> {
+          int bytesRead = readChannel.read(dst);
+          if (bytesRead > 0) {
+            position += bytesRead;
+            recorder.record(Metric.READ_BYTES, bytesRead, Collections.emptyMap());
+          }
+          return bytesRead;
+        });
   }
 
   @Override
@@ -120,8 +128,21 @@ class GcsOldReadChannel implements VectoredSeekableByteChannel {
   @Override
   public SeekableByteChannel position(long newPosition) throws IOException {
     validatePosition(newPosition);
-    readChannel.seek(newPosition);
-    position = newPosition;
+    if (newPosition != position) {
+      long seekDistance = Math.abs(newPosition - position);
+      telemetry.measure(
+          GcsAnalyticsCoreTelemetryConstants.Operation.SEEK.name(),
+          Metric.SEEK_DURATION,
+          COMMON_ATTRIBUTES,
+          recorder -> {
+            readChannel.seek(newPosition);
+            recorder.record(Metric.SEEK_DISTANCE, seekDistance, Collections.emptyMap());
+            recorder.record(Metric.HARD_SEEK_COUNT, 1, Collections.emptyMap());
+            recorder.record(Metric.HARD_SEEK_BYTES, seekDistance, Collections.emptyMap());
+            return null;
+          });
+      position = newPosition;
+    }
 
     return this;
   }
@@ -277,8 +298,14 @@ class GcsOldReadChannel implements VectoredSeekableByteChannel {
     readOptions
         .getDecryptionKey()
         .ifPresent(key -> sourceOptions.add(Storage.BlobSourceOption.decryptionKey(key)));
+
+    long startTime = System.nanoTime();
     ReadChannel readChannel =
         storage.reader(blobId, sourceOptions.toArray(new Storage.BlobSourceOption[0]));
+    long durationNs = System.nanoTime() - startTime;
+    telemetry.recordMetric(Metric.OPEN_DURATION, durationNs, Collections.emptyMap());
+    telemetry.recordMetric(Metric.CHANNEL_OPEN_COUNT, 1, Collections.emptyMap());
+
     readOptions.getChunkSize().ifPresent(readChannel::setChunkSize);
 
     return readChannel;

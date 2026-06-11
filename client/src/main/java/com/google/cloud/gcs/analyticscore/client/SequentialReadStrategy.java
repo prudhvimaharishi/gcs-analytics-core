@@ -16,6 +16,7 @@
 package com.google.cloud.gcs.analyticscore.client;
 
 import com.google.cloud.ReadChannel;
+import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.Storage;
 import java.io.IOException;
 
@@ -24,7 +25,22 @@ class SequentialReadStrategy extends AbstractReadStrategy {
   SequentialReadStrategy(
       Storage storage, GcsItemId itemId, GcsReadOptions options, GcsItemInfo itemInfo)
       throws IOException {
-    super(storage, itemId, options, itemInfo);
+    this(
+        storage,
+        itemId,
+        options,
+        itemInfo,
+        new Telemetry(com.google.common.collect.ImmutableList.of()));
+  }
+
+  SequentialReadStrategy(
+      Storage storage,
+      GcsItemId itemId,
+      GcsReadOptions options,
+      GcsItemInfo itemInfo,
+      Telemetry telemetry)
+      throws IOException {
+    super(storage, itemId, options, itemInfo, telemetry);
     this.channel = openSdkReadChannel();
   }
 

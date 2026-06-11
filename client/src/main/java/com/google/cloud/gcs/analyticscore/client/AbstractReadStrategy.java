@@ -18,11 +18,14 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.cloud.ReadChannel;
+import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
+import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.Storage;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.List;
 
 abstract class AbstractReadStrategy implements ReadStrategy {
@@ -30,6 +33,7 @@ abstract class AbstractReadStrategy implements ReadStrategy {
   protected final GcsReadOptions options;
   protected final Storage storage;
   protected final GcsItemInfo itemInfo;
+  protected final Telemetry telemetry;
 
   private static final int SKIP_BUFFER_SIZE = 128 * 1024; // 128 KiB
   private ByteBuffer skipBuffer;
@@ -39,10 +43,25 @@ abstract class AbstractReadStrategy implements ReadStrategy {
 
   AbstractReadStrategy(
       Storage storage, GcsItemId itemId, GcsReadOptions options, GcsItemInfo itemInfo) {
+    this(
+        storage,
+        itemId,
+        options,
+        itemInfo,
+        new Telemetry(com.google.common.collect.ImmutableList.of()));
+  }
+
+  AbstractReadStrategy(
+      Storage storage,
+      GcsItemId itemId,
+      GcsReadOptions options,
+      GcsItemInfo itemInfo,
+      Telemetry telemetry) {
     this.storage = storage;
     this.itemId = itemId;
     this.options = options;
     this.itemInfo = itemInfo;
+    this.telemetry = telemetry;
   }
 
   @Override
@@ -83,8 +102,14 @@ abstract class AbstractReadStrategy implements ReadStrategy {
     options
         .getDecryptionKey()
         .ifPresent(key -> sourceOptions.add(Storage.BlobSourceOption.decryptionKey(key)));
+
+    long startTime = System.nanoTime();
     ReadChannel sdkReadChannel =
         storage.reader(blobId, sourceOptions.toArray(new Storage.BlobSourceOption[0]));
+    long durationNs = System.nanoTime() - startTime;
+    telemetry.recordMetric(Metric.OPEN_DURATION, durationNs, Collections.emptyMap());
+    telemetry.recordMetric(Metric.CHANNEL_OPEN_COUNT, 1, Collections.emptyMap());
+
     options.getChunkSize().ifPresent(sdkReadChannel::setChunkSize);
 
     return sdkReadChannel;
@@ -115,9 +140,20 @@ abstract class AbstractReadStrategy implements ReadStrategy {
     long seekDistance = requestedPosition - position;
     boolean success = true;
     if (shouldSkipInPlace(seekDistance)) {
+      long startTime = System.nanoTime();
       success = skipInPlace(seekDistance);
+      long durationNs = System.nanoTime() - startTime;
+      telemetry.recordMetric(Metric.SEEK_DURATION, durationNs, Collections.emptyMap());
+      telemetry.recordMetric(Metric.INPLACE_SEEK_COUNT, 1, Collections.emptyMap());
+      telemetry.recordMetric(Metric.INPLACE_SEEK_BYTES, seekDistance, Collections.emptyMap());
     } else {
+      long startTime = System.nanoTime();
       channel.seek(requestedPosition);
+      long durationNs = System.nanoTime() - startTime;
+      telemetry.recordMetric(Metric.SEEK_DURATION, durationNs, Collections.emptyMap());
+      telemetry.recordMetric(Metric.HARD_SEEK_COUNT, 1, Collections.emptyMap());
+      telemetry.recordMetric(
+          Metric.HARD_SEEK_BYTES, Math.abs(seekDistance), Collections.emptyMap());
     }
     if (success) {
       position = requestedPosition;

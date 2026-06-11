@@ -16,8 +16,11 @@
 package com.google.cloud.gcs.analyticscore.client;
 
 import com.google.cloud.ReadChannel;
+import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
+import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.Storage;
 import java.io.IOException;
+import java.util.Collections;
 
 class AdaptiveReadStrategy extends AbstractReadStrategy {
   private ReadStrategy currentStrategy;
@@ -28,14 +31,29 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
   AdaptiveReadStrategy(
       Storage storage, GcsItemId itemId, GcsReadOptions options, GcsItemInfo itemInfo)
       throws IOException {
-    super(storage, itemId, options, itemInfo);
+    this(
+        storage,
+        itemId,
+        options,
+        itemInfo,
+        new Telemetry(com.google.common.collect.ImmutableList.of()));
+  }
+
+  AdaptiveReadStrategy(
+      Storage storage,
+      GcsItemId itemId,
+      GcsReadOptions options,
+      GcsItemInfo itemInfo,
+      Telemetry telemetry)
+      throws IOException {
+    super(storage, itemId, options, itemInfo, telemetry);
     this.isRandomMode =
         options.getFileAccessPattern() == FileAccessPattern.RANDOM
             || options.getFileAccessPattern() == FileAccessPattern.AUTO_RANDOM;
     this.currentStrategy =
         isRandomMode
-            ? new RandomReadStrategy(storage, itemId, options, itemInfo)
-            : new SequentialReadStrategy(storage, itemId, options, itemInfo);
+            ? new RandomReadStrategy(storage, itemId, options, itemInfo, telemetry)
+            : new SequentialReadStrategy(storage, itemId, options, itemInfo, telemetry);
   }
 
   @Override
@@ -98,7 +116,8 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
   private void switchToRandom() throws IOException {
     isRandomMode = true;
     currentStrategy.close();
-    currentStrategy = new RandomReadStrategy(storage, itemId, options, itemInfo);
+    currentStrategy = new RandomReadStrategy(storage, itemId, options, itemInfo, telemetry);
+    telemetry.recordMetric(Metric.STRATEGY_SWITCH_TO_RANDOM_COUNT, 1, Collections.emptyMap());
   }
 
   private boolean isSequentialRead(long requestedPosition) {
@@ -110,6 +129,7 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
     isRandomMode = false;
     sequentialReadCount = 0;
     currentStrategy.close();
-    currentStrategy = new SequentialReadStrategy(storage, itemId, options, itemInfo);
+    currentStrategy = new SequentialReadStrategy(storage, itemId, options, itemInfo, telemetry);
+    telemetry.recordMetric(Metric.STRATEGY_SWITCH_TO_SEQUENTIAL_COUNT, 1, Collections.emptyMap());
   }
 }
