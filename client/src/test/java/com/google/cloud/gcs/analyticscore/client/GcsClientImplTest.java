@@ -243,4 +243,52 @@ class GcsClientImplTest {
             telemetry);
     assertThat(client.storage.getOptions().getCredentials()).isEqualTo(NoCredentials.getInstance());
   }
+
+  @Test
+  void openReadChannel_useOldReadChannel_returnsGcsOldReadChannel() throws IOException {
+    String objectData = "hello world";
+    GcsReadOptions readOptions =
+        GcsReadOptions.builder()
+            .setUserProjectId("test-project")
+            .setUseOldReadChannel(true)
+            .build();
+    GcsItemId itemId =
+        GcsItemId.builder()
+            .setBucketName("test-bucket-name")
+            .setObjectName("test-object-name")
+            .build();
+    GcsItemInfo itemInfo =
+        GcsItemInfo.builder()
+            .setItemId(itemId)
+            .setSize(objectData.length())
+            .setContentGeneration(0L)
+            .build();
+    StorageTestUtils.createBlobInStorage(
+        storage, BlobId.of(itemId.getBucketName(), itemId.getObjectName().get(), 0L), objectData);
+
+    SeekableByteChannel channel = gcsClient.openReadChannel(itemInfo, readOptions);
+
+    assertThat(channel).isInstanceOf(GcsOldReadChannel.class);
+  }
+
+  @Test
+  void openReadChannel_itemId_useOldReadChannel_returnsGcsOldReadChannel() throws IOException {
+    String objectData = "hello world";
+    GcsReadOptions readOptions =
+        GcsReadOptions.builder()
+            .setUserProjectId("test-project")
+            .setUseOldReadChannel(true)
+            .build();
+    GcsItemId itemId =
+        GcsItemId.builder()
+            .setBucketName("test-bucket-name")
+            .setObjectName("test-object-name")
+            .build();
+    StorageTestUtils.createBlobInStorage(
+        storage, BlobId.of(itemId.getBucketName(), itemId.getObjectName().get(), 0L), objectData);
+
+    SeekableByteChannel channel = gcsClient.openReadChannel(itemId, readOptions);
+
+    assertThat(channel).isInstanceOf(GcsOldReadChannel.class);
+  }
 }

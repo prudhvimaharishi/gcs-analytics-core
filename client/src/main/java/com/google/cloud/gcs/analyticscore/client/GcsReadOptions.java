@@ -40,6 +40,7 @@ public abstract class GcsReadOptions {
       "analytics-core.adaptive-read.sequential-read-threshold";
   private static final String RANDOM_READ_MIN_REQUEST_SIZE_KEY =
       "analytics-core.random-read.min-request-size";
+  private static final String USE_OLD_READ_CHANNEL_KEY = "analytics-core.read.use-old-read-channel";
 
   private static final int KB = 1024;
   private static final int MB = 1024 * KB;
@@ -52,6 +53,7 @@ public abstract class GcsReadOptions {
   private static final FileAccessPattern DEFAULT_FILE_ACCESS_PATTERN = FileAccessPattern.SEQUENTIAL;
   private static final int DEFAULT_ADAPTIVE_READ_SEQUENTIAL_READ_THRESHOLD = 3;
   private static final int DEFAULT_RANDOM_READ_MIN_REQUEST_SIZE = 128 * KB;
+  private static final boolean DEFAULT_USE_OLD_READ_CHANNEL = false;
 
   public abstract Optional<Integer> getChunkSize();
 
@@ -79,6 +81,8 @@ public abstract class GcsReadOptions {
 
   public abstract int getRandomReadMinRequestSize();
 
+  public abstract boolean isUseOldReadChannel();
+
   public static Builder builder() {
     return new AutoValue_GcsReadOptions.Builder()
         .setGcsVectoredReadOptions(GcsVectoredReadOptions.builder().build())
@@ -89,7 +93,8 @@ public abstract class GcsReadOptions {
         .setInplaceSeekLimit(DEFAULT_INPLACE_SEEK_LIMIT)
         .setFileAccessPattern(DEFAULT_FILE_ACCESS_PATTERN)
         .setAdaptiveReadSequentialReadThreshold(DEFAULT_ADAPTIVE_READ_SEQUENTIAL_READ_THRESHOLD)
-        .setRandomReadMinRequestSize(DEFAULT_RANDOM_READ_MIN_REQUEST_SIZE);
+        .setRandomReadMinRequestSize(DEFAULT_RANDOM_READ_MIN_REQUEST_SIZE)
+        .setUseOldReadChannel(DEFAULT_USE_OLD_READ_CHANNEL);
   }
 
   public static GcsReadOptions createFromOptions(
@@ -139,6 +144,10 @@ public abstract class GcsReadOptions {
       optionsBuilder.setRandomReadMinRequestSize(
           safeParseInteger(analyticsCoreOptions, prefix + RANDOM_READ_MIN_REQUEST_SIZE_KEY));
     }
+    if (analyticsCoreOptions.containsKey(prefix + USE_OLD_READ_CHANNEL_KEY)) {
+      optionsBuilder.setUseOldReadChannel(
+          Boolean.parseBoolean(analyticsCoreOptions.get(prefix + USE_OLD_READ_CHANNEL_KEY)));
+    }
 
     optionsBuilder.setGcsVectoredReadOptions(
         GcsVectoredReadOptions.createFromOptions(analyticsCoreOptions, prefix));
@@ -184,6 +193,8 @@ public abstract class GcsReadOptions {
     public abstract Builder setAdaptiveReadSequentialReadThreshold(int threshold);
 
     public abstract Builder setRandomReadMinRequestSize(int minRequestSize);
+
+    public abstract Builder setUseOldReadChannel(boolean useOldReadChannel);
 
     public abstract GcsReadOptions build();
   }

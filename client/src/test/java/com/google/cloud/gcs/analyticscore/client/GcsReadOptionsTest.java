@@ -144,4 +144,26 @@ class GcsReadOptionsTest {
         .contains(
             "No enum constant com.google.cloud.gcs.analyticscore.client.FileAccessPattern.INVALID");
   }
+
+  @Test
+  void createFromOptions_withUseOldReadChannelTrue_returnsTrue() {
+    Map<String, String> properties =
+        ImmutableMap.of("gcs.analytics-core.read.use-old-read-channel", "true");
+    String prefix = "gcs.";
+
+    GcsReadOptions readOptions = GcsReadOptions.createFromOptions(properties, prefix);
+
+    assertThat(readOptions.isUseOldReadChannel()).isTrue();
+  }
+
+  @Test
+  void createFromOptions_withUseOldReadChannelFalse_returnsFalse() {
+    Map<String, String> properties =
+        ImmutableMap.of("gcs.analytics-core.read.use-old-read-channel", "false");
+    String prefix = "gcs.";
+
+    GcsReadOptions readOptions = GcsReadOptions.createFromOptions(properties, prefix);
+
+    assertThat(readOptions.isUseOldReadChannel()).isFalse();
+  }
 }

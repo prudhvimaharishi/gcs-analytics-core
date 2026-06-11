@@ -83,6 +83,10 @@ class GcsClientImpl implements GcsClient {
         gcsItemInfo.getItemId().isGcsObject(),
         "Expected GCS object to be provided. But got: " + gcsItemInfo.getItemId());
 
+    if (readOptions.isUseOldReadChannel()) {
+      return new GcsOldReadChannel(
+          storage, gcsItemInfo, readOptions, executorServiceSupplier, telemetry);
+    }
     return new GcsReadChannel(
         storage, gcsItemInfo, readOptions, executorServiceSupplier, telemetry);
   }
@@ -92,6 +96,19 @@ class GcsClientImpl implements GcsClient {
       GcsItemId gcsItemId, GcsReadOptions readOptions) throws IOException {
     checkNotNull(gcsItemId, "gcsItemId should not be null");
     checkNotNull(readOptions, "readOptions should not be null");
+    if (readOptions.isUseOldReadChannel()) {
+      return new GcsOldReadChannel(
+          storage, gcsItemId, readOptions, executorServiceSupplier, telemetry) {
+        @Override
+        public long size() throws IOException {
+          if (itemInfo == null) {
+            itemInfo = getGcsItemInfo(itemId);
+            itemId = itemInfo.getItemId();
+          }
+          return itemInfo.getSize();
+        }
+      };
+    }
     return new GcsReadChannel(storage, gcsItemId, readOptions, executorServiceSupplier, telemetry) {
       @Override
       public long size() throws IOException {
