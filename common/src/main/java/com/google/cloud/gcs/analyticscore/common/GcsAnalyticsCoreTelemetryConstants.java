@@ -25,6 +25,8 @@ public class GcsAnalyticsCoreTelemetryConstants {
   public enum Metric implements com.google.cloud.gcs.analyticscore.common.telemetry.Metric {
     SEEK_DISTANCE("gcs.analytics-core.client.seek.size", MetricType.COUNTER),
     SEEK_DURATION("gcs.analytics-core.client.seek.duration", MetricType.DURATION),
+    HARD_SEEK_DURATION("gcs.analytics-core.client.seek.hard.duration", MetricType.DURATION),
+    INPLACE_SEEK_DURATION("gcs.analytics-core.client.seek.inplace.duration", MetricType.DURATION),
     READ_BYTES("gcs.analytics-core.client.read.size", MetricType.COUNTER),
     READ_DURATION("gcs.analytics-core.client.read.duration", MetricType.DURATION),
     OPEN_DURATION("gcs.analytics-core.client.open.duration", MetricType.DURATION),

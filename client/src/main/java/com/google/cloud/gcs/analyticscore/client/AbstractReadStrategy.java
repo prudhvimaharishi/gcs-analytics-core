@@ -18,10 +18,12 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.cloud.ReadChannel;
+import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.Storage;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -103,16 +105,19 @@ abstract class AbstractReadStrategy implements ReadStrategy {
         .getDecryptionKey()
         .ifPresent(key -> sourceOptions.add(Storage.BlobSourceOption.decryptionKey(key)));
 
-    long startTime = System.nanoTime();
-    ReadChannel sdkReadChannel =
-        storage.reader(blobId, sourceOptions.toArray(new Storage.BlobSourceOption[0]));
-    long durationNs = System.nanoTime() - startTime;
-    telemetry.recordMetric(Metric.OPEN_DURATION, durationNs, Collections.emptyMap());
-    telemetry.recordMetric(Metric.CHANNEL_OPEN_COUNT, 1, Collections.emptyMap());
-
-    options.getChunkSize().ifPresent(sdkReadChannel::setChunkSize);
-
-    return sdkReadChannel;
+    return telemetry.measure(
+        GcsAnalyticsCoreTelemetryConstants.Operation.OPEN.name(),
+        Metric.OPEN_DURATION,
+        ImmutableMap.of(
+            GcsAnalyticsCoreTelemetryConstants.Attribute.CLASS_NAME.name(),
+            GcsReadChannel.class.getName()),
+        recorder -> {
+          ReadChannel sdkReadChannel =
+              storage.reader(blobId, sourceOptions.toArray(new Storage.BlobSourceOption[0]));
+          recorder.record(Metric.CHANNEL_OPEN_COUNT, 1, Collections.emptyMap());
+          options.getChunkSize().ifPresent(sdkReadChannel::setChunkSize);
+          return sdkReadChannel;
+        });
   }
 
   boolean skipInPlace(long seekDistance) throws IOException {
@@ -143,14 +148,14 @@ abstract class AbstractReadStrategy implements ReadStrategy {
       long startTime = System.nanoTime();
       success = skipInPlace(seekDistance);
       long durationNs = System.nanoTime() - startTime;
-      telemetry.recordMetric(Metric.SEEK_DURATION, durationNs, Collections.emptyMap());
+      telemetry.recordMetric(Metric.INPLACE_SEEK_DURATION, durationNs, Collections.emptyMap());
       telemetry.recordMetric(Metric.INPLACE_SEEK_COUNT, 1, Collections.emptyMap());
       telemetry.recordMetric(Metric.INPLACE_SEEK_BYTES, seekDistance, Collections.emptyMap());
     } else {
       long startTime = System.nanoTime();
       channel.seek(requestedPosition);
       long durationNs = System.nanoTime() - startTime;
-      telemetry.recordMetric(Metric.SEEK_DURATION, durationNs, Collections.emptyMap());
+      telemetry.recordMetric(Metric.HARD_SEEK_DURATION, durationNs, Collections.emptyMap());
       telemetry.recordMetric(Metric.HARD_SEEK_COUNT, 1, Collections.emptyMap());
       telemetry.recordMetric(
           Metric.HARD_SEEK_BYTES, Math.abs(seekDistance), Collections.emptyMap());

@@ -734,7 +734,8 @@ class GcsOldReadChannelTest {
     assertThat(accumulatedMetrics.getOrDefault(Metric.HARD_SEEK_BYTES, 0L)).isEqualTo(10L);
     assertThat(accumulatedMetrics.getOrDefault(Metric.INPLACE_SEEK_COUNT, 0L)).isEqualTo(0L);
     assertThat(accumulatedMetrics.getOrDefault(Metric.INPLACE_SEEK_BYTES, 0L)).isEqualTo(0L);
-    assertThat(accumulatedMetrics.containsKey(Metric.SEEK_DURATION)).isTrue();
+    assertThat(accumulatedMetrics.containsKey(Metric.HARD_SEEK_DURATION)).isTrue();
+    assertThat(accumulatedMetrics.containsKey(Metric.INPLACE_SEEK_DURATION)).isFalse();
     assertThat(accumulatedMetrics.containsKey(Metric.READ_DURATION)).isTrue();
   }
 

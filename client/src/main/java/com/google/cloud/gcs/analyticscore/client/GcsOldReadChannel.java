@@ -36,6 +36,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.function.IntFunction;
 
@@ -101,10 +102,16 @@ class GcsOldReadChannel implements VectoredSeekableByteChannel {
 
   @Override
   public int read(ByteBuffer dst) throws IOException {
+    Map<String, String> telemetryAttributes =
+        ImmutableMap.<String, String>builder()
+            .putAll(COMMON_ATTRIBUTES)
+            .put(Attribute.READ_LENGTH.name(), String.valueOf(dst.remaining()))
+            .put(Attribute.READ_OFFSET.name(), String.valueOf(dst.position()))
+            .build();
     return telemetry.measure(
         GcsAnalyticsCoreTelemetryConstants.Operation.READ.name(),
         Metric.READ_DURATION,
-        COMMON_ATTRIBUTES,
+        telemetryAttributes,
         recorder -> {
           int bytesRead = readChannel.read(dst);
           if (bytesRead > 0) {
@@ -132,7 +139,7 @@ class GcsOldReadChannel implements VectoredSeekableByteChannel {
       long seekDistance = Math.abs(newPosition - position);
       telemetry.measure(
           GcsAnalyticsCoreTelemetryConstants.Operation.SEEK.name(),
-          Metric.SEEK_DURATION,
+          Metric.HARD_SEEK_DURATION,
           COMMON_ATTRIBUTES,
           recorder -> {
             readChannel.seek(newPosition);
@@ -168,7 +175,14 @@ class GcsOldReadChannel implements VectoredSeekableByteChannel {
   @Override
   public void close() throws IOException {
     if (readChannel.isOpen()) {
-      readChannel.close();
+      telemetry.measure(
+          GcsAnalyticsCoreTelemetryConstants.Operation.CLOSE.name(),
+          Metric.CLOSE_DURATION,
+          COMMON_ATTRIBUTES,
+          recorder -> {
+            readChannel.close();
+            return null;
+          });
     }
   }
 
@@ -299,16 +313,17 @@ class GcsOldReadChannel implements VectoredSeekableByteChannel {
         .getDecryptionKey()
         .ifPresent(key -> sourceOptions.add(Storage.BlobSourceOption.decryptionKey(key)));
 
-    long startTime = System.nanoTime();
-    ReadChannel readChannel =
-        storage.reader(blobId, sourceOptions.toArray(new Storage.BlobSourceOption[0]));
-    long durationNs = System.nanoTime() - startTime;
-    telemetry.recordMetric(Metric.OPEN_DURATION, durationNs, Collections.emptyMap());
-    telemetry.recordMetric(Metric.CHANNEL_OPEN_COUNT, 1, Collections.emptyMap());
-
-    readOptions.getChunkSize().ifPresent(readChannel::setChunkSize);
-
-    return readChannel;
+    return telemetry.measure(
+        GcsAnalyticsCoreTelemetryConstants.Operation.OPEN.name(),
+        Metric.OPEN_DURATION,
+        COMMON_ATTRIBUTES,
+        recorder -> {
+          ReadChannel readChannel =
+              storage.reader(blobId, sourceOptions.toArray(new Storage.BlobSourceOption[0]));
+          recorder.record(Metric.CHANNEL_OPEN_COUNT, 1, Collections.emptyMap());
+          readOptions.getChunkSize().ifPresent(readChannel::setChunkSize);
+          return readChannel;
+        });
   }
 
   private void validatePosition(long position) throws IOException {

@@ -58,7 +58,7 @@ class LoggingTelemetryReporterTest {
 
       String formattedMetrics = reporter.formatMetrics(metrics);
 
-      assertThat(formattedMetrics).isEqualTo("{TestMetric=100}");
+      assertThat(formattedMetrics).isEqualTo("[{\"name\":\"TestMetric\",\"value\":100}]");
     }
   }
 
@@ -78,8 +78,8 @@ class LoggingTelemetryReporterTest {
 
       assertThat(formattedMetrics)
           .isAnyOf(
-              "{TestMetric{key1=value1, key2=value2}=100}",
-              "{TestMetric{key2=value2, key1=value1}=100}");
+              "[{\"name\":\"TestMetric\",\"value\":100,\"attributes\":{\"key1\":\"value1\",\"key2\":\"value2\"}}]",
+              "[{\"name\":\"TestMetric\",\"value\":100,\"attributes\":{\"key2\":\"value2\",\"key1\":\"value1\"}}]");
     }
   }
 
@@ -103,7 +103,8 @@ class LoggingTelemetryReporterTest {
 
       assertThat(formattedMetrics)
           .isAnyOf(
-              "{Metric1=100, Metric2{key=value}=200}", "{Metric2{key=value}=200, Metric1=100}");
+              "[{\"name\":\"Metric1\",\"value\":100},{\"name\":\"Metric2\",\"value\":200,\"attributes\":{\"key\":\"value\"}}]",
+              "[{\"name\":\"Metric2\",\"value\":200,\"attributes\":{\"key\":\"value\"}},{\"name\":\"Metric1\",\"value\":100}]");
     }
   }
 }

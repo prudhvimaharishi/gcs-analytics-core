@@ -976,6 +976,8 @@ class GcsReadChannelTest {
     assertThat(accumulatedMetrics.getOrDefault(Metric.HARD_SEEK_BYTES, 0L)).isEqualTo(7L);
     assertThat(accumulatedMetrics.getOrDefault(Metric.INPLACE_SEEK_COUNT, 0L)).isEqualTo(1L);
     assertThat(accumulatedMetrics.getOrDefault(Metric.INPLACE_SEEK_BYTES, 0L)).isEqualTo(3L);
+    assertThat(accumulatedMetrics.containsKey(Metric.HARD_SEEK_DURATION)).isTrue();
+    assertThat(accumulatedMetrics.containsKey(Metric.INPLACE_SEEK_DURATION)).isTrue();
     assertThat(accumulatedMetrics.containsKey(Metric.SEEK_DURATION)).isTrue();
     assertThat(accumulatedMetrics.containsKey(Metric.READ_DURATION)).isTrue();
   }
@@ -1037,6 +1039,8 @@ class GcsReadChannelTest {
     assertThat(accumulatedMetrics.getOrDefault(Metric.INPLACE_SEEK_BYTES, 0L)).isEqualTo(3L);
     assertThat(accumulatedMetrics.getOrDefault(Metric.STRATEGY_SWITCH_TO_RANDOM_COUNT, 0L))
         .isEqualTo(1L);
+    assertThat(accumulatedMetrics.containsKey(Metric.INPLACE_SEEK_DURATION)).isTrue();
+    assertThat(accumulatedMetrics.containsKey(Metric.HARD_SEEK_DURATION)).isFalse();
     assertThat(accumulatedMetrics.containsKey(Metric.SEEK_DURATION)).isTrue();
     assertThat(accumulatedMetrics.containsKey(Metric.READ_DURATION)).isTrue();
   }

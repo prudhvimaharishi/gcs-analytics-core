@@ -34,6 +34,7 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SeekableByteChannel;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.function.IntFunction;
 
@@ -109,10 +110,16 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     if (dst.remaining() == 0) {
       return 0;
     }
+    Map<String, String> telemetryAttributes =
+        ImmutableMap.<String, String>builder()
+            .putAll(COMMON_ATTRIBUTES)
+            .put(Attribute.READ_LENGTH.name(), String.valueOf(dst.remaining()))
+            .put(Attribute.READ_OFFSET.name(), String.valueOf(dst.position()))
+            .build();
     return telemetry.measure(
         GcsAnalyticsCoreTelemetryConstants.Operation.READ.name(),
         Metric.READ_DURATION,
-        COMMON_ATTRIBUTES,
+        telemetryAttributes,
         recorder -> {
           int totalBytesRead = 0;
           while (dst.hasRemaining()) {
@@ -172,7 +179,18 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   public SeekableByteChannel position(long newPosition) throws IOException {
     checkChannelOpen();
     validatePosition(newPosition);
-    gcsReadChannelPosition = newPosition;
+    if (newPosition != gcsReadChannelPosition) {
+      long seekDistance = Math.abs(newPosition - gcsReadChannelPosition);
+      telemetry.measure(
+          GcsAnalyticsCoreTelemetryConstants.Operation.SEEK.name(),
+          Metric.SEEK_DURATION,
+          COMMON_ATTRIBUTES,
+          recorder -> {
+            recorder.record(Metric.SEEK_DISTANCE, seekDistance, Collections.emptyMap());
+            gcsReadChannelPosition = newPosition;
+            return null;
+          });
+    }
 
     return this;
   }
@@ -199,7 +217,14 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   public void close() throws IOException {
     if (isGcsReadChannelOpen) {
       isGcsReadChannelOpen = false;
-      strategy.close();
+      telemetry.measure(
+          GcsAnalyticsCoreTelemetryConstants.Operation.CLOSE.name(),
+          Metric.CLOSE_DURATION,
+          COMMON_ATTRIBUTES,
+          recorder -> {
+            strategy.close();
+            return null;
+          });
     }
   }
 
