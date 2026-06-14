@@ -21,6 +21,7 @@ import com.google.cloud.ReadChannel;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Attribute;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
+import com.google.cloud.gcs.analyticscore.common.telemetry.MetricsRecorder;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Operation;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.Storage;
@@ -49,6 +50,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
       ImmutableMap.of(Attribute.CLASS_NAME.name(), GcsReadChannel.class.getName());
   private final Telemetry telemetry;
   private final ReadStrategy strategy;
+  private ReadChannel lastSdkReadChannel;
   private boolean isGcsReadChannelOpen = true;
 
   GcsReadChannel(
@@ -114,7 +116,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
         ImmutableMap.<String, String>builder()
             .putAll(COMMON_ATTRIBUTES)
             .put(Attribute.READ_LENGTH.name(), String.valueOf(dst.remaining()))
-            .put(Attribute.READ_OFFSET.name(), String.valueOf(dst.position()))
+            .put(Attribute.READ_OFFSET.name(), String.valueOf(gcsReadChannelPosition))
             .build();
     return telemetry.measure(
         GcsAnalyticsCoreTelemetryConstants.Operation.READ.name(),
@@ -123,7 +125,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
         recorder -> {
           int totalBytesRead = 0;
           while (dst.hasRemaining()) {
-            int bytesRead = readNextChunk(dst);
+            int bytesRead = readNextChunk(dst, recorder);
             if (bytesRead < 0) {
               return totalBytesRead == 0 ? -1 : totalBytesRead;
             }
@@ -134,9 +136,52 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
         });
   }
 
-  private int readNextChunk(ByteBuffer dst) throws IOException {
+  private int readNextChunk(ByteBuffer dst, MetricsRecorder recorder) throws IOException {
+    long acquireStartTime = System.nanoTime();
     ReadChannel sdkChannel = strategy.getReadChannel(gcsReadChannelPosition, dst.remaining());
+    ReadStrategy.Type strategyType = strategy.getType();
+    recordStrategyMetric(
+        recorder,
+        strategyType,
+        Metric.RANDOM_READ_CHANNEL_ACQUIRE_DURATION,
+        Metric.SEQUENTIAL_READ_CHANNEL_ACQUIRE_DURATION,
+        System.nanoTime() - acquireStartTime);
+
+    boolean isFirstRead = sdkChannel != lastSdkReadChannel;
+    lastSdkReadChannel = sdkChannel;
+    long readStartTime = System.nanoTime();
     int bytesRead = sdkChannel.read(dst);
+    long readDuration = System.nanoTime() - readStartTime;
+    recordStrategyMetric(
+        recorder,
+        strategyType,
+        Metric.RANDOM_SDK_READ_DURATION,
+        Metric.SEQUENTIAL_SDK_READ_DURATION,
+        readDuration);
+    recordStrategyMetric(
+        recorder, strategyType, Metric.RANDOM_SDK_READ_COUNT, Metric.SEQUENTIAL_SDK_READ_COUNT, 1);
+    if (isFirstRead) {
+      recordStrategyMetric(
+          recorder,
+          strategyType,
+          Metric.RANDOM_SDK_FIRST_READ_DURATION,
+          Metric.SEQUENTIAL_SDK_FIRST_READ_DURATION,
+          readDuration);
+      recordStrategyMetric(
+          recorder,
+          strategyType,
+          Metric.RANDOM_SDK_FIRST_READ_COUNT,
+          Metric.SEQUENTIAL_SDK_FIRST_READ_COUNT,
+          1);
+    }
+    if (bytesRead > 0) {
+      recordStrategyMetric(
+          recorder,
+          strategyType,
+          Metric.RANDOM_SDK_READ_BYTES,
+          Metric.SEQUENTIAL_SDK_READ_BYTES,
+          bytesRead);
+    }
     if (bytesRead >= 0) {
       gcsReadChannelPosition += bytesRead;
       strategy.position(gcsReadChannelPosition);
@@ -146,6 +191,19 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
       return -1;
     }
     throw createUnexpectedEofException();
+  }
+
+  private void recordStrategyMetric(
+      MetricsRecorder recorder,
+      ReadStrategy.Type strategyType,
+      Metric randomMetric,
+      Metric sequentialMetric,
+      long value) {
+    if (strategyType == ReadStrategy.Type.UNKNOWN) {
+      return;
+    }
+    Metric metric = strategyType == ReadStrategy.Type.RANDOM ? randomMetric : sequentialMetric;
+    recorder.record(metric, value, Collections.emptyMap());
   }
 
   private void checkChannelOpen() throws ClosedChannelException {

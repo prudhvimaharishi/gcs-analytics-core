@@ -70,4 +70,9 @@ class SequentialReadStrategy extends AbstractReadStrategy {
   public long getLimit() {
     return Long.MAX_VALUE;
   }
+
+  @Override
+  public Type getType() {
+    return Type.SEQUENTIAL;
+  }
 }

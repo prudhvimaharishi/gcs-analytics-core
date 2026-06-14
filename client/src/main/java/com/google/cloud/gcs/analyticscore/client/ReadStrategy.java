@@ -20,6 +20,12 @@ import java.io.IOException;
 
 /** Strategy for reading data from Google Cloud Storage. */
 interface ReadStrategy {
+  enum Type {
+    RANDOM,
+    SEQUENTIAL,
+    UNKNOWN
+  }
+
   /**
    * Returns a {@link ReadChannel} prepared for reading from the specified position.
    *
@@ -51,6 +57,15 @@ interface ReadStrategy {
    * @return {@code true} if the position is at or beyond EOF, {@code false} otherwise
    */
   boolean isEof(long position);
+
+  /**
+   * Returns the strategy currently used to serve reads.
+   *
+   * @return the current strategy type
+   */
+  default Type getType() {
+    return Type.UNKNOWN;
+  }
 
   /**
    * Closes this read strategy and releases any held resources, such as open channels.

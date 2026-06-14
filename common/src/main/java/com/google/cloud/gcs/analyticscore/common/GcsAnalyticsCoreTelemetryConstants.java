@@ -42,7 +42,33 @@ public class GcsAnalyticsCoreTelemetryConstants {
     STRATEGY_SWITCH_TO_RANDOM_COUNT(
         "gcs.analytics-core.client.strategy.switch.random.count", MetricType.COUNTER),
     STRATEGY_SWITCH_TO_SEQUENTIAL_COUNT(
-        "gcs.analytics-core.client.strategy.switch.sequential.count", MetricType.COUNTER);
+        "gcs.analytics-core.client.strategy.switch.sequential.count", MetricType.COUNTER),
+    RANDOM_READ_CHANNEL_ACQUIRE_DURATION(
+        "gcs.analytics-core.client.read.random.channel.acquire.duration", MetricType.DURATION),
+    SEQUENTIAL_READ_CHANNEL_ACQUIRE_DURATION(
+        "gcs.analytics-core.client.read.sequential.channel.acquire.duration", MetricType.DURATION),
+    RANDOM_SDK_READ_DURATION(
+        "gcs.analytics-core.client.read.random.sdk.duration", MetricType.DURATION),
+    SEQUENTIAL_SDK_READ_DURATION(
+        "gcs.analytics-core.client.read.sequential.sdk.duration", MetricType.DURATION),
+    RANDOM_SDK_READ_COUNT("gcs.analytics-core.client.read.random.sdk.count", MetricType.COUNTER),
+    SEQUENTIAL_SDK_READ_COUNT(
+        "gcs.analytics-core.client.read.sequential.sdk.count", MetricType.COUNTER),
+    RANDOM_SDK_READ_BYTES("gcs.analytics-core.client.read.random.sdk.bytes", MetricType.COUNTER),
+    SEQUENTIAL_SDK_READ_BYTES(
+        "gcs.analytics-core.client.read.sequential.sdk.bytes", MetricType.COUNTER),
+    RANDOM_SDK_FIRST_READ_DURATION(
+        "gcs.analytics-core.client.read.random.sdk.first.duration", MetricType.DURATION),
+    SEQUENTIAL_SDK_FIRST_READ_DURATION(
+        "gcs.analytics-core.client.read.sequential.sdk.first.duration", MetricType.DURATION),
+    RANDOM_SDK_FIRST_READ_COUNT(
+        "gcs.analytics-core.client.read.random.sdk.first.count", MetricType.COUNTER),
+    SEQUENTIAL_SDK_FIRST_READ_COUNT(
+        "gcs.analytics-core.client.read.sequential.sdk.first.count", MetricType.COUNTER),
+    STRATEGY_SWITCH_TO_RANDOM_DURATION(
+        "gcs.analytics-core.client.strategy.switch.random.duration", MetricType.DURATION),
+    STRATEGY_SWITCH_TO_SEQUENTIAL_DURATION(
+        "gcs.analytics-core.client.strategy.switch.sequential.duration", MetricType.DURATION);
 
     private final String name;
     private final MetricType type;

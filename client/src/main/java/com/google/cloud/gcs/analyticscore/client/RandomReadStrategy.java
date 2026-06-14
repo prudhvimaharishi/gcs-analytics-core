@@ -76,4 +76,9 @@ class RandomReadStrategy extends AbstractReadStrategy {
   public long getLimit() {
     return currentLimit;
   }
+
+  @Override
+  public Type getType() {
+    return Type.RANDOM;
+  }
 }

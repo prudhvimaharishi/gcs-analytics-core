@@ -83,6 +83,11 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
     return currentStrategy.getLimit();
   }
 
+  @Override
+  public Type getType() {
+    return currentStrategy.getType();
+  }
+
   ReadStrategy getDelegateStrategy() {
     return currentStrategy;
   }
@@ -114,9 +119,14 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
   }
 
   private void switchToRandom() throws IOException {
-    isRandomMode = true;
-    currentStrategy.close();
-    currentStrategy = new RandomReadStrategy(storage, itemId, options, itemInfo, telemetry);
+    long startTime = System.nanoTime();
+    try {
+      isRandomMode = true;
+      currentStrategy.close();
+      currentStrategy = new RandomReadStrategy(storage, itemId, options, itemInfo, telemetry);
+    } finally {
+      recordSwitchDuration(startTime, Type.RANDOM);
+    }
     telemetry.recordMetric(Metric.STRATEGY_SWITCH_TO_RANDOM_COUNT, 1, Collections.emptyMap());
   }
 
@@ -126,10 +136,23 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
   }
 
   private void switchToSequential() throws IOException {
-    isRandomMode = false;
-    sequentialReadCount = 0;
-    currentStrategy.close();
-    currentStrategy = new SequentialReadStrategy(storage, itemId, options, itemInfo, telemetry);
+    long startTime = System.nanoTime();
+    try {
+      isRandomMode = false;
+      sequentialReadCount = 0;
+      currentStrategy.close();
+      currentStrategy = new SequentialReadStrategy(storage, itemId, options, itemInfo, telemetry);
+    } finally {
+      recordSwitchDuration(startTime, Type.SEQUENTIAL);
+    }
     telemetry.recordMetric(Metric.STRATEGY_SWITCH_TO_SEQUENTIAL_COUNT, 1, Collections.emptyMap());
+  }
+
+  private void recordSwitchDuration(long startTime, Type targetStrategy) {
+    Metric metric =
+        targetStrategy == Type.RANDOM
+            ? Metric.STRATEGY_SWITCH_TO_RANDOM_DURATION
+            : Metric.STRATEGY_SWITCH_TO_SEQUENTIAL_DURATION;
+    telemetry.recordMetric(metric, System.nanoTime() - startTime, Collections.emptyMap());
   }
 }
