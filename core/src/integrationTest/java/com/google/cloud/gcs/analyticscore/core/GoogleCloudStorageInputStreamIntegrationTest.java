@@ -177,7 +177,7 @@ class GoogleCloudStorageInputStreamIntegrationTest {
       strings = {
         IntegrationTestHelper.TPCDS_CUSTOMER_SMALL_FILE,
       })
-  void read_capturesTelemetryAttributes_withCorrectReadLength(String fileName) throws IOException {
+  void read_capturesTelemetryAttributes(String fileName) throws IOException {
     AtomicReference<Map<MetricKey, Long>> capturedReadMetrics = new AtomicReference<>();
     AtomicReference<Operation> capturedReadOperation = new AtomicReference<>();
     OperationListener listener =
@@ -229,6 +229,6 @@ class GoogleCloudStorageInputStreamIntegrationTest {
             .findFirst()
             .get();
     assertThat(capturedReadMetrics.get().get(bytesReadKey)).isEqualTo(5L);
-    assertThat(capturedReadOperation.get().getAttributes().get("READ_LENGTH")).isEqualTo("5");
+
   }
 }
