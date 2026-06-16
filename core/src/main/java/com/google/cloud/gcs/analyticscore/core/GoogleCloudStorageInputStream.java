@@ -135,18 +135,12 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
 
   @Override
   public int read(ByteBuffer byteBuffer) throws IOException {
-    Map<String, String> telemetryAttributes =
-        ImmutableMap.<String, String>builder()
-            .putAll(commonAttributes)
-            .put(Attribute.READ_LENGTH.name(), String.valueOf(byteBuffer.remaining()))
-            .put(Attribute.READ_OFFSET.name(), String.valueOf(byteBuffer.position()))
-            .build();
     return gcsFileSystem
         .getTelemetry()
         .measure(
             Operation.READ.name(),
             Metric.READ_DURATION,
-            telemetryAttributes,
+            commonAttributes,
             recorder -> {
               checkNotClosed("Cannot read: already closed");
               if (isMetadataInitialized()

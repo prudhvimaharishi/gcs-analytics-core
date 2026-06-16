@@ -229,6 +229,6 @@ class GoogleCloudStorageInputStreamIntegrationTest {
             .findFirst()
             .get();
     assertThat(capturedReadMetrics.get().get(bytesReadKey)).isEqualTo(5L);
-    assertThat(capturedReadOperation.get().getAttributes().get("READ_LENGTH")).isEqualTo("5");
+
   }
 }
