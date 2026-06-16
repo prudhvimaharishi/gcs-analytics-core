@@ -29,7 +29,6 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.function.IntFunction;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
@@ -135,18 +134,12 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
 
   @Override
   public int read(ByteBuffer byteBuffer) throws IOException {
-    Map<String, String> telemetryAttributes =
-        ImmutableMap.<String, String>builder()
-            .putAll(commonAttributes)
-            .put(Attribute.READ_LENGTH.name(), String.valueOf(byteBuffer.remaining()))
-            .put(Attribute.READ_OFFSET.name(), String.valueOf(byteBuffer.position()))
-            .build();
     return gcsFileSystem
         .getTelemetry()
         .measure(
             Operation.READ.name(),
             Metric.READ_DURATION,
-            telemetryAttributes,
+            commonAttributes,
             recorder -> {
               checkNotClosed("Cannot read: already closed");
               if (isMetadataInitialized()
