@@ -35,7 +35,8 @@ public class GcsAnalyticsCoreTelemetryConstants {
     SMALL_OBJECT_CACHE_MISS(
         "gcs.analytics-core.client.small.object.cache.misses", MetricType.COUNTER),
     CLOSE_DURATION("gcs.analytics-core.client.close.duration", MetricType.DURATION),
-    GCS_CLIENT_CREATE_DURATION("gcs.analytics-core.client.create.duration", MetricType.DURATION);
+    GCS_CLIENT_CREATE_DURATION("gcs.analytics-core.client.create.duration", MetricType.DURATION),
+    GCS_API_COUNT("gcs.analytics-core.client.api.count", MetricType.COUNTER);
 
     private final String name;
     private final MetricType type;

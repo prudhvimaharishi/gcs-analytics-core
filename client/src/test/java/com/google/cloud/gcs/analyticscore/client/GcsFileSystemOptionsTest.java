@@ -62,4 +62,14 @@ class GcsFileSystemOptionsTest {
     assertThat(cacheOptions.isSmallObjectCacheEnabled()).isTrue();
     assertThat(cacheOptions.getSmallObjectCacheMaxSizeBytes()).isEqualTo(200 * MB);
   }
+
+  @Test
+  void createFromOptions_httpInterceptorMetricsProperty_createsCorrectOptions() {
+    ImmutableMap<String, String> properties =
+        ImmutableMap.of("fs.gs.analytics-core.http-interceptor-metrics.enabled", "false");
+
+    GcsFileSystemOptions options = GcsFileSystemOptions.createFromOptions(properties, "fs.gs.");
+
+    assertThat(options.getGcsClientOptions().isHttpInterceptorMetricsEnabled()).isFalse();
+  }
 }

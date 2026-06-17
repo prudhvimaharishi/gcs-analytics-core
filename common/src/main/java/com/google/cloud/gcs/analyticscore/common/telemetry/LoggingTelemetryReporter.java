@@ -36,50 +36,99 @@ public class LoggingTelemetryReporter implements OperationListener {
 
   @Override
   public void onOperationStart(Operation operation) {
-    String message =
-        String.format(
-            "Operation started: [%s], id: [%s], attributes: %s",
-            operation.getName(), operation.getOperationId(), operation.getAttributes());
-    logMessage(message);
+    StringBuilder sb = new StringBuilder("LoggingTelemetryReporter: {");
+    sb.append("\"name\":\"").append(escapeJson(operation.getName())).append("\",");
+    sb.append("\"id\":\"").append(escapeJson(operation.getOperationId())).append("\",");
+    sb.append("\"attributes\":").append(mapToJson(operation.getAttributes()));
+    sb.append("}");
+    logMessage(sb.toString());
   }
 
   @Override
   public void onOperationEnd(Operation operation, Map<MetricKey, Long> metrics) {
-    String message =
-        String.format(
-            "Operation ended: [%s], id: [%s], attributes: %s, metrics: %s",
-            operation.getName(),
-            operation.getOperationId(),
-            operation.getAttributes(),
-            formatMetrics(metrics));
-    logMessage(message);
+    String escapedName = escapeJson(operation.getName());
+    String escapedId = escapeJson(operation.getOperationId());
+    String attributesJson = mapToJson(operation.getAttributes());
+
+    if (metrics == null || metrics.isEmpty()) {
+      StringBuilder sb = new StringBuilder("LoggingTelemetryReporter: {");
+      sb.append("\"name\":\"").append(escapedName).append("\",");
+      sb.append("\"id\":\"").append(escapedId).append("\",");
+      sb.append("\"attributes\":").append(attributesJson);
+      sb.append("}");
+      logMessage(sb.toString());
+      return;
+    }
+
+    for (Map.Entry<MetricKey, Long> entry : metrics.entrySet()) {
+      StringBuilder sb = new StringBuilder("LoggingTelemetryReporter: {");
+      sb.append("\"name\":\"").append(escapedName).append("\",");
+      sb.append("\"id\":\"").append(escapedId).append("\",");
+      sb.append("\"attributes\":").append(attributesJson).append(",");
+
+      MetricKey key = entry.getKey();
+      sb.append("\"metric_name\":\"").append(escapeJson(key.getMetric().getName())).append("\",");
+      sb.append("\"metric_value\":").append(entry.getValue());
+      if (key.getAttributes() != null && !key.getAttributes().isEmpty()) {
+        sb.append(",\"metric_attributes\":").append(mapToJson(key.getAttributes()));
+      }
+      sb.append("}");
+      logMessage(sb.toString());
+    }
   }
 
-  /**
-   * Formats a map of metrics into a generic, readable string. Sample : {metric1=1, metric2=2,
-   * metric3=3}
-   */
   @VisibleForTesting
   String formatMetrics(Map<MetricKey, Long> metrics) {
     if (metrics == null || metrics.isEmpty()) {
+      return "[]";
+    }
+    StringBuilder sb = new StringBuilder("[");
+    boolean first = true;
+    for (Map.Entry<MetricKey, Long> entry : metrics.entrySet()) {
+      if (!first) {
+        sb.append(",");
+      }
+      first = false;
+      MetricKey key = entry.getKey();
+      sb.append("{");
+      sb.append("\"name\":\"").append(escapeJson(key.getMetric().getName())).append("\",");
+      sb.append("\"value\":").append(entry.getValue());
+      if (key.getAttributes() != null && !key.getAttributes().isEmpty()) {
+        sb.append(",\"attributes\":").append(mapToJson(key.getAttributes()));
+      }
+      sb.append("}");
+    }
+    sb.append("]");
+    return sb.toString();
+  }
+
+  private String mapToJson(Map<String, String> map) {
+    if (map == null || map.isEmpty()) {
       return "{}";
     }
     StringBuilder sb = new StringBuilder("{");
     boolean first = true;
-    for (Map.Entry<MetricKey, Long> entry : metrics.entrySet()) {
+    for (Map.Entry<String, String> entry : map.entrySet()) {
       if (!first) {
-        sb.append(", ");
+        sb.append(",");
       }
       first = false;
-      MetricKey key = entry.getKey();
-      sb.append(key.getMetric().getName());
-      if (key.getAttributes() != null && !key.getAttributes().isEmpty()) {
-        sb.append(key.getAttributes());
-      }
-      sb.append("=").append(entry.getValue());
+      sb.append("\"").append(escapeJson(entry.getKey())).append("\":");
+      sb.append("\"").append(escapeJson(entry.getValue())).append("\"");
     }
     sb.append("}");
     return sb.toString();
+  }
+
+  private String escapeJson(String str) {
+    if (str == null) {
+      return "";
+    }
+    return str.replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t");
   }
 
   private void logMessage(String message) {

@@ -27,6 +27,8 @@ public abstract class GcsClientOptions {
   private static final String SERVICE_HOST_KEY = "service.host";
   private static final String USER_AGENT_KEY = "user-agent";
   static final String PROJECT_ID_KEY = "project-id";
+  private static final String HTTP_INTERCEPTOR_METRICS_ENABLED_KEY =
+      "analytics-core.http-interceptor-metrics.enabled";
 
   public abstract Optional<String> getProjectId();
 
@@ -38,11 +40,14 @@ public abstract class GcsClientOptions {
 
   public abstract GcsReadOptions getGcsReadOptions();
 
+  public abstract boolean isHttpInterceptorMetricsEnabled();
+
   public abstract Builder toBuilder();
 
   public static Builder builder() {
     return new AutoValue_GcsClientOptions.Builder()
-        .setGcsReadOptions(GcsReadOptions.builder().build());
+        .setGcsReadOptions(GcsReadOptions.builder().build())
+        .setHttpInterceptorMetricsEnabled(false);
   }
 
   public static GcsClientOptions createFromOptions(
@@ -59,6 +64,11 @@ public abstract class GcsClientOptions {
     }
     if (analyticsCoreOptions.containsKey(prefix + USER_AGENT_KEY)) {
       optionsBuilder.setUserAgent(analyticsCoreOptions.get(prefix + USER_AGENT_KEY));
+    }
+    if (analyticsCoreOptions.containsKey(prefix + HTTP_INTERCEPTOR_METRICS_ENABLED_KEY)) {
+      optionsBuilder.setHttpInterceptorMetricsEnabled(
+          Boolean.parseBoolean(
+              analyticsCoreOptions.get(prefix + HTTP_INTERCEPTOR_METRICS_ENABLED_KEY)));
     }
     optionsBuilder.setGcsReadOptions(
         GcsReadOptions.createFromOptions(analyticsCoreOptions, prefix));
@@ -79,6 +89,8 @@ public abstract class GcsClientOptions {
     public abstract Builder setUserAgent(String userAgent);
 
     public abstract Builder setGcsReadOptions(GcsReadOptions readOptions);
+
+    public abstract Builder setHttpInterceptorMetricsEnabled(boolean enabled);
 
     public abstract GcsClientOptions build();
   }

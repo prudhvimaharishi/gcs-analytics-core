@@ -19,9 +19,19 @@ import static com.google.common.truth.Truth.assertThat;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.google.api.client.http.GenericUrl;
+import com.google.api.client.http.HttpRequest;
+import com.google.api.client.http.HttpRequestInitializer;
+import com.google.api.client.http.HttpTransport;
+import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.auth.Credentials;
 import com.google.cloud.NoCredentials;
+import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
+import com.google.cloud.gcs.analyticscore.common.telemetry.MetricKey;
+import com.google.cloud.gcs.analyticscore.common.telemetry.Operation;
+import com.google.cloud.gcs.analyticscore.common.telemetry.OperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
+import com.google.cloud.http.HttpTransportOptions;
 import com.google.cloud.storage.*;
 import com.google.cloud.storage.contrib.nio.testing.LocalStorageHelper;
 import com.google.common.base.Supplier;
@@ -30,7 +40,11 @@ import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.BeforeEach;
@@ -242,5 +256,76 @@ class GcsClientImplTest {
             executorServiceSupplier,
             telemetry);
     assertThat(client.storage.getOptions().getCredentials()).isEqualTo(NoCredentials.getInstance());
+  }
+
+  @Test
+  void createStorage_metricsEnabled_configuresHttpRequestInitializer() {
+    GcsClientImpl client =
+        new GcsClientImpl(
+            NoCredentials.getInstance(),
+            TEST_GCS_CLIENT_OPTIONS,
+            executorServiceSupplier,
+            telemetry);
+
+    assertThat(client.storage.getOptions().getTransportOptions())
+        .isInstanceOf(GcsAnalyticsCoreHttpRequestInitializer.class);
+  }
+
+  @Test
+  void createStorage_metricsDisabled_doesNotConfigureHttpRequestInitializer() {
+    GcsClientOptions options =
+        TEST_GCS_CLIENT_OPTIONS.toBuilder().setHttpInterceptorMetricsEnabled(false).build();
+
+    GcsClientImpl client =
+        new GcsClientImpl(NoCredentials.getInstance(), options, executorServiceSupplier, telemetry);
+
+    assertThat(client.storage.getOptions().getTransportOptions())
+        .isNotInstanceOf(GcsAnalyticsCoreHttpRequestInitializer.class);
+  }
+
+  @Test
+  void intercept_recordsApiCountMetricAndCallsExistingInterceptor() throws Exception {
+    List<OperationListener> listeners = new ArrayList<>();
+    Map<MetricKey, Long> recordedMetrics = new ConcurrentHashMap<>();
+    listeners.add(
+        new OperationListener() {
+          @Override
+          public void onOperationStart(Operation operation) {}
+
+          @Override
+          public void onOperationEnd(Operation operation, Map<MetricKey, Long> metrics) {
+            recordedMetrics.putAll(metrics);
+          }
+
+          @Override
+          public void close() {}
+        });
+    Telemetry telemetry = new Telemetry(listeners);
+    GcsClientImpl client =
+        new GcsClientImpl(
+            NoCredentials.getInstance(),
+            TEST_GCS_CLIENT_OPTIONS,
+            executorServiceSupplier,
+            telemetry);
+    HttpTransportOptions transportOptions =
+        (HttpTransportOptions) client.storage.getOptions().getTransportOptions();
+    HttpRequestInitializer initializer =
+        transportOptions.getHttpRequestInitializer(client.storage.getOptions());
+    HttpTransport transport = new NetHttpTransport();
+    HttpRequest request =
+        transport.createRequestFactory().buildGetRequest(new GenericUrl("http://example.com"));
+    boolean[] existingCalled = new boolean[1];
+    request.setInterceptor(req -> existingCalled[0] = true);
+
+    initializer.initialize(request);
+    request.getInterceptor().intercept(request);
+
+    long callCount =
+        recordedMetrics.entrySet().stream()
+            .filter(entry -> entry.getKey().getMetric() == Metric.GCS_API_COUNT)
+            .mapToLong(Map.Entry::getValue)
+            .sum();
+    assertThat(callCount).isEqualTo(1L);
+    assertThat(existingCalled[0]).isTrue();
   }
 }

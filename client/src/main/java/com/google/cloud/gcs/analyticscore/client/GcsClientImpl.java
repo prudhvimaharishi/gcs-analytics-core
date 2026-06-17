@@ -132,6 +132,9 @@ class GcsClientImpl implements GcsClient {
     clientOptions.getClientLibToken().ifPresent(builder::setClientLibToken);
     clientOptions.getServiceHost().ifPresent(builder::setHost);
     credentials.ifPresent(builder::setCredentials);
+    if (clientOptions.isHttpInterceptorMetricsEnabled()) {
+      builder.setTransportOptions(new GcsAnalyticsCoreHttpRequestInitializer(telemetry));
+    }
 
     return builder.build().getService();
   }
