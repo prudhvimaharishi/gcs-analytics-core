@@ -37,6 +37,10 @@ limitations under the License.
             <artifactId>client</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
         <!--Test Dependencies-->
         <dependency>
             <groupId>com.google.truth</groupId>

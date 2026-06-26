@@ -33,6 +33,10 @@ These settings control how aggressively the library prefetches and caches metada
 | `analytics-core.small-file.cache.threshold-bytes` | Threshold (in bytes) below which small files are cached entirely. | `1048576` (1 MB) |
 | `analytics-core.small-file.cache.enabled` | Controls whether the small object cache is enabled. | `false` |
 | `analytics-core.small-file.cache.max-size-bytes` | The maximum capacity (in bytes) to hold in the small object cache. | `209715200` (200 MB) |
+| `analytics-core.object.cache.enabled` | Controls whether the full-object chunk cache is enabled. When enabled, objects are cached in fixed-size chunks so repeated or nearby reads are served from memory. Only applies when the file size is known. | `false` |
+| `analytics-core.object.cache.max-size-bytes` | The maximum capacity (in bytes) to hold in the object-chunk cache. | `1073741824` (1 GB) |
+| `analytics-core.object.cache.chunk-size-bytes` | The chunk size (in bytes) objects are partitioned into for caching. | `131072` (128 KB) |
+| `analytics-core.object.cache.max-fetch-splits` | The maximum number of separate GCS requests a single read may issue to fetch its missing chunks. When the missing chunks are fragmented across more runs than this, the whole requested range is fetched in one request instead. | `3` |
 
 ### Read Performance and I/O Tuning
 

@@ -23,6 +23,7 @@ import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConsta
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Operation;
 import com.google.cloud.gcs.analyticscore.core.channel.SmartReadChannel;
 import com.google.cloud.gcs.analyticscore.core.optimizer.GcsFooterOptimizer;
+import com.google.cloud.gcs.analyticscore.core.optimizer.ObjectChunkOptimizer;
 import com.google.cloud.gcs.analyticscore.core.optimizer.SmallObjectOptimizer;
 import com.google.cloud.storage.BlobId;
 import com.google.common.collect.ImmutableMap;
@@ -274,6 +275,13 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
                           readOptions,
                           gcsFileSystem.getTelemetry()))
                   .addOptimizer(new GcsFooterOptimizer(readOptions, gcsFileSystem.getTelemetry()))
+                  // Runs last so it only handles reads not already served by the
+                  // footer/small-object
+                  // caches (i.e. the general object-body reads).
+                  .addOptimizer(
+                      new ObjectChunkOptimizer(
+                          gcsFileSystem.getFileSystemOptions().getGcsCacheOptions(),
+                          gcsFileSystem.getTelemetry()))
                   .build();
             });
   }

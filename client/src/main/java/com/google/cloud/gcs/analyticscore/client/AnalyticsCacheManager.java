@@ -24,6 +24,7 @@ import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImp
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Optional;
 
 /**
  * Manages the caching layer for GCS objects. This class is thread-safe and acts as a registry for
@@ -33,6 +34,7 @@ public class AnalyticsCacheManager {
 
   private final AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
   private final AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
+  private final AnalyticsCache<GcsObjectChunkKey, ByteBuffer> objectChunkCache;
 
   /**
    * Creates a new {@link AnalyticsCacheManager} with the specified options.
@@ -49,6 +51,12 @@ public class AnalyticsCacheManager {
     this.smallObjectCache =
         options.isSmallObjectCacheEnabled()
             ? AnalyticsCacheCaffeineImpl.create(options.getSmallObjectCacheMaxSizeBytes(), weigher)
+            : AnalyticsCacheNoOpImpl.getInstance();
+    Weigher<GcsObjectChunkKey, ByteBuffer> chunkWeigher = (key, value) -> value.remaining();
+    this.objectChunkCache =
+        options.isObjectChunkCacheEnabled()
+            ? AnalyticsCacheCaffeineImpl.create(
+                options.getObjectChunkCacheMaxSizeBytes(), chunkWeigher)
             : AnalyticsCacheNoOpImpl.getInstance();
   }
 
@@ -87,6 +95,44 @@ public class AnalyticsCacheManager {
         .asReadOnlyBuffer();
   }
 
+  /**
+   * Returns the cached chunk for the given {@code key}, obtaining it from the {@code chunkLoader}
+   * if necessary. This method is atomic; the {@code chunkLoader} will be applied at most once per
+   * key during concurrent access.
+   *
+   * <p>If the {@code chunkLoader} throws an exception, it will be propagated to the caller and the
+   * result will not be cached.
+   *
+   * @throws IOException if the loader throws an {@link IOException}.
+   */
+  public ByteBuffer getObjectChunk(GcsObjectChunkKey key, ObjectChunkLoader chunkLoader)
+      throws IOException {
+    checkNotNull(key, "key cannot be null");
+    checkNotNull(chunkLoader, "chunkLoader cannot be null");
+
+    return objectChunkCache.get(key, cachedKey -> chunkLoader.load(cachedKey)).asReadOnlyBuffer();
+  }
+
+  /**
+   * Returns the cached chunk for the given {@code key} if present, or {@link Optional#empty()}
+   * otherwise. Unlike {@link #getObjectChunk}, this never loads from source; it only probes the
+   * cache so callers can batch-fetch missing chunks themselves.
+   */
+  public Optional<ByteBuffer> getObjectChunkIfPresent(GcsObjectChunkKey key) {
+    checkNotNull(key, "key cannot be null");
+    return objectChunkCache.get(key).map(ByteBuffer::asReadOnlyBuffer);
+  }
+
+  /**
+   * Caches the {@code chunk} for the given {@code key}, replacing any previously cached value. The
+   * caller must not mutate {@code chunk} (including its position or limit) after this call.
+   */
+  public void putObjectChunk(GcsObjectChunkKey key, ByteBuffer chunk) {
+    checkNotNull(key, "key cannot be null");
+    checkNotNull(chunk, "chunk cannot be null");
+    objectChunkCache.put(key, chunk);
+  }
+
   /** Invalidates the cached footer for the given {@code itemId}. */
   public void invalidateFooter(GcsItemId itemId) {
     checkNotNull(itemId, "itemId cannot be null");
@@ -103,6 +149,7 @@ public class AnalyticsCacheManager {
   public void invalidateAll() {
     footerCache.invalidateAll();
     smallObjectCache.invalidateAll();
+    objectChunkCache.invalidateAll();
   }
 
   /** A loader for GCS object footers. */
@@ -117,5 +164,12 @@ public class AnalyticsCacheManager {
   public interface SmallObjectLoader {
     /** Loads the small object for the given {@code itemId}. */
     ByteBuffer load(GcsItemId itemId) throws IOException;
+  }
+
+  /** A loader for object chunks. */
+  @FunctionalInterface
+  public interface ObjectChunkLoader {
+    /** Loads the bytes for the chunk identified by {@code key}. */
+    ByteBuffer load(GcsObjectChunkKey key) throws IOException;
   }
 }

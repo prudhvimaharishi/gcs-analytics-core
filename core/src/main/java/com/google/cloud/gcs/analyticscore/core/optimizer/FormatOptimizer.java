@@ -56,10 +56,14 @@ public interface FormatOptimizer {
    *
    * @param ranges The list of ranges requested.
    * @param allocate Function to allocate ByteBuffers for satisfied ranges.
+   * @param source The underlying channel, available for optimizers that need to fetch data.
    * @return The list of ranges that were NOT satisfied and still need to be read from source.
    */
   default List<GcsObjectRange> readVectored(
-      List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate) throws IOException {
+      List<GcsObjectRange> ranges,
+      IntFunction<ByteBuffer> allocate,
+      VectoredSeekableByteChannel source)
+      throws IOException {
     return ranges;
   }
 
