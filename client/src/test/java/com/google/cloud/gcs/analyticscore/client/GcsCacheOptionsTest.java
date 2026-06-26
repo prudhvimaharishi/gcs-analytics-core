@@ -34,6 +34,8 @@ class GcsCacheOptionsTest {
     assertThat(options.getFooterCacheMaxSizeBytes()).isEqualTo(100 * MB);
     assertThat(options.isSmallObjectCacheEnabled()).isFalse();
     assertThat(options.getSmallObjectCacheMaxSizeBytes()).isEqualTo(200 * MB);
+    assertThat(options.getObjectChunkSizeBytes()).isEqualTo(128 * (int) KB);
+    assertThat(options.getObjectChunkMaxFetchSplits()).isEqualTo(3);
   }
 
   @Test
@@ -64,6 +66,18 @@ class GcsCacheOptionsTest {
   void build_enabledCacheNegativeSizeBytes_throwsException() {
     GcsCacheOptions.Builder builder =
         GcsCacheOptions.builder().setFooterCacheEnabled(true).setFooterCacheMaxSizeBytes(-1);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @Test
+  void build_enabledChunkCacheNonPositiveMaxFetchSplits_throwsException() {
+    GcsCacheOptions.Builder builder =
+        GcsCacheOptions.builder()
+            .setObjectChunkCacheEnabled(true)
+            .setObjectChunkCacheMaxSizeBytes(MB)
+            .setObjectChunkSizeBytes(128 * (int) KB)
+            .setObjectChunkMaxFetchSplits(0);
 
     assertThrows(IllegalArgumentException.class, builder::build);
   }
