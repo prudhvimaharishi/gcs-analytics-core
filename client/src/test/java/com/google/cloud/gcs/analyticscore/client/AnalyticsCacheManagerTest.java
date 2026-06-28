@@ -21,7 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -30,13 +32,22 @@ class AnalyticsCacheManagerTest {
   private static final GcsItemId ITEM_ID =
       GcsItemId.builder().setBucketName("b").setObjectName("o").build();
   private static final ByteBuffer FOOTER = ByteBuffer.wrap(new byte[] {1, 2, 3});
+  private static final GcsObjectChunkKey CHUNK_KEY =
+      GcsObjectChunkKey.builder().setItemId(ITEM_ID).setGeneration(1L).setChunkIndex(0L).build();
 
   private AnalyticsCacheManager manager;
 
   @BeforeEach
   void setUp() {
+    // The object-chunk cache is JVM-wide static state; reset it so each test starts clean.
+    AnalyticsCacheManager.resetSharedObjectChunkCacheForTesting();
     manager =
         new AnalyticsCacheManager(GcsCacheOptions.builder().setFooterCacheEnabled(true).build());
+  }
+
+  @AfterEach
+  void tearDown() {
+    AnalyticsCacheManager.resetSharedObjectChunkCacheForTesting();
   }
 
   @Test
@@ -171,5 +182,50 @@ class AnalyticsCacheManagerTest {
           return FOOTER.duplicate();
         });
     assertThat(callCount.get()).isEqualTo(2);
+  }
+
+  @Test
+  void objectChunkCache_isSharedAcrossManagers() {
+    GcsCacheOptions options =
+        GcsCacheOptions.builder()
+            .setObjectChunkCacheEnabled(true)
+            .setObjectChunkCacheMaxSizeBytes(1024)
+            .build();
+    AnalyticsCacheManager writer = new AnalyticsCacheManager(options);
+    AnalyticsCacheManager reader = new AnalyticsCacheManager(options);
+
+    writer.putObjectChunk(CHUNK_KEY, ByteBuffer.wrap(new byte[] {7, 8, 9}));
+
+    // A chunk cached via one manager is visible from a separate manager in the same JVM.
+    Optional<ByteBuffer> fromReader = reader.getObjectChunkIfPresent(CHUNK_KEY);
+    assertThat(fromReader.isPresent()).isTrue();
+    assertThat(fromReader.get()).isEqualTo(ByteBuffer.wrap(new byte[] {7, 8, 9}));
+    assertThat(fromReader.get().isReadOnly()).isTrue();
+  }
+
+  @Test
+  void objectChunkCache_firstManagerOptionsWin() {
+    AnalyticsCacheManager first =
+        new AnalyticsCacheManager(
+            GcsCacheOptions.builder().setObjectChunkCacheEnabled(true).build());
+    first.putObjectChunk(CHUNK_KEY, ByteBuffer.wrap(new byte[] {1}));
+
+    // A later manager that disables the chunk cache still reuses the already-created shared cache.
+    AnalyticsCacheManager second =
+        new AnalyticsCacheManager(
+            GcsCacheOptions.builder().setObjectChunkCacheEnabled(false).build());
+
+    assertThat(second.getObjectChunkIfPresent(CHUNK_KEY).isPresent()).isTrue();
+  }
+
+  @Test
+  void invalidateAll_clearsSharedObjectChunkCache() {
+    GcsCacheOptions options = GcsCacheOptions.builder().setObjectChunkCacheEnabled(true).build();
+    manager = new AnalyticsCacheManager(options);
+    manager.putObjectChunk(CHUNK_KEY, ByteBuffer.wrap(new byte[] {1, 2}));
+
+    manager.invalidateAll();
+
+    assertThat(manager.getObjectChunkIfPresent(CHUNK_KEY).isPresent()).isFalse();
   }
 }

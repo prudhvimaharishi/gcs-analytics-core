@@ -22,6 +22,7 @@ import com.github.benmanes.caffeine.cache.Weigher;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCache;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImpl;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Optional;
@@ -29,8 +30,22 @@ import java.util.Optional;
 /**
  * Manages the caching layer for GCS objects. This class is thread-safe and acts as a registry for
  * various specialized caches (e.g., Parquet footer cache).
+ *
+ * <p>The footer and small-object caches are scoped to a single {@link AnalyticsCacheManager}
+ * instance (i.e. one per GCS filesystem instance). The object-chunk cache, however, is shared at
+ * the JVM (executor) level: every {@link AnalyticsCacheManager} in the JVM reuses a single
+ * object-chunk cache instance so that chunks fetched by one filesystem instance can be served to
+ * all others, which materially raises the chunk cache hit rate.
  */
 public class AnalyticsCacheManager {
+
+  /**
+   * The JVM-wide object-chunk cache, shared by every {@link AnalyticsCacheManager} in the JVM. It
+   * is created lazily from the options of the first manager constructed; managers created later
+   * reuse the same instance and their object-chunk options are ignored. Guarded by {@code
+   * AnalyticsCacheManager.class} for initialization and published via {@code volatile} for reads.
+   */
+  private static volatile AnalyticsCache<GcsObjectChunkKey, ByteBuffer> sharedObjectChunkCache;
 
   private final AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
   private final AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
@@ -52,12 +67,45 @@ public class AnalyticsCacheManager {
         options.isSmallObjectCacheEnabled()
             ? AnalyticsCacheCaffeineImpl.create(options.getSmallObjectCacheMaxSizeBytes(), weigher)
             : AnalyticsCacheNoOpImpl.getInstance();
-    Weigher<GcsObjectChunkKey, ByteBuffer> chunkWeigher = (key, value) -> value.remaining();
-    this.objectChunkCache =
-        options.isObjectChunkCacheEnabled()
-            ? AnalyticsCacheCaffeineImpl.create(
-                options.getObjectChunkCacheMaxSizeBytes(), chunkWeigher)
-            : AnalyticsCacheNoOpImpl.getInstance();
+    this.objectChunkCache = getOrCreateSharedObjectChunkCache(options);
+  }
+
+  /**
+   * Returns the JVM-wide object-chunk cache, creating it from {@code options} on first use.
+   *
+   * <p>Because object-chunk keys ({@link GcsObjectChunkKey}) are globally unique (they pin the
+   * bucket, object and generation), a single cache can safely serve every filesystem instance in
+   * the JVM. Uses double-checked locking so the cache is built exactly once and shared thereafter.
+   */
+  private static AnalyticsCache<GcsObjectChunkKey, ByteBuffer> getOrCreateSharedObjectChunkCache(
+      GcsCacheOptions options) {
+    AnalyticsCache<GcsObjectChunkKey, ByteBuffer> cache = sharedObjectChunkCache;
+    if (cache == null) {
+      synchronized (AnalyticsCacheManager.class) {
+        cache = sharedObjectChunkCache;
+        if (cache == null) {
+          Weigher<GcsObjectChunkKey, ByteBuffer> chunkWeigher = (key, value) -> value.remaining();
+          cache =
+              options.isObjectChunkCacheEnabled()
+                  ? AnalyticsCacheCaffeineImpl.create(
+                      options.getObjectChunkCacheMaxSizeBytes(), chunkWeigher)
+                  : AnalyticsCacheNoOpImpl.getInstance();
+          sharedObjectChunkCache = cache;
+        }
+      }
+    }
+    return cache;
+  }
+
+  /**
+   * Clears the JVM-wide object-chunk cache so the next constructed {@link AnalyticsCacheManager}
+   * rebuilds it from its own options. Exists so tests do not leak the shared cache across cases.
+   */
+  @VisibleForTesting
+  static void resetSharedObjectChunkCacheForTesting() {
+    synchronized (AnalyticsCacheManager.class) {
+      sharedObjectChunkCache = null;
+    }
   }
 
   /**
