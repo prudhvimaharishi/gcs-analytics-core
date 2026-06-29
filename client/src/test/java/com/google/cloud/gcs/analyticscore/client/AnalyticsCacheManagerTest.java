@@ -35,6 +35,7 @@ class AnalyticsCacheManagerTest {
 
   @BeforeEach
   void setUp() {
+    AnalyticsCacheManager.resetSharedObjectChunkCache();
     manager =
         new AnalyticsCacheManager(GcsCacheOptions.builder().setFooterCacheEnabled(true).build());
   }
@@ -171,5 +172,97 @@ class AnalyticsCacheManagerTest {
           return FOOTER.duplicate();
         });
     assertThat(callCount.get()).isEqualTo(2);
+  }
+
+  @Test
+  void getObjectChunk_cacheEnabled_computesAndCachesValue() throws IOException {
+    GcsCacheOptions options =
+        GcsCacheOptions.builder()
+            .setObjectChunkCacheEnabled(true)
+            .setObjectChunkCacheMaxSizeBytes(100)
+            .build();
+    manager = new AnalyticsCacheManager(options);
+    GcsObjectChunkKey key =
+        GcsObjectChunkKey.builder().setItemId(ITEM_ID).setGeneration(1L).setChunkIndex(0).build();
+    ByteBuffer chunkData = ByteBuffer.wrap(new byte[] {9, 8, 7});
+    AtomicInteger callCount = new AtomicInteger(0);
+
+    ByteBuffer result1 =
+        manager.getObjectChunk(
+            key,
+            k -> {
+              callCount.incrementAndGet();
+              return chunkData.duplicate();
+            });
+    ByteBuffer result2 =
+        manager.getObjectChunk(
+            key,
+            k -> {
+              callCount.incrementAndGet();
+              return ByteBuffer.wrap(new byte[] {6, 5, 4});
+            });
+
+    assertThat(result1).isEqualTo(chunkData);
+    assertThat(result2).isEqualTo(chunkData);
+    assertThat(callCount.get()).isEqualTo(1);
+  }
+
+  @Test
+  void getObjectChunk_cacheDisabled_callsLoaderEveryTime() throws IOException {
+    GcsCacheOptions options = GcsCacheOptions.builder().setObjectChunkCacheEnabled(false).build();
+    manager = new AnalyticsCacheManager(options);
+    GcsObjectChunkKey key =
+        GcsObjectChunkKey.builder().setItemId(ITEM_ID).setGeneration(1L).setChunkIndex(0).build();
+    ByteBuffer chunkData = ByteBuffer.wrap(new byte[] {9, 8, 7});
+    AtomicInteger callCount = new AtomicInteger(0);
+
+    manager.getObjectChunk(
+        key,
+        k -> {
+          callCount.incrementAndGet();
+          return chunkData.duplicate();
+        });
+    manager.getObjectChunk(
+        key,
+        k -> {
+          callCount.incrementAndGet();
+          return chunkData.duplicate();
+        });
+
+    assertThat(callCount.get()).isEqualTo(2);
+  }
+
+  @Test
+  void getObjectChunk_sharedAcrossInstances_jvmLevel() throws IOException {
+    GcsCacheOptions options =
+        GcsCacheOptions.builder()
+            .setObjectChunkCacheEnabled(true)
+            .setObjectChunkCacheMaxSizeBytes(100)
+            .build();
+    AnalyticsCacheManager manager1 = new AnalyticsCacheManager(options);
+    AnalyticsCacheManager manager2 = new AnalyticsCacheManager(options);
+    GcsObjectChunkKey key =
+        GcsObjectChunkKey.builder().setItemId(ITEM_ID).setGeneration(1L).setChunkIndex(0).build();
+    ByteBuffer chunkData = ByteBuffer.wrap(new byte[] {9, 8, 7});
+    AtomicInteger callCount = new AtomicInteger(0);
+
+    ByteBuffer result1 =
+        manager1.getObjectChunk(
+            key,
+            k -> {
+              callCount.incrementAndGet();
+              return chunkData.duplicate();
+            });
+    ByteBuffer result2 =
+        manager2.getObjectChunk(
+            key,
+            k -> {
+              callCount.incrementAndGet();
+              return ByteBuffer.wrap(new byte[] {6, 5, 4});
+            });
+
+    assertThat(result1).isEqualTo(chunkData);
+    assertThat(result2).isEqualTo(chunkData);
+    assertThat(callCount.get()).isEqualTo(1);
   }
 }

@@ -22,6 +22,7 @@ import com.github.benmanes.caffeine.cache.Weigher;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCache;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImpl;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Optional;
@@ -32,6 +33,9 @@ import java.util.Optional;
  */
 public class AnalyticsCacheManager {
 
+  private static final Object LOCK = new Object();
+  private static AnalyticsCache<GcsObjectChunkKey, ByteBuffer> sharedObjectChunkCache;
+
   private final AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
   private final AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
   private final AnalyticsCache<GcsObjectChunkKey, ByteBuffer> objectChunkCache;
@@ -41,6 +45,7 @@ public class AnalyticsCacheManager {
    *
    * @param options The configuration options for the caching layer.
    */
+  @SuppressWarnings("StaticAssignmentInConstructor")
   public AnalyticsCacheManager(GcsCacheOptions options) {
     checkNotNull(options, "options cannot be null");
     Weigher<GcsItemId, ByteBuffer> weigher = (key, value) -> value.remaining();
@@ -52,12 +57,20 @@ public class AnalyticsCacheManager {
         options.isSmallObjectCacheEnabled()
             ? AnalyticsCacheCaffeineImpl.create(options.getSmallObjectCacheMaxSizeBytes(), weigher)
             : AnalyticsCacheNoOpImpl.getInstance();
-    Weigher<GcsObjectChunkKey, ByteBuffer> chunkWeigher = (key, value) -> value.remaining();
-    this.objectChunkCache =
-        options.isObjectChunkCacheEnabled()
-            ? AnalyticsCacheCaffeineImpl.create(
-                options.getObjectChunkCacheMaxSizeBytes(), chunkWeigher)
-            : AnalyticsCacheNoOpImpl.getInstance();
+
+    if (options.isObjectChunkCacheEnabled()) {
+      synchronized (LOCK) {
+        if (sharedObjectChunkCache == null) {
+          Weigher<GcsObjectChunkKey, ByteBuffer> chunkWeigher = (key, value) -> value.remaining();
+          sharedObjectChunkCache =
+              AnalyticsCacheCaffeineImpl.create(
+                  options.getObjectChunkCacheMaxSizeBytes(), chunkWeigher);
+        }
+      }
+      this.objectChunkCache = sharedObjectChunkCache;
+    } else {
+      this.objectChunkCache = AnalyticsCacheNoOpImpl.getInstance();
+    }
   }
 
   /**
@@ -150,6 +163,13 @@ public class AnalyticsCacheManager {
     footerCache.invalidateAll();
     smallObjectCache.invalidateAll();
     objectChunkCache.invalidateAll();
+  }
+
+  @VisibleForTesting
+  static void resetSharedObjectChunkCache() {
+    synchronized (LOCK) {
+      sharedObjectChunkCache = null;
+    }
   }
 
   /** A loader for GCS object footers. */
