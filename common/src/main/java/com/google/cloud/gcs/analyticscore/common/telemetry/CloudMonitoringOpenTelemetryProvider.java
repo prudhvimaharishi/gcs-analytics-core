@@ -30,6 +30,9 @@ import io.opentelemetry.sdk.metrics.View;
 import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.resources.Resource;
+import java.net.URL;
+import java.security.CodeSource;
+import java.security.ProtectionDomain;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
@@ -117,10 +120,21 @@ public class CloudMonitoringOpenTelemetryProvider implements OpenTelemetryProvid
 
   private SdkMeterProvider getMeterProviderWithCloudMonitoringExporter(
       Duration exportInterval, Optional<String> projectId) {
+    checkAndLogClassLocations();
     Resource resource = Resource.getDefault().merge(getGcpResource()).merge(getInstanceResource());
     SdkMeterProviderBuilder meterProviderBuilder = SdkMeterProvider.builder().setResource(resource);
-    MetricExporter cloudExporter =
-        GoogleCloudMetricExporter.createWithConfiguration(getMetricConfiguration(projectId));
+    MetricExporter cloudExporter;
+    try {
+      cloudExporter =
+          GoogleCloudMetricExporter.createWithConfiguration(getMetricConfiguration(projectId));
+    } catch (Throwable t) {
+      LOG.error(
+          "Failed to create GoogleCloudMetricExporter due to error, indicating potential GAX"
+              + " dependency conflict",
+          t);
+      checkAndLogClassLocations();
+      throw t;
+    }
     PeriodicMetricReader metricReader =
         PeriodicMetricReader.builder(cloudExporter).setInterval(exportInterval).build();
 
@@ -130,6 +144,31 @@ public class CloudMonitoringOpenTelemetryProvider implements OpenTelemetryProvid
         View.builder().setAggregation(Aggregation.drop()).build());
 
     return meterProviderBuilder.registerMetricReader(metricReader).build();
+  }
+
+  private static void checkAndLogClassLocations() {
+    try {
+      Class<?> retrySettingsClass = Class.forName("com.google.api.gax.retrying.RetrySettings");
+      logClassLocation("GAX RetrySettings", retrySettingsClass);
+    } catch (Throwable t) {
+      LOG.warn("Failed to load GAX RetrySettings for diagnostic check", t);
+    }
+    logClassLocation("GoogleCloudMetricExporter", GoogleCloudMetricExporter.class);
+  }
+
+  private static void logClassLocation(String label, Class<?> clazz) {
+    try {
+      ProtectionDomain protectionDomain = clazz.getProtectionDomain();
+      CodeSource codeSource = protectionDomain == null ? null : protectionDomain.getCodeSource();
+      URL location = codeSource == null ? null : codeSource.getLocation();
+      LOG.info("Diagnostic class check - {}: {} loaded from {}", label, clazz.getName(), location);
+    } catch (Throwable t) {
+      LOG.info(
+          "Diagnostic class check - {}: {} location check failed: {}",
+          label,
+          clazz.getName(),
+          t.getMessage());
+    }
   }
 
   private Resource getInstanceResource() {

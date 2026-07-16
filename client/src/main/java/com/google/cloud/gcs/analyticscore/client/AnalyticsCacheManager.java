@@ -22,6 +22,7 @@ import com.github.benmanes.caffeine.cache.Weigher;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCache;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImpl;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
@@ -38,8 +39,8 @@ public class AnalyticsCacheManager {
    */
   private static final long BUCKET_PROPERTIES_CACHE_TTL_MINUTES = 10;
 
-  private final AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
-  private final AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
+  private static volatile AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
+  private static volatile AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
   private final AnalyticsCache<String, BucketProperties> bucketPropertiesCache;
 
   /**
@@ -50,14 +51,23 @@ public class AnalyticsCacheManager {
   public AnalyticsCacheManager(GcsCacheOptions options) {
     checkNotNull(options, "options cannot be null");
     Weigher<GcsItemId, ByteBuffer> weigher = (key, value) -> value.remaining();
-    this.footerCache =
-        options.isFooterCacheEnabled()
-            ? AnalyticsCacheCaffeineImpl.create(options.getFooterCacheMaxSizeBytes(), weigher)
-            : AnalyticsCacheNoOpImpl.getInstance();
-    this.smallObjectCache =
-        options.isSmallObjectCacheEnabled()
-            ? AnalyticsCacheCaffeineImpl.create(options.getSmallObjectCacheMaxSizeBytes(), weigher)
-            : AnalyticsCacheNoOpImpl.getInstance();
+    if (footerCache == null || smallObjectCache == null) {
+      synchronized (AnalyticsCacheManager.class) {
+        if (footerCache == null) {
+          footerCache =
+              options.isFooterCacheEnabled()
+                  ? AnalyticsCacheCaffeineImpl.create(options.getFooterCacheMaxSizeBytes(), weigher)
+                  : AnalyticsCacheNoOpImpl.getInstance();
+        }
+        if (smallObjectCache == null) {
+          smallObjectCache =
+              options.isSmallObjectCacheEnabled()
+                  ? AnalyticsCacheCaffeineImpl.create(
+                      options.getSmallObjectCacheMaxSizeBytes(), weigher)
+                  : AnalyticsCacheNoOpImpl.getInstance();
+        }
+      }
+    }
     this.bucketPropertiesCache =
         AnalyticsCacheCaffeineImpl.createWithTtlOnly(
             BUCKET_PROPERTIES_CACHE_TTL_MINUTES, TimeUnit.MINUTES);
@@ -101,13 +111,17 @@ public class AnalyticsCacheManager {
   /** Invalidates the cached footer for the given {@code itemId}. */
   public void invalidateFooter(GcsItemId itemId) {
     checkNotNull(itemId, "itemId cannot be null");
-    footerCache.invalidate(itemId);
+    if (footerCache != null) {
+      footerCache.invalidate(itemId);
+    }
   }
 
   /** Invalidates the cached small object for the given {@code itemId}. */
   public void invalidateSmallObject(GcsItemId itemId) {
     checkNotNull(itemId, "itemId cannot be null");
-    smallObjectCache.invalidate(itemId);
+    if (smallObjectCache != null) {
+      smallObjectCache.invalidate(itemId);
+    }
   }
 
   /**
@@ -132,9 +146,25 @@ public class AnalyticsCacheManager {
 
   /** Invalidates all cached entries. */
   public void invalidateAll() {
-    footerCache.invalidateAll();
-    smallObjectCache.invalidateAll();
+    if (footerCache != null) {
+      footerCache.invalidateAll();
+    }
+    if (smallObjectCache != null) {
+      smallObjectCache.invalidateAll();
+    }
     bucketPropertiesCache.invalidateAll();
+  }
+
+  @VisibleForTesting
+  static synchronized void resetCaches() {
+    if (footerCache != null) {
+      footerCache.invalidateAll();
+      footerCache = null;
+    }
+    if (smallObjectCache != null) {
+      smallObjectCache.invalidateAll();
+      smallObjectCache = null;
+    }
   }
 
   /** A loader for GCS object footers. */
