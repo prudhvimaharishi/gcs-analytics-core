@@ -36,9 +36,9 @@ public abstract class GcsCacheOptions {
   private static final long MB = 1024L * KB;
 
   private static final boolean DEFAULT_FOOTER_CACHE_ENABLED = false;
-  private static final long DEFAULT_FOOTER_CACHE_MAX_SIZE_BYTES = 100 * MB;
+  private static final long DEFAULT_FOOTER_CACHE_MAX_SIZE_BYTES = 1024 * MB;
   private static final boolean DEFAULT_SMALL_OBJECT_CACHE_ENABLED = false;
-  private static final long DEFAULT_SMALL_OBJECT_CACHE_MAX_SIZE_BYTES = 200 * MB;
+  private static final long DEFAULT_SMALL_OBJECT_CACHE_MAX_SIZE_BYTES = 1024 * MB;
 
   /** Returns whether the Parquet footer cache is enabled. */
   public abstract boolean isFooterCacheEnabled();

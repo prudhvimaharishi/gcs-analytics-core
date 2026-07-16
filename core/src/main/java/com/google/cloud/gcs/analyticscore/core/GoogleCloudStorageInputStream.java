@@ -32,11 +32,17 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.function.IntFunction;
 import javax.annotation.Nonnull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** This is a seekable input stream for GCS objects. It is backed by a GcsFileSystem instance. */
 public class GoogleCloudStorageInputStream extends SeekableInputStream {
+  private static final Logger LOG = LoggerFactory.getLogger(GoogleCloudStorageInputStream.class);
+  private static final String JVM_INSTANCE_ID = UUID.randomUUID().toString();
+
   // Used for single-byte reads to avoid repeated allocation.
   private final ByteBuffer singleByteBuffer = ByteBuffer.wrap(new byte[1]);
 
@@ -143,6 +149,14 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
                   channelPosition,
                   position);
 
+              LOG.info(
+                  "GCS_READ_LOG file={} offset={} length={} fsId={} jvmId={}",
+                  gcsItemId,
+                  position,
+                  byteBuffer.remaining(),
+                  gcsFileSystem.hashCode(),
+                  JVM_INSTANCE_ID);
+
               int bytesRead = channel.read(byteBuffer);
               if (bytesRead > 0) {
                 position += bytesRead;
@@ -198,6 +212,13 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
             Metric.READ_DURATION,
             commonAttributes,
             recorder -> {
+              LOG.info(
+                  "GCS_READ_LOG file={} offset={} length={} fsId={} jvmId={}",
+                  gcsItemId,
+                  position,
+                  length,
+                  gcsFileSystem.hashCode(),
+                  JVM_INSTANCE_ID);
               try (VectoredSeekableByteChannel byteChannel =
                   openReadChannel(gcsFileSystem, gcsItemId, gcsFileInfo)) {
                 byteChannel.position(position);
@@ -230,6 +251,13 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
                   openReadChannel(gcsFileSystem, gcsItemId, gcsFileInfo)) {
                 long size = gcsFileInfo.getItemInfo().getSize();
                 long startPosition = Math.max(0, size - length);
+                LOG.info(
+                    "GCS_READ_LOG file={} offset={} length={} fsId={} jvmId={}",
+                    gcsItemId,
+                    startPosition,
+                    length,
+                    gcsFileSystem.hashCode(),
+                    JVM_INSTANCE_ID);
                 byteChannel.position(startPosition);
                 int bytesRead = byteChannel.read(ByteBuffer.wrap(buffer, offset, length));
                 if (bytesRead > 0) {
@@ -243,6 +271,15 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
   @Override
   public void readVectored(List<GcsObjectRange> fileRanges, IntFunction<ByteBuffer> alloc)
       throws IOException {
+    for (GcsObjectRange range : fileRanges) {
+      LOG.info(
+          "GCS_READ_LOG file={} offset={} length={} fsId={} jvmId={}",
+          gcsItemId,
+          range.getOffset(),
+          range.getLength(),
+          gcsFileSystem.hashCode(),
+          JVM_INSTANCE_ID);
+    }
     channel.readVectored(fileRanges, alloc);
   }
 

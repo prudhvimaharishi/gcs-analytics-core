@@ -19,10 +19,13 @@ package com.google.cloud.gcs.analyticscore.common.cache;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
+import com.github.benmanes.caffeine.cache.AsyncCache;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Weigher;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -34,18 +37,18 @@ import java.util.concurrent.TimeUnit;
  */
 public class AnalyticsCacheCaffeineImpl<K, V> implements AnalyticsCache<K, V> {
 
-  private final Cache<K, V> cache;
+  private final AsyncCache<K, V> asyncCache;
 
   private AnalyticsCacheCaffeineImpl(long maxWeight, Weigher<K, V> weigher) {
     checkArgument(maxWeight > 0, "maxWeight must be positive");
     checkNotNull(weigher, "weigher cannot be null");
-    this.cache = Caffeine.newBuilder().maximumWeight(maxWeight).weigher(weigher).build();
+    this.asyncCache = Caffeine.newBuilder().maximumWeight(maxWeight).weigher(weigher).buildAsync();
   }
 
   private AnalyticsCacheCaffeineImpl(long ttl, TimeUnit unit) {
     checkArgument(ttl > 0, "ttl must be positive");
     checkNotNull(unit, "unit cannot be null");
-    this.cache = Caffeine.newBuilder().expireAfterWrite(ttl, unit).build();
+    this.asyncCache = Caffeine.newBuilder().expireAfterWrite(ttl, unit).buildAsync();
   }
 
   /**
@@ -65,7 +68,14 @@ public class AnalyticsCacheCaffeineImpl<K, V> implements AnalyticsCache<K, V> {
   @Override
   public Optional<V> get(K key) {
     checkNotNull(key, "key cannot be null");
-    return Optional.ofNullable(cache.getIfPresent(key));
+    CompletableFuture<V> future = asyncCache.getIfPresent(key);
+    if (future != null
+        && future.isDone()
+        && !future.isCompletedExceptionally()
+        && !future.isCancelled()) {
+      return Optional.ofNullable(future.join());
+    }
+    return Optional.empty();
   }
 
   /** {@inheritDoc} */
@@ -75,25 +85,36 @@ public class AnalyticsCacheCaffeineImpl<K, V> implements AnalyticsCache<K, V> {
       K key, ThrowingFunction<? super K, ? extends V, E> mappingFunction) throws E {
     checkNotNull(key, "key cannot be null");
     checkNotNull(mappingFunction, "mappingFunction cannot be null");
+    CompletableFuture<V> future = asyncCache.getIfPresent(key);
+    if (future == null) {
+      CompletableFuture<V> newFuture = new CompletableFuture<>();
+      future = asyncCache.asMap().putIfAbsent(key, newFuture);
+      if (future == null) {
+        try {
+          V computed = mappingFunction.apply(key);
+          if (computed == null) {
+            throw new NullPointerException("mappingFunction returned null for key: " + key);
+          }
+          newFuture.complete(computed);
+        } catch (Throwable throwable) {
+          asyncCache.asMap().remove(key, newFuture);
+          newFuture.completeExceptionally(throwable);
+        }
+        future = newFuture;
+      }
+    }
     try {
-      return cache.get(
-          key,
-          keyToLoad -> {
-            try {
-              V computed = mappingFunction.apply(keyToLoad);
-              if (computed == null) {
-                throw new NullPointerException(
-                    "mappingFunction returned null for key: " + keyToLoad);
-              }
-              return computed;
-            } catch (Exception exception) {
-              throw new ExecutionException(exception);
-            }
-          });
-    } catch (ExecutionException executionException) {
-      Throwable cause = executionException.getCause();
+      return future.join();
+    } catch (CompletionException completionException) {
+      Throwable cause = completionException.getCause();
       if (cause instanceof RuntimeException) {
         throw (RuntimeException) cause;
+      }
+      if (cause instanceof Error) {
+        throw (Error) cause;
+      }
+      if (cause == null) {
+        throw completionException;
       }
       throw (E) cause;
     }
@@ -104,38 +125,31 @@ public class AnalyticsCacheCaffeineImpl<K, V> implements AnalyticsCache<K, V> {
   public void put(K key, V value) {
     checkNotNull(key, "key cannot be null");
     checkNotNull(value, "value cannot be null");
-    cache.put(key, value);
+    asyncCache.put(key, CompletableFuture.completedFuture(value));
   }
 
   /** {@inheritDoc} */
   @Override
   public void invalidate(K key) {
     checkNotNull(key, "key cannot be null");
-    cache.invalidate(key);
+    asyncCache.synchronous().invalidate(key);
   }
 
   /** {@inheritDoc} */
   @Override
   public void invalidateAll() {
-    cache.invalidateAll();
+    asyncCache.synchronous().invalidateAll();
   }
 
   /** {@inheritDoc} */
   @Override
   public long size() {
-    return cache.estimatedSize();
+    return asyncCache.synchronous().estimatedSize();
   }
 
   /** {@inheritDoc} */
   @Override
   public void cleanUp() {
-    cache.cleanUp();
-  }
-
-  /** A private runtime exception used to wrap checked exceptions during cache loading. */
-  private static class ExecutionException extends RuntimeException {
-    ExecutionException(Throwable cause) {
-      super(cause);
-    }
+    asyncCache.synchronous().cleanUp();
   }
 }

@@ -50,8 +50,8 @@ The caching subsystem is configured via [`GcsCacheOptions`](../../client/src/mai
 
 **Small Object Caching:**
 *   `analytics-core.small-file.cache.enabled`: Controls whether small object caching is enabled (Default: `false`).
-*   `analytics-core.small-file.cache.max-size-bytes`: The maximum capacity of the small object cache (Default: `209715200` i.e., 200 MB).
+*   `analytics-core.small-file.cache.max-size-bytes`: The maximum capacity of the small object cache (Default: `1073741824` i.e., 1 GB).
 
 **Footer Caching:**
 *   `analytics-core.footer.cache.enabled`: Controls whether the Parquet footer cache is enabled (Default: `false`).
-*   `analytics-core.footer.cache.max-size-bytes`: The maximum capacity of the footer cache (Default: `104857600` i.e., 100 MB).
+*   `analytics-core.footer.cache.max-size-bytes`: The maximum capacity of the footer cache (Default: `1073741824` i.e., 1 GB).

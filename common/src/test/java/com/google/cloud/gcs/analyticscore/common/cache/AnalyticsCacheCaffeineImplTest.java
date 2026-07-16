@@ -20,6 +20,10 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -114,5 +118,78 @@ class AnalyticsCacheCaffeineImplTest {
     cache.put("key2", "value2");
 
     assertThat(cache.size()).isEqualTo(2);
+  }
+
+  @Test
+  void get_concurrentAccess_invokesMappingFunctionOnce() throws Exception {
+    // Arrange
+    AtomicInteger callCount = new AtomicInteger(0);
+    CountDownLatch startLatch = new CountDownLatch(1);
+    CountDownLatch doneLatch = new CountDownLatch(2);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+
+    // Act
+    executor.submit(
+        () -> {
+          try {
+            startLatch.await();
+            cache.get(
+                "concurrent-key",
+                keyToLoad -> {
+                  callCount.incrementAndGet();
+                  Thread.sleep(50);
+                  return "computed-value";
+                });
+          } catch (Exception e) {
+            // Ignored
+          } finally {
+            doneLatch.countDown();
+          }
+        });
+    executor.submit(
+        () -> {
+          try {
+            startLatch.await();
+            cache.get(
+                "concurrent-key",
+                keyToLoad -> {
+                  callCount.incrementAndGet();
+                  Thread.sleep(50);
+                  return "computed-value";
+                });
+          } catch (Exception e) {
+            // Ignored
+          } finally {
+            doneLatch.countDown();
+          }
+        });
+    startLatch.countDown();
+    doneLatch.await(5, TimeUnit.SECONDS);
+    executor.shutdown();
+
+    // Assert
+    assertThat(callCount.get()).isEqualTo(1);
+    assertThat(cache.get("concurrent-key")).hasValue("computed-value");
+  }
+
+  @Test
+  void get_mappingFunctionThrowsException_doesNotCacheFailure() {
+    // Arrange
+    AtomicInteger callCount = new AtomicInteger(0);
+
+    // Act
+    assertThrows(
+        IOException.class,
+        () ->
+            cache.get(
+                "error-key",
+                keyToLoad -> {
+                  callCount.incrementAndGet();
+                  throw new IOException("test-error");
+                }));
+
+    // Assert
+    assertThat(callCount.get()).isEqualTo(1);
+    assertThat(cache.get("error-key")).isEmpty();
   }
 }
