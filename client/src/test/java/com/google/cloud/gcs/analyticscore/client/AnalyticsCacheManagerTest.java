@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,9 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class AnalyticsCacheManagerTest {
 
@@ -31,6 +33,8 @@ class AnalyticsCacheManagerTest {
   private static final GcsItemId ITEM_ID =
       GcsItemId.builder().setBucketName(BUCKET_NAME).setObjectName("o").build();
   private static final ByteBuffer FOOTER = ByteBuffer.wrap(new byte[] {1, 2, 3});
+
+  @TempDir Path tempDir;
 
   private AnalyticsCacheManager manager;
 
@@ -95,6 +99,74 @@ class AnalyticsCacheManagerTest {
     manager.getFooter(ITEM_ID, loader);
 
     assertThat(callCount.get()).isEqualTo(2);
+  }
+
+  @Test
+  void getFooter_workerCacheEnabled_cachesValue() throws IOException {
+    AnalyticsCacheManager.resetCaches();
+    GcsCacheOptions cacheOptions =
+        GcsCacheOptions.builder()
+            .setFooterCacheEnabled(true)
+            .setWorkerCacheEnabled(true)
+            .setWorkerCacheDirectory(tempDir.toString())
+            .build();
+    manager = new AnalyticsCacheManager(cacheOptions);
+    AtomicInteger callCount = new AtomicInteger(0);
+
+    ByteBuffer footer1 =
+        manager.getFooter(
+            ITEM_ID,
+            itemId -> {
+              callCount.incrementAndGet();
+              return FOOTER.duplicate();
+            });
+    AnalyticsCacheManager.clearStaticCacheReferences();
+    manager = new AnalyticsCacheManager(cacheOptions);
+    ByteBuffer footer2 =
+        manager.getFooter(
+            ITEM_ID,
+            itemId -> {
+              callCount.incrementAndGet();
+              return ByteBuffer.wrap(new byte[] {9, 9, 9});
+            });
+
+    assertThat(footer1).isEqualTo(FOOTER);
+    assertThat(footer2).isEqualTo(FOOTER);
+    assertThat(callCount.get()).isEqualTo(1);
+  }
+
+  @Test
+  void getSmallObject_workerCacheEnabled_cachesValue() throws IOException {
+    AnalyticsCacheManager.resetCaches();
+    GcsCacheOptions cacheOptions =
+        GcsCacheOptions.builder()
+            .setSmallObjectCacheEnabled(true)
+            .setWorkerCacheEnabled(true)
+            .setWorkerCacheDirectory(tempDir.toString())
+            .build();
+    manager = new AnalyticsCacheManager(cacheOptions);
+    AtomicInteger callCount = new AtomicInteger(0);
+
+    ByteBuffer obj1 =
+        manager.getSmallObject(
+            ITEM_ID,
+            itemId -> {
+              callCount.incrementAndGet();
+              return FOOTER.duplicate();
+            });
+    AnalyticsCacheManager.clearStaticCacheReferences();
+    manager = new AnalyticsCacheManager(cacheOptions);
+    ByteBuffer obj2 =
+        manager.getSmallObject(
+            ITEM_ID,
+            itemId -> {
+              callCount.incrementAndGet();
+              return ByteBuffer.wrap(new byte[] {9, 9, 9});
+            });
+
+    assertThat(obj1).isEqualTo(FOOTER);
+    assertThat(obj2).isEqualTo(FOOTER);
+    assertThat(callCount.get()).isEqualTo(1);
   }
 
   @Test
