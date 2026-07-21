@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,10 +21,14 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import com.github.benmanes.caffeine.cache.Weigher;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCache;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImpl;
+import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheFileImpl;
+import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheHybridImpl;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
 import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -55,16 +59,21 @@ public class AnalyticsCacheManager {
       synchronized (AnalyticsCacheManager.class) {
         if (footerCache == null) {
           footerCache =
-              options.isFooterCacheEnabled()
-                  ? AnalyticsCacheCaffeineImpl.create(options.getFooterCacheMaxSizeBytes(), weigher)
-                  : AnalyticsCacheNoOpImpl.getInstance();
+              createCache(
+                  options.isFooterCacheEnabled(),
+                  options.getFooterCacheMaxSizeBytes(),
+                  weigher,
+                  options,
+                  "footer");
         }
         if (smallObjectCache == null) {
           smallObjectCache =
-              options.isSmallObjectCacheEnabled()
-                  ? AnalyticsCacheCaffeineImpl.create(
-                      options.getSmallObjectCacheMaxSizeBytes(), weigher)
-                  : AnalyticsCacheNoOpImpl.getInstance();
+              createCache(
+                  options.isSmallObjectCacheEnabled(),
+                  options.getSmallObjectCacheMaxSizeBytes(),
+                  weigher,
+                  options,
+                  "small-object");
         }
       }
     }
@@ -165,6 +174,50 @@ public class AnalyticsCacheManager {
       smallObjectCache.invalidateAll();
       smallObjectCache = null;
     }
+  }
+
+  @VisibleForTesting
+  static synchronized void clearStaticCacheReferences() {
+    footerCache = null;
+    smallObjectCache = null;
+  }
+
+  private static AnalyticsCache<GcsItemId, ByteBuffer> createCache(
+      boolean memoryCacheEnabled,
+      long memoryCacheMaxSizeBytes,
+      Weigher<GcsItemId, ByteBuffer> weigher,
+      GcsCacheOptions options,
+      String cacheSubdirectory) {
+    boolean workerCacheEnabled = options.isWorkerCacheEnabled();
+    if (!memoryCacheEnabled && !workerCacheEnabled) {
+      return AnalyticsCacheNoOpImpl.getInstance();
+    }
+
+    AnalyticsCache<GcsItemId, ByteBuffer> l1Cache =
+        memoryCacheEnabled
+            ? AnalyticsCacheCaffeineImpl.create(memoryCacheMaxSizeBytes, weigher)
+            : null;
+
+    if (!workerCacheEnabled) {
+      return l1Cache != null ? l1Cache : AnalyticsCacheNoOpImpl.getInstance();
+    }
+
+    Path workerCacheDir = Paths.get(options.getWorkerCacheDirectory()).resolve(cacheSubdirectory);
+    AnalyticsCache<GcsItemId, ByteBuffer> l2Cache =
+        AnalyticsCacheFileImpl.create(
+            workerCacheDir,
+            options.getWorkerCacheMaxSizeBytes(),
+            itemId ->
+                itemId.getBucketName()
+                    + "/"
+                    + itemId.getObjectName().orElse("")
+                    + itemId.getContentGeneration().map(g -> "#" + g).orElse(""));
+
+    if (l1Cache == null) {
+      return l2Cache;
+    }
+
+    return AnalyticsCacheHybridImpl.create(l1Cache, l2Cache);
   }
 
   /** A loader for GCS object footers. */
