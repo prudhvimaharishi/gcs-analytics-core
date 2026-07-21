@@ -21,21 +21,37 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import com.github.benmanes.caffeine.cache.Weigher;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCache;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImpl;
-import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheFileImpl;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheHybridImpl;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
+import com.google.cloud.gcs.analyticscore.common.cache.disk.AnalyticsCacheDiskImpl;
+import com.google.cloud.gcs.analyticscore.common.cache.disk.SharedDiskCache;
+import com.google.cloud.gcs.analyticscore.common.cache.disk.SharedDiskCacheOptions;
+import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Manages the caching layer for GCS objects. This class is thread-safe and acts as a registry for
  * various specialized caches (e.g., Parquet footer cache).
+ *
+ * <p>The footer and small object caches are held in JVM-wide static fields so they are shared by
+ * every {@link GcsFileSystem} instance in an executor process. When the worker-level cache is
+ * enabled, each in-memory cache becomes the L1 tier of an {@link AnalyticsCacheHybridImpl} whose L2
+ * tier is a {@link SharedDiskCache} shared by every executor process on the host. A single disk
+ * engine (one directory, one size budget, one eviction janitor) backs both the footer and small
+ * object tiers; entries are distinguished by a key prefix. Only objects with a known content
+ * generation are persisted to disk, because GCS content is immutable per generation and such
+ * entries can never be stale.
  */
 public class AnalyticsCacheManager {
+
+  private static final Logger LOG = LoggerFactory.getLogger(AnalyticsCacheManager.class);
 
   /**
    * TTL for bucket properties cache in minutes. A 10-minute TTL is used because a bucket's
@@ -43,28 +59,44 @@ public class AnalyticsCacheManager {
    */
   private static final long BUCKET_PROPERTIES_CACHE_TTL_MINUTES = 10;
 
+  private static final String FOOTER_DISK_ENTRY_KIND = "footer";
+  private static final String SMALL_OBJECT_DISK_ENTRY_KIND = "small-object";
+
   private static volatile AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
   private static volatile AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
   private final AnalyticsCache<String, BucketProperties> bucketPropertiesCache;
 
   /**
-   * Creates a new {@link AnalyticsCacheManager} with the specified options.
+   * Creates a new {@link AnalyticsCacheManager} with the specified options and no telemetry
+   * reporting.
    *
    * @param options The configuration options for the caching layer.
    */
   public AnalyticsCacheManager(GcsCacheOptions options) {
+    this(options, new Telemetry(ImmutableList.of()));
+  }
+
+  /**
+   * Creates a new {@link AnalyticsCacheManager} with the specified options.
+   *
+   * @param options The configuration options for the caching layer.
+   * @param telemetry The telemetry used to report cache metrics.
+   */
+  public AnalyticsCacheManager(GcsCacheOptions options, Telemetry telemetry) {
     checkNotNull(options, "options cannot be null");
+    checkNotNull(telemetry, "telemetry cannot be null");
     Weigher<GcsItemId, ByteBuffer> weigher = (key, value) -> value.remaining();
     if (footerCache == null || smallObjectCache == null) {
       synchronized (AnalyticsCacheManager.class) {
+        Optional<SharedDiskCache> diskCache = createDiskCache(options, telemetry);
         if (footerCache == null) {
           footerCache =
               createCache(
                   options.isFooterCacheEnabled(),
                   options.getFooterCacheMaxSizeBytes(),
                   weigher,
-                  options,
-                  "footer");
+                  diskCache,
+                  FOOTER_DISK_ENTRY_KIND);
         }
         if (smallObjectCache == null) {
           smallObjectCache =
@@ -72,14 +104,81 @@ public class AnalyticsCacheManager {
                   options.isSmallObjectCacheEnabled(),
                   options.getSmallObjectCacheMaxSizeBytes(),
                   weigher,
-                  options,
-                  "small-object");
+                  diskCache,
+                  SMALL_OBJECT_DISK_ENTRY_KIND);
         }
       }
     }
     this.bucketPropertiesCache =
         AnalyticsCacheCaffeineImpl.createWithTtlOnly(
             BUCKET_PROPERTIES_CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+  }
+
+  /**
+   * Composes the caching tiers for one cache kind: an in-memory L1 (when the memory cache is
+   * enabled) over a shared disk L2 (when the worker cache is available). Returns a no-op cache when
+   * neither tier is active.
+   */
+  private static AnalyticsCache<GcsItemId, ByteBuffer> createCache(
+      boolean memoryCacheEnabled,
+      long memoryCacheMaxSizeBytes,
+      Weigher<GcsItemId, ByteBuffer> weigher,
+      Optional<SharedDiskCache> diskCache,
+      String entryKind) {
+    AnalyticsCache<GcsItemId, ByteBuffer> l1Cache =
+        memoryCacheEnabled
+            ? AnalyticsCacheCaffeineImpl.create(memoryCacheMaxSizeBytes, weigher)
+            : null;
+    AnalyticsCache<GcsItemId, ByteBuffer> l2Cache =
+        diskCache
+            .<AnalyticsCache<GcsItemId, ByteBuffer>>map(
+                engine ->
+                    AnalyticsCacheDiskImpl.create(
+                        engine, itemId -> diskEntryKey(itemId, entryKind)))
+            .orElse(null);
+
+    if (l1Cache != null && l2Cache != null) {
+      return AnalyticsCacheHybridImpl.create(l1Cache, l2Cache);
+    }
+    if (l1Cache != null) {
+      return l1Cache;
+    }
+    if (l2Cache != null) {
+      return l2Cache;
+    }
+    return AnalyticsCacheNoOpImpl.getInstance();
+  }
+
+  private static Optional<SharedDiskCache> createDiskCache(
+      GcsCacheOptions options, Telemetry telemetry) {
+    if (!options.isWorkerCacheEnabled()) {
+      return Optional.empty();
+    }
+    try {
+      SharedDiskCacheOptions diskCacheOptions =
+          SharedDiskCacheOptions.builder()
+              .setCacheDirectory(options.getWorkerCacheDirectory())
+              .setMaxSizeBytes(options.getWorkerCacheMaxSizeBytes())
+              .setTtlMillis(options.getWorkerCacheTtlMillis())
+              .setEvictionHighWatermark(options.getWorkerCacheEvictionHighWatermark())
+              .setEvictionLowWatermark(options.getWorkerCacheEvictionLowWatermark())
+              .build();
+      return Optional.of(SharedDiskCache.getOrCreate(diskCacheOptions, telemetry));
+    } catch (IOException | RuntimeException e) {
+      LOG.warn("Failed to initialize the worker cache; continuing without it", e);
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * Returns the disk entry key for {@code itemId}, or {@link Optional#empty()} when the object's
+   * name is not present. The {@code entryKind} prefix keeps footer and small object entries
+   * distinct within the shared engine.
+   */
+  private static Optional<String> diskEntryKey(GcsItemId itemId, String entryKind) {
+    return itemId
+        .getObjectName()
+        .map(objectName -> entryKind + '/' + itemId.getBucketName() + '/' + objectName);
   }
 
   /**
@@ -96,9 +195,7 @@ public class AnalyticsCacheManager {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(footerLoader, "footerLoader cannot be null");
 
-    return footerCache
-        .get(itemId, cachedItemId -> footerLoader.load(cachedItemId))
-        .asReadOnlyBuffer();
+    return footerCache.get(itemId, footerLoader::load).asReadOnlyBuffer();
   }
 
   /**
@@ -112,12 +209,10 @@ public class AnalyticsCacheManager {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(smallObjectLoader, "smallObjectLoader cannot be null");
 
-    return smallObjectCache
-        .get(itemId, cachedItemId -> smallObjectLoader.load(cachedItemId))
-        .asReadOnlyBuffer();
+    return smallObjectCache.get(itemId, smallObjectLoader::load).asReadOnlyBuffer();
   }
 
-  /** Invalidates the cached footer for the given {@code itemId}. */
+  /** Invalidates the cached footer for the given {@code itemId} in every tier. */
   public void invalidateFooter(GcsItemId itemId) {
     checkNotNull(itemId, "itemId cannot be null");
     if (footerCache != null) {
@@ -125,7 +220,7 @@ public class AnalyticsCacheManager {
     }
   }
 
-  /** Invalidates the cached small object for the given {@code itemId}. */
+  /** Invalidates the cached small object for the given {@code itemId} in every tier. */
   public void invalidateSmallObject(GcsItemId itemId) {
     checkNotNull(itemId, "itemId cannot be null");
     if (smallObjectCache != null) {
@@ -153,7 +248,11 @@ public class AnalyticsCacheManager {
     bucketPropertiesCache.invalidate(bucketName);
   }
 
-  /** Invalidates all cached entries. */
+  /**
+   * Invalidates all in-memory cached entries. The worker-level disk tier is left untouched: it is
+   * shared with other executor processes on the host, and its generation-keyed entries cannot be
+   * stale (see {@link AnalyticsCacheDiskImpl#invalidateAll()}).
+   */
   public void invalidateAll() {
     if (footerCache != null) {
       footerCache.invalidateAll();
@@ -164,8 +263,9 @@ public class AnalyticsCacheManager {
     bucketPropertiesCache.invalidateAll();
   }
 
+  /** Clears the JVM-wide static caches so tests can start from a clean slate. */
   @VisibleForTesting
-  static synchronized void resetCaches() {
+  public static synchronized void resetCaches() {
     if (footerCache != null) {
       footerCache.invalidateAll();
       footerCache = null;
@@ -176,48 +276,11 @@ public class AnalyticsCacheManager {
     }
   }
 
+  /** Drops the JVM-wide static cache references without invalidating their entries. */
   @VisibleForTesting
-  static synchronized void clearStaticCacheReferences() {
+  public static synchronized void clearStaticCacheReferences() {
     footerCache = null;
     smallObjectCache = null;
-  }
-
-  private static AnalyticsCache<GcsItemId, ByteBuffer> createCache(
-      boolean memoryCacheEnabled,
-      long memoryCacheMaxSizeBytes,
-      Weigher<GcsItemId, ByteBuffer> weigher,
-      GcsCacheOptions options,
-      String cacheSubdirectory) {
-    boolean workerCacheEnabled = options.isWorkerCacheEnabled();
-    if (!memoryCacheEnabled && !workerCacheEnabled) {
-      return AnalyticsCacheNoOpImpl.getInstance();
-    }
-
-    AnalyticsCache<GcsItemId, ByteBuffer> l1Cache =
-        memoryCacheEnabled
-            ? AnalyticsCacheCaffeineImpl.create(memoryCacheMaxSizeBytes, weigher)
-            : null;
-
-    if (!workerCacheEnabled) {
-      return l1Cache != null ? l1Cache : AnalyticsCacheNoOpImpl.getInstance();
-    }
-
-    Path workerCacheDir = Paths.get(options.getWorkerCacheDirectory()).resolve(cacheSubdirectory);
-    AnalyticsCache<GcsItemId, ByteBuffer> l2Cache =
-        AnalyticsCacheFileImpl.create(
-            workerCacheDir,
-            options.getWorkerCacheMaxSizeBytes(),
-            itemId ->
-                itemId.getBucketName()
-                    + "/"
-                    + itemId.getObjectName().orElse("")
-                    + itemId.getContentGeneration().map(g -> "#" + g).orElse(""));
-
-    if (l1Cache == null) {
-      return l2Cache;
-    }
-
-    return AnalyticsCacheHybridImpl.create(l1Cache, l2Cache);
   }
 
   /** A loader for GCS object footers. */

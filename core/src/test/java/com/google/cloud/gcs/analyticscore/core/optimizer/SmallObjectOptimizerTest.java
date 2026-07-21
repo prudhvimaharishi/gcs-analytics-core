@@ -67,6 +67,9 @@ class SmallObjectOptimizerTest {
 
   @BeforeEach
   void initializeOptimizerAndFakeStorage() throws IOException {
+    // The manager's footer/small object caches are JVM-wide statics; reset so each test starts
+    // from a clean slate.
+    AnalyticsCacheManager.resetCaches();
     GcsCacheOptions cacheOptions =
         GcsCacheOptions.builder()
             .setSmallObjectCacheEnabled(true)

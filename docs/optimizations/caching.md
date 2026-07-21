@@ -53,8 +53,10 @@ The caching layer is implemented using a pluggable, generic cache interface to e
 *   **[`AnalyticsCacheManager`](../../client/src/main/java/com/google/cloud/gcs/analyticscore/client/AnalyticsCacheManager.java)**: A thread-safe registry that initializes and holds the specialized caches (footer cache and small object cache).
 *   **[`AnalyticsCache`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/AnalyticsCache.java)**: The base interface defining generic cache operations.
 *   **[`AnalyticsCacheCaffeineImpl`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/AnalyticsCacheCaffeineImpl.java)**: The in-memory L1 cache backed by Caffeine.
-*   **[`AnalyticsCacheFileImpl`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/AnalyticsCacheFileImpl.java)**: The worker-level L2 file cache on local storage (SSD). Features lock-free reads, throttled access timestamp updates, atomic file rename writes, and non-blocking watermark eviction.
-*   **[`AnalyticsCacheHybridImpl`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/AnalyticsCacheHybridImpl.java)**: A 2-tier hybrid cache combining L1 memory and L2 file storage.
+*   **[`AnalyticsCacheHybridImpl`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/AnalyticsCacheHybridImpl.java)**: A 2-tier hybrid cache combining L1 memory and the L2 worker cache. A lookup consults L1, falls back to L2, and promotes an L2 hit into L1; its atomic loader chains both tiers so a load runs at most once.
+*   **[`AnalyticsCacheDiskImpl`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/disk/AnalyticsCacheDiskImpl.java)**: An `AnalyticsCache` view over the `SharedDiskCache` engine used as the L2 tier. A key mapper converts each item to a disk key, or signals "not cacheable on disk" (bypassing L2) when an object's content generation is unknown.
+*   **[`SharedDiskCache`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/disk/SharedDiskCache.java)**: The worker-level L2 engine on local storage (SSD). One JVM-wide instance per cache directory, shared by all executor processes on the host. Atomic-rename publishing, lock-free reads, per-key advisory-lock download deduplication, strict-limit admission control, CRC/header integrity, and lazy TTL checks.
+*   **[`SharedDiskCacheJanitor`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/disk/SharedDiskCacheJanitor.java)**: Background maintenance elected via a host-wide lock: LRU eviction between watermarks, TTL sweeps, usage reconciliation to a stats file, and orphaned temp-file cleanup.
 *   **[`AnalyticsCacheNoOpImpl`](../../common/src/main/java/com/google/cloud/gcs/analyticscore/common/cache/AnalyticsCacheNoOpImpl.java)**: A singleton, no-op implementation used when a specific cache is disabled.
 
 ## Configuration Knobs
@@ -71,5 +73,8 @@ The caching subsystem is configured via [`GcsCacheOptions`](../../client/src/mai
 
 **Worker-Level File Caching (Shared SSD):**
 *   `analytics-core.worker.cache.enabled`: Controls whether worker-level local file caching is enabled across executors (Default: `false`).
-*   `analytics-core.worker.cache.directory`: The root directory on local disk/SSD to store cached objects (Default: `/tmp/gcs-analytics-cache`).
-*   `analytics-core.worker.cache.max-size-bytes`: The maximum disk capacity for the worker-level file cache (Default: `10737418240` i.e., 10 GB).
+*   `analytics-core.worker.cache.directory`: The root directory on local disk/SSD to store cached objects; every executor process on the host must point at the same directory to share entries (Default: `${java.io.tmpdir}/gcs-analytics-cache`).
+*   `analytics-core.worker.cache.max-size-bytes`: The maximum disk capacity for the worker-level file cache, enforced by admission control (Default: `10737418240` i.e., 10 GB).
+*   `analytics-core.worker.cache.ttl-millis`: Entry time-to-live from creation; `0` disables TTL. Entries are keyed by object generation, so TTL bounds disk turnover, not correctness (Default: `86400000` i.e., 24 hours).
+*   `analytics-core.worker.cache.eviction.high-watermark`: Usage fraction above which background LRU eviction starts (Default: `0.95`).
+*   `analytics-core.worker.cache.eviction.low-watermark`: Usage fraction down to which background LRU eviction proceeds (Default: `0.85`).

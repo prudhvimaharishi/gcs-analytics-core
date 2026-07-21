@@ -21,6 +21,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import com.google.auto.value.AutoValue;
 import java.nio.file.Paths;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /** Configuration options for the GCS caching layer. */
 @AutoValue
@@ -36,6 +37,11 @@ public abstract class GcsCacheOptions {
   static final String WORKER_CACHE_DIRECTORY_KEY = "analytics-core.worker.cache.directory";
   static final String WORKER_CACHE_MAX_SIZE_BYTES_KEY =
       "analytics-core.worker.cache.max-size-bytes";
+  static final String WORKER_CACHE_TTL_MILLIS_KEY = "analytics-core.worker.cache.ttl-millis";
+  static final String WORKER_CACHE_HIGH_WATERMARK_KEY =
+      "analytics-core.worker.cache.eviction.high-watermark";
+  static final String WORKER_CACHE_LOW_WATERMARK_KEY =
+      "analytics-core.worker.cache.eviction.low-watermark";
 
   private static final long KB = 1024L;
   private static final long MB = 1024L * KB;
@@ -48,6 +54,9 @@ public abstract class GcsCacheOptions {
   private static final String DEFAULT_WORKER_CACHE_DIRECTORY =
       Paths.get(System.getProperty("java.io.tmpdir", "/tmp"), "gcs-analytics-cache").toString();
   private static final long DEFAULT_WORKER_CACHE_MAX_SIZE_BYTES = 10240 * MB;
+  private static final long DEFAULT_WORKER_CACHE_TTL_MILLIS = TimeUnit.MINUTES.toMillis(10);
+  private static final double DEFAULT_WORKER_CACHE_HIGH_WATERMARK = 0.95;
+  private static final double DEFAULT_WORKER_CACHE_LOW_WATERMARK = 0.85;
 
   /** Returns whether the Parquet footer cache is enabled. */
   public abstract boolean isFooterCacheEnabled();
@@ -71,6 +80,19 @@ public abstract class GcsCacheOptions {
   public abstract long getWorkerCacheMaxSizeBytes();
 
   /**
+   * Returns the time-to-live (in milliseconds) of a worker cache entry, measured from creation.
+   * {@code 0} disables TTL-based expiry. Entries are keyed by object generation, so TTL bounds disk
+   * turnover rather than correctness.
+   */
+  public abstract long getWorkerCacheTtlMillis();
+
+  /** Returns the disk usage fraction above which background LRU eviction starts. */
+  public abstract double getWorkerCacheEvictionHighWatermark();
+
+  /** Returns the disk usage fraction down to which background LRU eviction proceeds. */
+  public abstract double getWorkerCacheEvictionLowWatermark();
+
+  /**
    * Returns a builder for {@link GcsCacheOptions} with the same property values as this instance.
    */
   public abstract Builder toBuilder();
@@ -84,7 +106,10 @@ public abstract class GcsCacheOptions {
         .setSmallObjectCacheMaxSizeBytes(DEFAULT_SMALL_OBJECT_CACHE_MAX_SIZE_BYTES)
         .setWorkerCacheEnabled(DEFAULT_WORKER_CACHE_ENABLED)
         .setWorkerCacheDirectory(DEFAULT_WORKER_CACHE_DIRECTORY)
-        .setWorkerCacheMaxSizeBytes(DEFAULT_WORKER_CACHE_MAX_SIZE_BYTES);
+        .setWorkerCacheMaxSizeBytes(DEFAULT_WORKER_CACHE_MAX_SIZE_BYTES)
+        .setWorkerCacheTtlMillis(DEFAULT_WORKER_CACHE_TTL_MILLIS)
+        .setWorkerCacheEvictionHighWatermark(DEFAULT_WORKER_CACHE_HIGH_WATERMARK)
+        .setWorkerCacheEvictionLowWatermark(DEFAULT_WORKER_CACHE_LOW_WATERMARK);
   }
 
   /** Creates a {@link GcsCacheOptions} instance from a map of configuration options. */
@@ -119,6 +144,18 @@ public abstract class GcsCacheOptions {
       optionsBuilder.setWorkerCacheMaxSizeBytes(
           Long.parseLong(analyticsCoreOptions.get(prefix + WORKER_CACHE_MAX_SIZE_BYTES_KEY)));
     }
+    if (analyticsCoreOptions.containsKey(prefix + WORKER_CACHE_TTL_MILLIS_KEY)) {
+      optionsBuilder.setWorkerCacheTtlMillis(
+          Long.parseLong(analyticsCoreOptions.get(prefix + WORKER_CACHE_TTL_MILLIS_KEY)));
+    }
+    if (analyticsCoreOptions.containsKey(prefix + WORKER_CACHE_HIGH_WATERMARK_KEY)) {
+      optionsBuilder.setWorkerCacheEvictionHighWatermark(
+          Double.parseDouble(analyticsCoreOptions.get(prefix + WORKER_CACHE_HIGH_WATERMARK_KEY)));
+    }
+    if (analyticsCoreOptions.containsKey(prefix + WORKER_CACHE_LOW_WATERMARK_KEY)) {
+      optionsBuilder.setWorkerCacheEvictionLowWatermark(
+          Double.parseDouble(analyticsCoreOptions.get(prefix + WORKER_CACHE_LOW_WATERMARK_KEY)));
+    }
 
     return optionsBuilder.build();
   }
@@ -147,6 +184,17 @@ public abstract class GcsCacheOptions {
     /** Sets the maximum capacity (in bytes) to hold in the worker-level file cache. */
     public abstract Builder setWorkerCacheMaxSizeBytes(long workerCacheMaxSizeBytes);
 
+    /** Sets the time-to-live (in milliseconds) of a worker cache entry; {@code 0} disables TTL. */
+    public abstract Builder setWorkerCacheTtlMillis(long workerCacheTtlMillis);
+
+    /** Sets the disk usage fraction above which background eviction starts. */
+    public abstract Builder setWorkerCacheEvictionHighWatermark(
+        double workerCacheEvictionHighWatermark);
+
+    /** Sets the disk usage fraction down to which background eviction proceeds. */
+    public abstract Builder setWorkerCacheEvictionLowWatermark(
+        double workerCacheEvictionLowWatermark);
+
     abstract GcsCacheOptions autoBuild();
 
     /**
@@ -174,6 +222,14 @@ public abstract class GcsCacheOptions {
             options.getWorkerCacheDirectory() != null
                 && !options.getWorkerCacheDirectory().trim().isEmpty(),
             "workerCacheDirectory must not be null or empty when workerCacheEnabled is true");
+        checkArgument(
+            options.getWorkerCacheTtlMillis() >= 0, "workerCacheTtlMillis cannot be negative");
+        checkArgument(
+            options.getWorkerCacheEvictionLowWatermark() > 0
+                && options.getWorkerCacheEvictionLowWatermark()
+                    < options.getWorkerCacheEvictionHighWatermark()
+                && options.getWorkerCacheEvictionHighWatermark() <= 1.0,
+            "worker cache watermarks must satisfy 0 < lowWatermark < highWatermark <= 1");
       }
 
       return options;

@@ -19,25 +19,21 @@ package com.google.cloud.gcs.analyticscore.common.cache;
 import static com.google.common.truth.Truth.assertThat;
 
 import java.nio.ByteBuffer;
-import java.nio.file.Path;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
 class AnalyticsCacheHybridImplTest {
 
-  @TempDir Path tempDir;
-
   private AnalyticsCacheCaffeineImpl<String, ByteBuffer> l1Cache;
-  private AnalyticsCacheFileImpl<String> l2Cache;
+  private AnalyticsCacheCaffeineImpl<String, ByteBuffer> l2Cache;
   private AnalyticsCacheHybridImpl<String, ByteBuffer> hybridCache;
 
   @BeforeEach
   void setUp() {
     l1Cache = AnalyticsCacheCaffeineImpl.create(1024, (k, v) -> v.remaining());
-    l2Cache = AnalyticsCacheFileImpl.create(tempDir, 1024, String::toString);
+    l2Cache = AnalyticsCacheCaffeineImpl.create(1024, (k, v) -> v.remaining());
     hybridCache = AnalyticsCacheHybridImpl.create(l1Cache, l2Cache);
   }
 

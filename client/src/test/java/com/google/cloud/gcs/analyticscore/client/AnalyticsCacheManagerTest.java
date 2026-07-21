@@ -32,6 +32,14 @@ class AnalyticsCacheManagerTest {
   private static final String BUCKET_NAME = "test-bucket";
   private static final GcsItemId ITEM_ID =
       GcsItemId.builder().setBucketName(BUCKET_NAME).setObjectName("o").build();
+  // The worker disk tier only persists objects with a known content generation, since disk entries
+  // are keyed by immutable generation. Reads through the real client always carry one.
+  private static final GcsItemId ITEM_ID_WITH_GENERATION =
+      GcsItemId.builder()
+          .setBucketName(BUCKET_NAME)
+          .setObjectName("o")
+          .setContentGeneration(1L)
+          .build();
   private static final ByteBuffer FOOTER = ByteBuffer.wrap(new byte[] {1, 2, 3});
 
   @TempDir Path tempDir;
@@ -115,7 +123,7 @@ class AnalyticsCacheManagerTest {
 
     ByteBuffer footer1 =
         manager.getFooter(
-            ITEM_ID,
+            ITEM_ID_WITH_GENERATION,
             itemId -> {
               callCount.incrementAndGet();
               return FOOTER.duplicate();
@@ -124,7 +132,7 @@ class AnalyticsCacheManagerTest {
     manager = new AnalyticsCacheManager(cacheOptions);
     ByteBuffer footer2 =
         manager.getFooter(
-            ITEM_ID,
+            ITEM_ID_WITH_GENERATION,
             itemId -> {
               callCount.incrementAndGet();
               return ByteBuffer.wrap(new byte[] {9, 9, 9});
@@ -149,7 +157,7 @@ class AnalyticsCacheManagerTest {
 
     ByteBuffer obj1 =
         manager.getSmallObject(
-            ITEM_ID,
+            ITEM_ID_WITH_GENERATION,
             itemId -> {
               callCount.incrementAndGet();
               return FOOTER.duplicate();
@@ -158,7 +166,7 @@ class AnalyticsCacheManagerTest {
     manager = new AnalyticsCacheManager(cacheOptions);
     ByteBuffer obj2 =
         manager.getSmallObject(
-            ITEM_ID,
+            ITEM_ID_WITH_GENERATION,
             itemId -> {
               callCount.incrementAndGet();
               return ByteBuffer.wrap(new byte[] {9, 9, 9});

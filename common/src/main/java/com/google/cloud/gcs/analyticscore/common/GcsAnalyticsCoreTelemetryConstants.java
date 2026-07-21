@@ -34,6 +34,12 @@ public class GcsAnalyticsCoreTelemetryConstants {
     SMALL_OBJECT_CACHE_HIT("gcs.analytics-core.client.small.object.cache.hits", MetricType.COUNTER),
     SMALL_OBJECT_CACHE_MISS(
         "gcs.analytics-core.client.small.object.cache.misses", MetricType.COUNTER),
+    DISK_CACHE_HIT("gcs.analytics-core.client.disk.cache.hits", MetricType.COUNTER),
+    DISK_CACHE_MISS("gcs.analytics-core.client.disk.cache.misses", MetricType.COUNTER),
+    DISK_CACHE_WRITE_SKIPPED(
+        "gcs.analytics-core.client.disk.cache.write.skips", MetricType.COUNTER),
+    DISK_CACHE_EVICTED_BYTES(
+        "gcs.analytics-core.client.disk.cache.evicted.bytes", MetricType.COUNTER),
     CLOSE_DURATION("gcs.analytics-core.client.close.duration", MetricType.DURATION),
     GCS_CLIENT_CREATE_DURATION("gcs.analytics-core.client.create.duration", MetricType.DURATION);
 
