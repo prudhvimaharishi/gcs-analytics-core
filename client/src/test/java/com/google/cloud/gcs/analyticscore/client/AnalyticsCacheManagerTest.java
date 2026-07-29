@@ -19,8 +19,18 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.google.auth.Credentials;
+import com.google.auth.oauth2.AccessToken;
+import com.google.auth.oauth2.GoogleCredentials;
+import com.google.auth.oauth2.ImpersonatedCredentials;
+import com.google.auth.oauth2.OAuth2Credentials;
+import com.google.cloud.NoCredentials;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -237,5 +247,279 @@ class AnalyticsCacheManagerTest {
         });
 
     assertThat(callCount.get()).isEqualTo(1);
+  }
+
+  @Test
+  void getFooter_unauthorizedSecondManager_bypassesCacheAndThrowsException() throws IOException {
+    AnalyticsCacheManager secondManager =
+        new AnalyticsCacheManager(GcsCacheOptions.builder().setFooterCacheEnabled(true).build());
+    GcsItemId tableFile =
+        GcsItemId.builder()
+            .setBucketName(BUCKET_NAME)
+            .setObjectName("warehouse/table/file1.parquet")
+            .build();
+    manager.getFooter(tableFile, itemId -> FOOTER.duplicate());
+
+    assertThrows(
+        IOException.class,
+        () ->
+            secondManager.getFooter(
+                tableFile,
+                itemId -> {
+                  throw new IOException("403 Forbidden");
+                }));
+  }
+
+  @Test
+  void getFooter_samePrefixDifferentFile_hitsCacheAfterFirstFileGranted() throws IOException {
+    GcsItemId fileOne =
+        GcsItemId.builder()
+            .setBucketName(BUCKET_NAME)
+            .setObjectName("warehouse/table/file1.parquet")
+            .build();
+    GcsItemId fileTwo =
+        GcsItemId.builder()
+            .setBucketName(BUCKET_NAME)
+            .setObjectName("warehouse/table/file2.parquet")
+            .build();
+    AnalyticsCacheManager secondManager =
+        new AnalyticsCacheManager(
+            GcsCacheOptions.builder()
+                .setFooterCacheEnabled(true)
+                .setCacheScope(GcsCacheScope.EXECUTOR)
+                .setUniformBucketLevelAccessEnabled(true)
+                .build());
+    AtomicInteger secondManagerCalls = new AtomicInteger(0);
+    manager =
+        new AnalyticsCacheManager(
+            GcsCacheOptions.builder()
+                .setFooterCacheEnabled(true)
+                .setCacheScope(GcsCacheScope.EXECUTOR)
+                .setUniformBucketLevelAccessEnabled(true)
+                .build());
+    manager.getFooter(fileOne, itemId -> FOOTER.duplicate());
+    manager.getFooter(fileTwo, itemId -> FOOTER.duplicate());
+
+    secondManager.getFooter(
+        fileOne,
+        itemId -> {
+          secondManagerCalls.incrementAndGet();
+          return FOOTER.duplicate();
+        });
+    ByteBuffer cachedResult =
+        secondManager.getFooter(
+            fileTwo,
+            itemId -> {
+              secondManagerCalls.incrementAndGet();
+              return ByteBuffer.wrap(new byte[] {9, 9, 9});
+            });
+
+    assertThat(secondManagerCalls.get()).isEqualTo(1);
+    assertThat(cachedResult).isEqualTo(FOOTER);
+  }
+
+  @Test
+  void getSmallObject_samePrefixDifferentFile_hitsCacheAfterFirstFileGranted() throws IOException {
+    AnalyticsCacheManager.resetCaches();
+    GcsItemId fileOne =
+        GcsItemId.builder()
+            .setBucketName(BUCKET_NAME)
+            .setObjectName("warehouse/table/file1.parquet")
+            .build();
+    GcsItemId fileTwo =
+        GcsItemId.builder()
+            .setBucketName(BUCKET_NAME)
+            .setObjectName("warehouse/table/file2.parquet")
+            .build();
+    GcsCacheOptions cacheOptions =
+        GcsCacheOptions.builder()
+            .setSmallObjectCacheEnabled(true)
+            .setSmallObjectCacheMaxSizeBytes(200)
+            .setCacheScope(GcsCacheScope.EXECUTOR)
+            .setUniformBucketLevelAccessEnabled(true)
+            .build();
+    AnalyticsCacheManager secondManager = new AnalyticsCacheManager(cacheOptions);
+    AtomicInteger secondManagerCalls = new AtomicInteger(0);
+    manager = new AnalyticsCacheManager(cacheOptions);
+    manager.getSmallObject(fileOne, itemId -> FOOTER.duplicate());
+    manager.getSmallObject(fileTwo, itemId -> FOOTER.duplicate());
+
+    secondManager.getSmallObject(
+        fileOne,
+        itemId -> {
+          secondManagerCalls.incrementAndGet();
+          return FOOTER.duplicate();
+        });
+    ByteBuffer cachedResult =
+        secondManager.getSmallObject(
+            fileTwo,
+            itemId -> {
+              secondManagerCalls.incrementAndGet();
+              return ByteBuffer.wrap(new byte[] {9, 9, 9});
+            });
+
+    assertThat(secondManagerCalls.get()).isEqualTo(1);
+    assertThat(cachedResult).isEqualTo(FOOTER);
+  }
+
+  @Test
+  void getFooter_filesystemInstanceMode_isolatesBetweenManagers() throws IOException {
+    AnalyticsCacheManager.resetCaches();
+    GcsCacheOptions options =
+        GcsCacheOptions.builder()
+            .setFooterCacheEnabled(true)
+            .setCacheScope(GcsCacheScope.INSTANCE)
+            .build();
+    AnalyticsCacheManager managerOne = new AnalyticsCacheManager(options);
+    AnalyticsCacheManager managerTwo = new AnalyticsCacheManager(options);
+    AtomicInteger managerTwoCalls = new AtomicInteger(0);
+
+    managerOne.getFooter(ITEM_ID, itemId -> FOOTER.duplicate());
+    managerTwo.getFooter(
+        ITEM_ID,
+        itemId -> {
+          managerTwoCalls.incrementAndGet();
+          return FOOTER.duplicate();
+        });
+
+    assertThat(managerTwoCalls.get()).isEqualTo(1);
+  }
+
+  @Test
+  void getFooter_executorAuthAwareMode_isolatesBetweenDifferentCredentials() throws IOException {
+    AnalyticsCacheManager.resetCaches();
+    GcsCacheOptions options =
+        GcsCacheOptions.builder()
+            .setFooterCacheEnabled(true)
+            .setCacheScope(GcsCacheScope.EXECUTOR)
+            .setUniformBucketLevelAccessEnabled(false)
+            .build();
+    AccessToken tokenOne = new AccessToken("token-one", null);
+    AccessToken tokenTwo = new AccessToken("token-two", null);
+    AnalyticsCacheManager managerOne =
+        new AnalyticsCacheManager(OAuth2Credentials.create(tokenOne), options);
+    AnalyticsCacheManager managerTwo =
+        new AnalyticsCacheManager(OAuth2Credentials.create(tokenTwo), options);
+    AtomicInteger managerTwoCalls = new AtomicInteger(0);
+
+    managerOne.getFooter(ITEM_ID, itemId -> FOOTER.duplicate());
+    managerTwo.getFooter(
+        ITEM_ID,
+        itemId -> {
+          managerTwoCalls.incrementAndGet();
+          return FOOTER.duplicate();
+        });
+
+    assertThat(managerTwoCalls.get()).isEqualTo(1);
+  }
+
+  @Test
+  void getFooter_executorAuthAwareMode_bypassesPrefixShortcutForSecondFile() throws IOException {
+    AnalyticsCacheManager.resetCaches();
+    GcsCacheOptions options =
+        GcsCacheOptions.builder()
+            .setFooterCacheEnabled(true)
+            .setCacheScope(GcsCacheScope.EXECUTOR)
+            .setUniformBucketLevelAccessEnabled(false)
+            .build();
+    manager = new AnalyticsCacheManager(options);
+    GcsItemId fileOne =
+        GcsItemId.builder()
+            .setBucketName(BUCKET_NAME)
+            .setObjectName("warehouse/table/file1.parquet")
+            .build();
+    GcsItemId fileTwo =
+        GcsItemId.builder()
+            .setBucketName(BUCKET_NAME)
+            .setObjectName("warehouse/table/file2.parquet")
+            .build();
+    AtomicInteger calls = new AtomicInteger(0);
+
+    manager.getFooter(
+        fileOne,
+        itemId -> {
+          calls.incrementAndGet();
+          return FOOTER.duplicate();
+        });
+    manager.getFooter(
+        fileTwo,
+        itemId -> {
+          calls.incrementAndGet();
+          return FOOTER.duplicate();
+        });
+
+    assertThat(calls.get()).isEqualTo(2);
+  }
+
+  @Test
+  void extractScope_nullCredentials_returnsAdc() {
+    String scope = AnalyticsCacheManager.extractScope(null);
+
+    assertThat(scope).isEqualTo("adc");
+  }
+
+  @Test
+  void extractScope_noCredentials_returnsAnon() {
+    String scope = AnalyticsCacheManager.extractScope(NoCredentials.getInstance());
+
+    assertThat(scope).isEqualTo("anon");
+  }
+
+  @Test
+  void extractScope_impersonatedCredentials_returnsImpAccount() {
+    ImpersonatedCredentials credentials =
+        ImpersonatedCredentials.newBuilder()
+            .setSourceCredentials(GoogleCredentials.create(new AccessToken("source", null)))
+            .setTargetPrincipal("target-sa@test.com")
+            .setScopes(Collections.emptyList())
+            .build();
+
+    String scope = AnalyticsCacheManager.extractScope(credentials);
+
+    assertThat(scope).isEqualTo("imp:target-sa@test.com");
+  }
+
+  @Test
+  void extractScope_oauth2Credentials_returnsSha256OfToken() {
+    AccessToken token = new AccessToken("secret-token", null);
+    OAuth2Credentials credentials = OAuth2Credentials.create(token);
+
+    String scope = AnalyticsCacheManager.extractScope(credentials);
+
+    assertThat(scope).startsWith("tok:");
+    assertThat(scope).isNotEqualTo("tok:secret-token");
+  }
+
+  @Test
+  void extractScope_unknownCredentials_returnsCredWithHash() {
+    Credentials credentials =
+        new Credentials() {
+          @Override
+          public String getAuthenticationType() {
+            return "test";
+          }
+
+          @Override
+          public Map<String, List<String>> getRequestMetadata(URI uri) {
+            return Collections.emptyMap();
+          }
+
+          @Override
+          public boolean hasRequestMetadata() {
+            return false;
+          }
+
+          @Override
+          public boolean hasRequestMetadataOnly() {
+            return false;
+          }
+
+          @Override
+          public void refresh() {}
+        };
+
+    String scope = AnalyticsCacheManager.extractScope(credentials);
+
+    assertThat(scope).startsWith("cred:");
   }
 }

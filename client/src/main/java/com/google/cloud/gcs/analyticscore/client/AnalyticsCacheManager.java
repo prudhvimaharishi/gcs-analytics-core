@@ -19,13 +19,26 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.github.benmanes.caffeine.cache.Weigher;
+import com.google.auth.Credentials;
+import com.google.auth.oauth2.AccessToken;
+import com.google.auth.oauth2.ImpersonatedCredentials;
+import com.google.auth.oauth2.OAuth2Credentials;
+import com.google.auth.oauth2.ServiceAccountCredentials;
+import com.google.cloud.NoCredentials;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCache;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImpl;
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
+import com.google.cloud.gcs.analyticscore.common.cache.ThrowingFunction;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.hash.Hashing;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
 
 /**
  * Manages the caching layer for GCS objects. This class is thread-safe and acts as a registry for
@@ -39,18 +52,40 @@ public class AnalyticsCacheManager {
    */
   private static final long BUCKET_PROPERTIES_CACHE_TTL_MINUTES = 10;
 
-  private static volatile AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
-  private static volatile AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
+  private static volatile AnalyticsCache<ScopedGcsItemId, ByteBuffer> footerCache;
+  private static volatile AnalyticsCache<ScopedGcsItemId, ByteBuffer> smallObjectCache;
   private final AnalyticsCache<String, BucketProperties> bucketPropertiesCache;
+  private final Set<String> authorizedPrefixes = ConcurrentHashMap.newKeySet();
+  private final String activeScopeId;
+  private final GcsCachingMode cachingMode;
 
   /**
-   * Creates a new {@link AnalyticsCacheManager} with the specified options.
+   * Creates a new {@link AnalyticsCacheManager} with the specified options and default credentials.
    *
    * @param options The configuration options for the caching layer.
    */
   public AnalyticsCacheManager(GcsCacheOptions options) {
+    this(null, options);
+  }
+
+  /**
+   * Creates a new {@link AnalyticsCacheManager} with the specified credentials and options.
+   *
+   * @param credentials The GCP credentials used to derive an access boundary scope.
+   * @param options The configuration options for the caching layer.
+   */
+  public AnalyticsCacheManager(@Nullable Credentials credentials, GcsCacheOptions options) {
     checkNotNull(options, "options cannot be null");
-    Weigher<GcsItemId, ByteBuffer> weigher = (key, value) -> value.remaining();
+    this.cachingMode = options.resolveCachingMode();
+    if (cachingMode == GcsCachingMode.PER_INSTANCE) {
+      this.activeScopeId = "fs:" + UUID.randomUUID();
+    } else if (cachingMode == GcsCachingMode.SHARED_GLOBAL) {
+      this.activeScopeId = "global";
+    } else {
+      this.activeScopeId = extractScope(credentials);
+    }
+
+    Weigher<ScopedGcsItemId, ByteBuffer> weigher = (key, value) -> value.remaining();
     if (footerCache == null || smallObjectCache == null) {
       synchronized (AnalyticsCacheManager.class) {
         if (footerCache == null) {
@@ -86,10 +121,7 @@ public class AnalyticsCacheManager {
   public ByteBuffer getFooter(GcsItemId itemId, FooterLoader footerLoader) throws IOException {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(footerLoader, "footerLoader cannot be null");
-
-    return footerCache
-        .get(itemId, cachedItemId -> footerLoader.load(cachedItemId))
-        .asReadOnlyBuffer();
+    return getOrLoad(itemId, footerCache, footerLoader::load);
   }
 
   /**
@@ -102,17 +134,14 @@ public class AnalyticsCacheManager {
       throws IOException {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(smallObjectLoader, "smallObjectLoader cannot be null");
-
-    return smallObjectCache
-        .get(itemId, cachedItemId -> smallObjectLoader.load(cachedItemId))
-        .asReadOnlyBuffer();
+    return getOrLoad(itemId, smallObjectCache, smallObjectLoader::load);
   }
 
   /** Invalidates the cached footer for the given {@code itemId}. */
   public void invalidateFooter(GcsItemId itemId) {
     checkNotNull(itemId, "itemId cannot be null");
     if (footerCache != null) {
-      footerCache.invalidate(itemId);
+      footerCache.invalidate(ScopedGcsItemId.create(activeScopeId, itemId));
     }
   }
 
@@ -120,7 +149,7 @@ public class AnalyticsCacheManager {
   public void invalidateSmallObject(GcsItemId itemId) {
     checkNotNull(itemId, "itemId cannot be null");
     if (smallObjectCache != null) {
-      smallObjectCache.invalidate(itemId);
+      smallObjectCache.invalidate(ScopedGcsItemId.create(activeScopeId, itemId));
     }
   }
 
@@ -153,6 +182,7 @@ public class AnalyticsCacheManager {
       smallObjectCache.invalidateAll();
     }
     bucketPropertiesCache.invalidateAll();
+    authorizedPrefixes.clear();
   }
 
   @VisibleForTesting
@@ -165,6 +195,64 @@ public class AnalyticsCacheManager {
       smallObjectCache.invalidateAll();
       smallObjectCache = null;
     }
+  }
+
+  @VisibleForTesting
+  static String extractScope(@Nullable Credentials credentials) {
+    if (credentials == null) {
+      return "adc";
+    }
+    if (credentials instanceof NoCredentials) {
+      return "anon";
+    }
+    if (credentials instanceof ImpersonatedCredentials) {
+      return "imp:" + ((ImpersonatedCredentials) credentials).getAccount();
+    }
+    if (credentials instanceof ServiceAccountCredentials) {
+      return "sa:" + ((ServiceAccountCredentials) credentials).getClientEmail();
+    }
+    if (credentials instanceof OAuth2Credentials) {
+      AccessToken token = ((OAuth2Credentials) credentials).getAccessToken();
+      if (token != null && token.getTokenValue() != null) {
+        return "tok:"
+            + Hashing.sha256().hashString(token.getTokenValue(), StandardCharsets.UTF_8).toString();
+      }
+    }
+    return "cred:" + Integer.toHexString(System.identityHashCode(credentials));
+  }
+
+  private ByteBuffer getOrLoad(
+      GcsItemId itemId,
+      @Nullable AnalyticsCache<ScopedGcsItemId, ByteBuffer> cache,
+      ThrowingFunction<GcsItemId, ByteBuffer, IOException> loader)
+      throws IOException {
+    if (cache == null) {
+      return loader.apply(itemId).asReadOnlyBuffer();
+    }
+
+    ScopedGcsItemId scopedId = ScopedGcsItemId.create(activeScopeId, itemId);
+    // For uniform access mode, prove read access to the prefix once before using shared cache
+    if (cachingMode == GcsCachingMode.SHARED_GLOBAL) {
+      String prefix = getParentPrefix(itemId);
+      if (!authorizedPrefixes.contains(prefix)) {
+        ByteBuffer loadedObject = loader.apply(itemId);
+        authorizedPrefixes.add(prefix);
+        cache.put(scopedId, loadedObject);
+        return loadedObject.asReadOnlyBuffer();
+      }
+    }
+
+    return cache.get(scopedId, cachedId -> loader.apply(cachedId.getItemId())).asReadOnlyBuffer();
+  }
+
+  private static String getParentPrefix(GcsItemId itemId) {
+    String bucketName = itemId.getBucketName();
+    String objectName = itemId.getObjectName().orElse("");
+    int lastSlashIndex = objectName.lastIndexOf('/');
+    if (lastSlashIndex >= 0) {
+      return bucketName + "/" + objectName.substring(0, lastSlashIndex + 1);
+    }
+    return bucketName + "/" + objectName;
   }
 
   /** A loader for GCS object footers. */

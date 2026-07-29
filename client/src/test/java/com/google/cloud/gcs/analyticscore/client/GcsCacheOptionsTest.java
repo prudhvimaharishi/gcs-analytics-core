@@ -36,6 +36,9 @@ class GcsCacheOptionsTest {
     assertThat(options.getFooterCacheMaxSizeBytes()).isEqualTo(1024 * MB);
     assertThat(options.isSmallObjectCacheEnabled()).isFalse();
     assertThat(options.getSmallObjectCacheMaxSizeBytes()).isEqualTo(1024 * MB);
+    assertThat(options.getCacheScope()).isEqualTo(GcsCacheScope.INSTANCE);
+    assertThat(options.isUniformBucketLevelAccessEnabled()).isFalse();
+    assertThat(options.resolveCachingMode()).isEqualTo(GcsCachingMode.PER_INSTANCE);
   }
 
   @Test
@@ -71,11 +74,35 @@ class GcsCacheOptionsTest {
   }
 
   @Test
+  void resolveCachingMode_executorScope_returnsSharedPerCredential() {
+    GcsCacheOptions options =
+        GcsCacheOptions.builder()
+            .setCacheScope(GcsCacheScope.EXECUTOR)
+            .setUniformBucketLevelAccessEnabled(false)
+            .build();
+
+    assertThat(options.resolveCachingMode()).isEqualTo(GcsCachingMode.SHARED_PER_CREDENTIAL);
+  }
+
+  @Test
+  void resolveCachingMode_executorScopeAndUniformAccessEnabled_returnsSharedGlobal() {
+    GcsCacheOptions options =
+        GcsCacheOptions.builder()
+            .setCacheScope(GcsCacheScope.EXECUTOR)
+            .setUniformBucketLevelAccessEnabled(true)
+            .build();
+
+    assertThat(options.resolveCachingMode()).isEqualTo(GcsCachingMode.SHARED_GLOBAL);
+  }
+
+  @Test
   void createFromOptions_withAllOptions_succeeds() {
     boolean footerCacheEnabled = false;
     long footerCacheMaxSizeBytes = 50 * MB;
     boolean smallObjectCacheEnabled = true;
     long smallObjectCacheMaxSizeBytes = 100 * MB;
+    GcsCacheScope cacheScope = GcsCacheScope.EXECUTOR;
+    boolean uniformBucketLevelAccessEnabled = true;
 
     Map<String, String> map = new HashMap<>();
     map.put("gcs." + GcsCacheOptions.FOOTER_CACHE_ENABLED_KEY, String.valueOf(footerCacheEnabled));
@@ -88,6 +115,10 @@ class GcsCacheOptionsTest {
     map.put(
         "gcs." + GcsCacheOptions.SMALL_FILE_CACHE_MAX_SIZE_BYTES_KEY,
         String.valueOf(smallObjectCacheMaxSizeBytes));
+    map.put("gcs." + GcsCacheOptions.CACHE_SCOPE_KEY, cacheScope.name());
+    map.put(
+        "gcs." + GcsCacheOptions.UNIFORM_BUCKET_LEVEL_ACCESS_ENABLED_KEY,
+        String.valueOf(uniformBucketLevelAccessEnabled));
 
     GcsCacheOptions options = GcsCacheOptions.createFromOptions(map, "gcs.");
 
@@ -95,6 +126,10 @@ class GcsCacheOptionsTest {
     assertThat(options.getFooterCacheMaxSizeBytes()).isEqualTo(footerCacheMaxSizeBytes);
     assertThat(options.isSmallObjectCacheEnabled()).isEqualTo(smallObjectCacheEnabled);
     assertThat(options.getSmallObjectCacheMaxSizeBytes()).isEqualTo(smallObjectCacheMaxSizeBytes);
+    assertThat(options.getCacheScope()).isEqualTo(cacheScope);
+    assertThat(options.isUniformBucketLevelAccessEnabled())
+        .isEqualTo(uniformBucketLevelAccessEnabled);
+    assertThat(options.resolveCachingMode()).isEqualTo(GcsCachingMode.SHARED_GLOBAL);
   }
 
   @Test
@@ -107,6 +142,7 @@ class GcsCacheOptionsTest {
     assertThat(options.getFooterCacheMaxSizeBytes()).isEqualTo(1024 * MB);
     assertThat(options.isSmallObjectCacheEnabled()).isFalse();
     assertThat(options.getSmallObjectCacheMaxSizeBytes()).isEqualTo(1024 * MB);
+    assertThat(options.isUniformBucketLevelAccessEnabled()).isFalse();
   }
 
   @Test
@@ -115,5 +151,15 @@ class GcsCacheOptionsTest {
     map.put("gcs." + GcsCacheOptions.FOOTER_CACHE_MAX_SIZE_BYTES_KEY, "not-a-number");
 
     assertThrows(NumberFormatException.class, () -> GcsCacheOptions.createFromOptions(map, "gcs."));
+  }
+
+  @Test
+  void createFromOptions_withCacheScopeOption_succeeds() {
+    Map<String, String> map = new HashMap<>();
+    map.put("gcs." + GcsCacheOptions.CACHE_SCOPE_KEY, "EXECUTOR");
+
+    GcsCacheOptions options = GcsCacheOptions.createFromOptions(map, "gcs.");
+
+    assertThat(options.getCacheScope()).isEqualTo(GcsCacheScope.EXECUTOR);
   }
 }

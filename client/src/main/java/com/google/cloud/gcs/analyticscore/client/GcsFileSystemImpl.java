@@ -70,7 +70,8 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this.fileSystemOptions = fileSystemOptions;
     this.executorServiceSupplier = initializeExecutionServiceSupplier();
     this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
-    this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
+    this.cacheManager =
+        new AnalyticsCacheManager(credentials, fileSystemOptions.getGcsCacheOptions());
     this.gcsClient =
         telemetry.measure(
             GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),

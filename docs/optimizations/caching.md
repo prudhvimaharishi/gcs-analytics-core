@@ -55,3 +55,7 @@ The caching subsystem is configured via [`GcsCacheOptions`](../../client/src/mai
 **Footer Caching:**
 *   `analytics-core.footer.cache.enabled`: Controls whether the Parquet footer cache is enabled (Default: `false`).
 *   `analytics-core.footer.cache.max-size-bytes`: The maximum capacity of the footer cache (Default: `1073741824` i.e., 1 GB).
+
+**Cache Scope and Sharing:**
+*   `analytics-core.cache.scope`: Configures the sharing scope of the cache. Supported values are `INSTANCE` (default; local to the filesystem instance) and `EXECUTOR` (shared across instances on the same JVM/executor).
+*   `analytics-core.cache.uniform-bucket-level-access.enabled`: When `true`, indicates that target buckets use Uniform Bucket-Level Access (UBLA) without object-level ACLs, enabling global sharing of cached entries across credentials when executor-level caching is enabled (Default: `false`).
