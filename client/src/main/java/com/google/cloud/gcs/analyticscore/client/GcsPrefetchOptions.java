@@ -44,11 +44,13 @@ public abstract class GcsPrefetchOptions {
   static final String BUFFER_CACHE_TTL_SECONDS_KEY =
       "analytics-core.prefetch.buffer.cache.ttl-seconds";
   static final String BLOCK_SIZE_BYTES_KEY = "analytics-core.prefetch.block.size-bytes";
+  static final String HISTORY_MAX_COLUMNS_KEY = "analytics-core.prefetch.history.max-columns";
 
   private static final PrefetchMode DEFAULT_PREFETCH_MODE = PrefetchMode.DISABLED;
   private static final long DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES = 2L * 1024 * 1024 * 1024; // 2 GB
   private static final long DEFAULT_BUFFER_CACHE_TTL_SECONDS = 5;
   private static final int DEFAULT_BLOCK_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB
+  private static final int DEFAULT_HISTORY_MAX_COLUMNS = 15;
 
   /** Returns the prefetching strategy to apply. Defaults to {@code DISABLED}. */
   public abstract PrefetchMode getPrefetchMode();
@@ -75,6 +77,12 @@ public abstract class GcsPrefetchOptions {
   public abstract int getBlockSizeBytes();
 
   /**
+   * Returns the maximum number of columns tracked per Parquet schema in the access history.
+   * Defaults to {@code 15} columns.
+   */
+  public abstract int getHistoryMaxColumns();
+
+  /**
    * Returns whether predictive prefetching is enabled, that is whether the prefetch mode is
    * anything other than {@code DISABLED}.
    */
@@ -94,7 +102,8 @@ public abstract class GcsPrefetchOptions {
         .setPrefetchMode(DEFAULT_PREFETCH_MODE)
         .setBufferCacheMaxSizeBytes(DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES)
         .setBufferCacheTtlSeconds(DEFAULT_BUFFER_CACHE_TTL_SECONDS)
-        .setBlockSizeBytes(DEFAULT_BLOCK_SIZE_BYTES);
+        .setBlockSizeBytes(DEFAULT_BLOCK_SIZE_BYTES)
+        .setHistoryMaxColumns(DEFAULT_HISTORY_MAX_COLUMNS);
   }
 
   /**
@@ -139,6 +148,12 @@ public abstract class GcsPrefetchOptions {
           ConfigurationUtil.safeParseInteger(
               blockSizeBytesFullKey, analyticsCoreOptions.get(blockSizeBytesFullKey)));
     }
+    String historyMaxColumnsFullKey = prefix + HISTORY_MAX_COLUMNS_KEY;
+    if (analyticsCoreOptions.containsKey(historyMaxColumnsFullKey)) {
+      optionsBuilder.setHistoryMaxColumns(
+          ConfigurationUtil.safeParseInteger(
+              historyMaxColumnsFullKey, analyticsCoreOptions.get(historyMaxColumnsFullKey)));
+    }
 
     return optionsBuilder.build();
   }
@@ -167,14 +182,20 @@ public abstract class GcsPrefetchOptions {
      */
     public abstract Builder setBlockSizeBytes(int blockSizeBytes);
 
+    /**
+     * Sets the maximum number of columns tracked per Parquet schema in the access history. Defaults
+     * to {@code 15} columns.
+     */
+    public abstract Builder setHistoryMaxColumns(int historyMaxColumns);
+
     abstract GcsPrefetchOptions autoBuild();
 
     /**
      * Builds the {@link GcsPrefetchOptions} instance.
      *
      * @throws IllegalArgumentException if {@code bufferCacheMaxSizeBytes}, {@code
-     *     bufferCacheTtlSeconds} or {@code blockSizeBytes} is non-positive while the prefetch mode
-     *     is not {@code DISABLED}
+     *     bufferCacheTtlSeconds}, {@code blockSizeBytes} or {@code historyMaxColumns} is
+     *     non-positive while the prefetch mode is not {@code DISABLED}
      */
     public GcsPrefetchOptions build() {
       GcsPrefetchOptions options = autoBuild();
@@ -188,6 +209,9 @@ public abstract class GcsPrefetchOptions {
         checkArgument(
             options.getBlockSizeBytes() > 0,
             "blockSizeBytes must be positive when prefetch is enabled");
+        checkArgument(
+            options.getHistoryMaxColumns() > 0,
+            "historyMaxColumns must be positive when prefetch is enabled");
       }
       return options;
     }

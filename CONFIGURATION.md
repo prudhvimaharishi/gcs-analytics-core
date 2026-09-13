@@ -44,6 +44,7 @@ These settings control the predictive prefetcher, which learns the column access
 | `analytics-core.prefetch.buffer.cache.max-size-bytes` | Long | The maximum total capacity (in bytes) of the prefetch buffer cache. | `2147483648` (2 GB) |
 | `analytics-core.prefetch.buffer.cache.ttl-seconds` | Long | How long (in seconds) an unread prefetched block is retained in the buffer cache. | `5` |
 | `analytics-core.prefetch.block.size-bytes` | Integer | The granularity (in bytes) at which the prefetcher requests and caches data. Every speculative request is aligned to this size, and cached bytes are resolved by block index. | `4194304` (4 MB) |
+| `analytics-core.prefetch.history.max-columns` | Integer | The maximum number of columns tracked per Parquet schema in the access history. | `15` |
 
 ### Read Performance and I/O Tuning
 

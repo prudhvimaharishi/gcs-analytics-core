@@ -200,6 +200,7 @@ class GcsPrefetchOptionsTest {
             .setPrefetchMode(PrefetchMode.DISABLED)
             .setBufferCacheMaxSizeBytes(0)
             .setBufferCacheTtlSeconds(0)
+            .setHistoryMaxColumns(0)
             .build();
 
     assertThat(options.isEnabled()).isFalse();
@@ -228,6 +229,33 @@ class GcsPrefetchOptionsTest {
         GcsPrefetchOptions.builder()
             .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
             .setBlockSizeBytes(0);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @Test
+  void build_defaultValues_returnsDefaultHistoryMaxColumns() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getHistoryMaxColumns()).isEqualTo(15);
+  }
+
+  @Test
+  void createFromOptions_mapWithHistoryMaxColumns_parsesHistoryMaxColumns() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.HISTORY_MAX_COLUMNS_KEY, "42");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getHistoryMaxColumns()).isEqualTo(42);
+  }
+
+  @Test
+  void build_enabledWithZeroHistoryMaxColumns_throwsIllegalArgumentException() {
+    GcsPrefetchOptions.Builder builder =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setHistoryMaxColumns(0);
 
     assertThrows(IllegalArgumentException.class, builder::build);
   }
