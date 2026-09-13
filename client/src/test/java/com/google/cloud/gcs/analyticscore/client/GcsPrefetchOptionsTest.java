@@ -139,6 +139,99 @@ class GcsPrefetchOptionsTest {
     assertThat(roundTripped).isEqualTo(options);
   }
 
+  @Test
+  void build_defaultValues_returnsDefaultBufferCacheMaxSizeBytes() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getBufferCacheMaxSizeBytes()).isEqualTo(2L * 1024 * 1024 * 1024);
+  }
+
+  @Test
+  void build_defaultValues_returnsDefaultBufferCacheTtlSeconds() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getBufferCacheTtlSeconds()).isEqualTo(5);
+  }
+
+  @Test
+  void createFromOptions_mapWithBufferCacheMaxSizeBytes_parsesMaxSizeBytes() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.BUFFER_CACHE_MAX_SIZE_BYTES_KEY, "1024");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getBufferCacheMaxSizeBytes()).isEqualTo(1024);
+  }
+
+  @Test
+  void createFromOptions_mapWithBufferCacheTtlSeconds_parsesTtlSeconds() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.BUFFER_CACHE_TTL_SECONDS_KEY, "30");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getBufferCacheTtlSeconds()).isEqualTo(30);
+  }
+
+  @Test
+  void build_enabledWithZeroBufferCacheMaxSizeBytes_throwsIllegalArgumentException() {
+    GcsPrefetchOptions.Builder builder =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setBufferCacheMaxSizeBytes(0);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @Test
+  void build_enabledWithNegativeBufferCacheTtlSeconds_throwsIllegalArgumentException() {
+    GcsPrefetchOptions.Builder builder =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setBufferCacheTtlSeconds(-1);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @Test
+  void build_disabledWithNonPositiveValues_succeeds() {
+    GcsPrefetchOptions options =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.DISABLED)
+            .setBufferCacheMaxSizeBytes(0)
+            .setBufferCacheTtlSeconds(0)
+            .build();
+
+    assertThat(options.isEnabled()).isFalse();
+  }
+
+  @Test
+  void build_defaultValues_returnsDefaultBlockSizeBytes() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getBlockSizeBytes()).isEqualTo(4 * 1024 * 1024);
+  }
+
+  @Test
+  void createFromOptions_mapWithBlockSizeBytes_parsesBlockSizeBytes() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.BLOCK_SIZE_BYTES_KEY, "65536");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getBlockSizeBytes()).isEqualTo(65536);
+  }
+
+  @Test
+  void build_enabledWithZeroBlockSizeBytes_throwsIllegalArgumentException() {
+    GcsPrefetchOptions.Builder builder =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setBlockSizeBytes(0);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
   private static Map<String, String> prefetchModeOptions(String mode) {
     return ImmutableMap.of(PREFIX + GcsPrefetchOptions.PREFETCH_MODE_KEY, mode);
   }
