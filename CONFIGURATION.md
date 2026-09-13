@@ -34,6 +34,14 @@ These settings control how aggressively the library prefetches and caches metada
 | `analytics-core.small-file.cache.enabled` | Controls whether the small object cache is enabled. | `false` |
 | `analytics-core.small-file.cache.max-size-bytes` | The maximum capacity (in bytes) to hold in the small object cache. | `209715200` (200 MB) |
 
+### Predictive Prefetching
+
+These settings control the predictive prefetcher, which learns the column access pattern of a query and speculatively fetches the bytes the engine is about to request.
+
+| Property | Type | Description | Default Value |
+| :--- | :--- | :--- | :--- |
+| `analytics-core.prefetch.mode` | Enum | Predictive prefetching strategy. Supported values: `PREDICTIVE_ROW_GROUP`, `DISABLED`. Values are case-insensitive and hyphens are accepted (e.g. `predictive-row-group`). | `DISABLED` |
+
 ### Read Performance and I/O Tuning
 
 These parameters fine-tune the low-level data streaming behavior. They allow you to optimize thread concurrency, heuristic file access patterns, and vectored I/O merging to maximize data throughput against GCS.
