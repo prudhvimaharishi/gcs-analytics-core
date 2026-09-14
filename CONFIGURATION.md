@@ -14,6 +14,7 @@ These properties govern the core connections, identity, and access parameters be
 | :--- | :--- | :--- |
 | `client-lib-token` | Client library token. | - |
 | `service.host` | The GCS service host. | - |
+| `universe-domain` | Custom Google Cloud universe domain (e.g., `apis-tpclp.goog`) for sovereign or private cloud environments. | `googleapis.com` |
 | `user-agent` | The user agent string. | - |
 | `project-id` | The Google Cloud project ID for the GCS client. | - |
 | `user-project` | Project ID whose Google Cloud Project's billing account should be charged for the operation being executed. | - |
@@ -25,18 +26,19 @@ These properties configure standard Google Cloud authentication, OAuth2 token re
 
 | Property | Description | Default Value |
 | :--- | :--- | :--- |
-| `auth.type` | Google Cloud authentication type. Supported values: `APPLICATION_DEFAULT`, `COMPUTE_ENGINE`, `SERVICE_ACCOUNT_JSON_KEYFILE`, `WORKLOAD_IDENTITY_FEDERATION_CREDENTIAL_CONFIG_FILE`, `USER_CREDENTIALS`, `UNAUTHENTICATED`. | `APPLICATION_DEFAULT` |
-| `auth.service.account.json.keyfile` | Path to a Service Account JSON keyfile. Required when `auth.type` is `SERVICE_ACCOUNT_JSON_KEYFILE`. | - |
-| `auth.workload.identity.federation.credential.config.file` | Path to a Workload Identity Federation credential configuration JSON file. Required when `auth.type` is `WORKLOAD_IDENTITY_FEDERATION_CREDENTIAL_CONFIG_FILE`. | - |
-| `auth.client.id` | OAuth2 client ID. Required when `auth.type` is `USER_CREDENTIALS`. | - |
-| `auth.client.secret` | OAuth2 client secret. Required when `auth.type` is `USER_CREDENTIALS`. | - |
-| `auth.refresh.token` | OAuth2 refresh token. Required when `auth.type` is `USER_CREDENTIALS`. | - |
-| `auth.impersonation.service.account` | Service account email to impersonate via static service account impersonation. | - |
-| `token.server.url` | Custom token server URL used to refresh OAuth2 access tokens. | - |
-| `proxy.address` | HTTP proxy address of the form `[https?://]hostname:port`. | - |
-| `proxy.username` | Username for authenticating with the HTTP proxy. | - |
-| `proxy.password` | Password for authenticating with the HTTP proxy. | - |
-| `http.read-timeout` | Socket read timeout for authentication HTTP requests in milliseconds or duration format (e.g., `5000`, `5s`). | `5000` (5s) |
+| `auth.type` | Google Cloud authentication type. Supported values: `APPLICATION_DEFAULT`, `COMPUTE_ENGINE`, `SERVICE_ACCOUNT_JSON_KEYFILE`, `WORKLOAD_IDENTITY_FEDERATION`, `USER_CREDENTIALS`, `UNAUTHENTICATED`. | `APPLICATION_DEFAULT` |
+| `auth.service-account-json-keyfile` | Path to a Service Account JSON keyfile. Required when `auth.type` is `SERVICE_ACCOUNT_JSON_KEYFILE`. | - |
+| `auth.workload-identity-federation.credential-config-file` | Path to a Workload Identity Federation credential configuration JSON file. Required when `auth.type` is `WORKLOAD_IDENTITY_FEDERATION`. | - |
+| `auth.client-id` | OAuth2 client ID. Required when `auth.type` is `USER_CREDENTIALS`. | - |
+| `auth.client-secret` | OAuth2 client secret. Required when `auth.type` is `USER_CREDENTIALS`. | - |
+| `auth.refresh-token` | OAuth2 refresh token. Required when `auth.type` is `USER_CREDENTIALS`. | - |
+| `auth.impersonation-service-account` | Service account email to impersonate via static service account impersonation. | - |
+| `auth.token-server-url` | Custom token server URL used to refresh OAuth2 access tokens. | - |
+| `auth.proxy.address` | HTTP proxy address of the form `[https?://]hostname:port`. | - |
+| `auth.proxy.username` | Username for authenticating with the HTTP proxy. | - |
+| `auth.proxy.password` | Password for authenticating with the HTTP proxy. | - |
+| `auth.http.connect-timeout-ms` | Connect timeout for authentication HTTP requests, in milliseconds. Must be positive. | `5000` |
+| `auth.http.read-timeout-ms` | Socket read timeout for authentication HTTP requests, in milliseconds. Must be positive. | `5000` |
 
 ### Caching and Prefetching
 
