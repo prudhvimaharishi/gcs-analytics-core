@@ -252,7 +252,7 @@ class GcsFileSystemImplIntegrationTest {
         }
     }
 
-    private GcsFileSystemImpl createFileSystem(GcsClientOptions clientOptions) {
+    private GcsFileSystemImpl createFileSystem(GcsClientOptions clientOptions) throws IOException {
         GcsFileSystemOptions options = GcsFileSystemOptions.builder()
                 .setGcsClientOptions(clientOptions)
                 .build();
