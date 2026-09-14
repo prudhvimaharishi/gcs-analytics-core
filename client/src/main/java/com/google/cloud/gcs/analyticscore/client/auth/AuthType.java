@@ -18,6 +18,7 @@ package com.google.cloud.gcs.analyticscore.client.auth;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
+import java.util.Arrays;
 import java.util.Locale;
 
 /** Enumeration of supported Google Cloud authentication types. */
@@ -32,7 +33,7 @@ public enum AuthType {
   SERVICE_ACCOUNT_JSON_KEYFILE,
 
   /** Configures Workload Identity Federation (external account credentials) authentication. */
-  WORKLOAD_IDENTITY_FEDERATION_CREDENTIAL_CONFIG_FILE,
+  WORKLOAD_IDENTITY_FEDERATION,
 
   /** Configures OAuth2 user credentials authentication. */
   USER_CREDENTIALS,
@@ -50,6 +51,15 @@ public enum AuthType {
    */
   public static AuthType fromString(String authTypeStr) {
     checkNotNull(authTypeStr, "authTypeStr cannot be null");
-    return valueOf(authTypeStr.trim().replace('-', '_').toUpperCase(Locale.ROOT));
+    String normalizedAuthType = authTypeStr.trim().replace('-', '_').toUpperCase(Locale.ROOT);
+    try {
+      return valueOf(normalizedAuthType);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Unsupported auth type: '%s'. Supported values are %s.",
+              authTypeStr, Arrays.toString(values())),
+          e);
+    }
   }
 }
