@@ -19,6 +19,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auth.Credentials;
+import com.google.cloud.gcs.analyticscore.client.auth.GcsCredentialsFactory;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants;
 import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryOptions;
 import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryReporter;
@@ -34,6 +35,7 @@ import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.channels.WritableByteChannel;
 import java.util.Collections;
@@ -69,26 +71,11 @@ public class GcsFileSystemImpl implements GcsFileSystem {
   private final HierarchicalNamespaceStrategyImpl hnsStrategy;
 
   public GcsFileSystemImpl(GcsFileSystemOptions fileSystemOptions) {
-    this.fileSystemOptions = fileSystemOptions;
-    this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
-    this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
-    this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
-    this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
-    this.gcsClient =
-        telemetry.measure(
-            GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),
-            GcsAnalyticsCoreTelemetryConstants.Metric.GCS_CLIENT_CREATE_DURATION,
-            Collections.emptyMap(),
-            recorder ->
-                new GcsClientImpl(
-                    fileSystemOptions.getGcsClientOptions(),
-                    readExecutorServiceSupplier,
-                    telemetry));
-    this.flatStrategy = new FlatNamespaceStrategyImpl(this.gcsClient);
-    this.hnsStrategy = new HierarchicalNamespaceStrategyImpl(this.gcsClient);
+    this(resolveCredentials(fileSystemOptions), fileSystemOptions);
   }
 
   public GcsFileSystemImpl(Credentials credentials, GcsFileSystemOptions fileSystemOptions) {
+    checkNotNull(credentials, "credentials should not be null");
     this.fileSystemOptions = fileSystemOptions;
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
@@ -107,6 +94,14 @@ public class GcsFileSystemImpl implements GcsFileSystem {
                     telemetry));
     this.flatStrategy = new FlatNamespaceStrategyImpl(this.gcsClient);
     this.hnsStrategy = new HierarchicalNamespaceStrategyImpl(this.gcsClient);
+  }
+
+  private static Credentials resolveCredentials(GcsFileSystemOptions options) {
+    try {
+      return GcsCredentialsFactory.createCredentials(options.getGcsAuthOptions());
+    } catch (IOException e) {
+      throw new UncheckedIOException("Failed to create GCS credentials from options", e);
+    }
   }
 
   @VisibleForTesting

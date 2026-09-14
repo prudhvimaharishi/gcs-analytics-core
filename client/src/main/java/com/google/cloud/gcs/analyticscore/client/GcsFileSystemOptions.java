@@ -16,6 +16,7 @@
 package com.google.cloud.gcs.analyticscore.client;
 
 import com.google.auto.value.AutoValue;
+import com.google.cloud.gcs.analyticscore.client.auth.GcsAuthOptions;
 import com.google.cloud.gcs.analyticscore.common.telemetry.TelemetryOptions;
 import java.util.Map;
 
@@ -41,6 +42,9 @@ public abstract class GcsFileSystemOptions {
 
   public abstract GcsClientOptions getGcsClientOptions();
 
+  /** Returns the configuration options for GCS authentication and proxy. */
+  public abstract GcsAuthOptions getGcsAuthOptions();
+
   /** Returns the configuration options for the GCS caching layer. */
   public abstract GcsCacheOptions getGcsCacheOptions();
 
@@ -58,6 +62,7 @@ public abstract class GcsFileSystemOptions {
         .setClientType(ClientType.HTTP_CLIENT)
         .setHnsApiEnabled(true)
         .setMetadataLookupParallelEnabled(true)
+        .setGcsAuthOptions(GcsAuthOptions.builder().build())
         .setGcsClientOptions(GcsClientOptions.builder().build())
         .setGcsCacheOptions(GcsCacheOptions.builder().build())
         .setAnalyticsCoreTelemetryOptions(TelemetryOptions.builder().build());
@@ -84,6 +89,8 @@ public abstract class GcsFileSystemOptions {
               analyticsCoreOptions.get(prefix + METADATA_LOOKUP_PARALLEL_ENABLED_KEY)));
     }
 
+    optionsBuilder.setGcsAuthOptions(
+        GcsAuthOptions.createFromOptions(analyticsCoreOptions, prefix));
     optionsBuilder.setGcsClientOptions(
         GcsClientOptions.createFromOptions(analyticsCoreOptions, prefix));
     optionsBuilder.setGcsCacheOptions(
@@ -107,6 +114,8 @@ public abstract class GcsFileSystemOptions {
 
     public abstract Builder setMetadataLookupParallelEnabled(
         boolean isMetadataLookupParallelEnabled);
+
+    public abstract Builder setGcsAuthOptions(GcsAuthOptions gcsAuthOptions);
 
     public abstract Builder setGcsClientOptions(GcsClientOptions gcsClientOptions);
 
