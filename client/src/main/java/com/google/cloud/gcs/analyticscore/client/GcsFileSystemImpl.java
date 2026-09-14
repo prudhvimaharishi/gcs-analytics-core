@@ -19,6 +19,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auth.Credentials;
+import com.google.cloud.gcs.analyticscore.client.auth.GcsCredentialsFactory;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants;
 import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryOptions;
 import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryReporter;
@@ -68,27 +69,20 @@ public class GcsFileSystemImpl implements GcsFileSystem {
   private final FlatNamespaceStrategyImpl flatStrategy;
   private final HierarchicalNamespaceStrategyImpl hnsStrategy;
 
-  public GcsFileSystemImpl(GcsFileSystemOptions fileSystemOptions) {
-    this.fileSystemOptions = fileSystemOptions;
-    this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
-    this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
-    this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
-    this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
-    this.gcsClient =
-        telemetry.measure(
-            GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),
-            GcsAnalyticsCoreTelemetryConstants.Metric.GCS_CLIENT_CREATE_DURATION,
-            Collections.emptyMap(),
-            recorder ->
-                new GcsClientImpl(
-                    fileSystemOptions.getGcsClientOptions(),
-                    readExecutorServiceSupplier,
-                    telemetry));
-    this.flatStrategy = new FlatNamespaceStrategyImpl(this.gcsClient);
-    this.hnsStrategy = new HierarchicalNamespaceStrategyImpl(this.gcsClient);
+  /**
+   * Creates a file system whose credentials are resolved from {@code fileSystemOptions}.
+   *
+   * @param fileSystemOptions The file system options, including the authentication options.
+   * @throws IOException If credentials cannot be resolved from the authentication options.
+   */
+  public GcsFileSystemImpl(GcsFileSystemOptions fileSystemOptions) throws IOException {
+    this(
+        GcsCredentialsFactory.createCredentials(fileSystemOptions.getGcsAuthOptions()),
+        fileSystemOptions);
   }
 
   public GcsFileSystemImpl(Credentials credentials, GcsFileSystemOptions fileSystemOptions) {
+    checkNotNull(credentials, "credentials should not be null");
     this.fileSystemOptions = fileSystemOptions;
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
