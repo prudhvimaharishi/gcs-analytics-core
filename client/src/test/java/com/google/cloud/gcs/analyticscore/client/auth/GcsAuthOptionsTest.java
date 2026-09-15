@@ -326,12 +326,66 @@ class GcsAuthOptionsTest {
     assertThat(exception).hasMessageThat().contains("auth.client-secret");
   }
 
+  @Test
+  void build_proxyUsernameWithoutProxyAddress_throwsIllegalArgumentException() {
+    GcsAuthOptions.Builder builder =
+        GcsAuthOptions.builder()
+            .setProxyUsername(RedactedString.create("user"))
+            .setProxyPassword(RedactedString.create("pass"));
+
+    IllegalArgumentException exception =
+        assertThrows(IllegalArgumentException.class, builder::build);
+
+    assertThat(exception).hasMessageThat().contains("auth.proxy.address");
+  }
+
+  @Test
+  void build_proxyUsernameWithoutProxyPassword_throwsIllegalArgumentException() {
+    GcsAuthOptions.Builder builder =
+        GcsAuthOptions.builder()
+            .setProxyAddress("proxy:8080")
+            .setProxyUsername(RedactedString.create("user"));
+
+    IllegalArgumentException exception =
+        assertThrows(IllegalArgumentException.class, builder::build);
+
+    assertThat(exception).hasMessageThat().contains("auth.proxy.password");
+  }
+
+  @Test
+  void build_proxyPasswordWithoutProxyUsername_throwsIllegalArgumentException() {
+    GcsAuthOptions.Builder builder =
+        GcsAuthOptions.builder()
+            .setProxyAddress("proxy:8080")
+            .setProxyPassword(RedactedString.create("pass"));
+
+    IllegalArgumentException exception =
+        assertThrows(IllegalArgumentException.class, builder::build);
+
+    assertThat(exception).hasMessageThat().contains("auth.proxy.username");
+  }
+
+  @Test
+  void createFromOptions_proxyCredentialsWithoutAddress_throwsIllegalArgumentException() {
+    Map<String, String> map =
+        ImmutableMap.of(
+            "auth.proxy.username", "user",
+            "auth.proxy.password", "pass");
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, ""));
+
+    assertThat(exception).hasMessageThat().contains("auth.proxy.address");
+  }
+
   private static GcsAuthOptions createOptionsWithSecrets() {
     return GcsAuthOptions.builder()
         .setAuthType(AuthType.USER_CREDENTIALS)
         .setClientId("my-client-id")
         .setClientSecret(RedactedString.create(CLIENT_SECRET_VALUE))
         .setRefreshToken(RedactedString.create(REFRESH_TOKEN_VALUE))
+        .setProxyAddress("proxy.mycompany.com:8080")
         .setProxyUsername(RedactedString.create(PROXY_USERNAME_VALUE))
         .setProxyPassword(RedactedString.create(PROXY_PASSWORD_VALUE))
         .build();

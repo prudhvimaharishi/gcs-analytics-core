@@ -200,10 +200,30 @@ public abstract class GcsAuthOptions {
     public GcsAuthOptions build() {
       GcsAuthOptions options = autoBuild();
       validateRequiredFields(options);
+      validateProxyFields(options);
       return options;
     }
 
     abstract GcsAuthOptions autoBuild();
+
+    /**
+     * Rejects proxy settings that cannot be honored together, so that a typo in one key is reported
+     * against the configuration that caused it rather than when a transport is first created.
+     */
+    private static void validateProxyFields(GcsAuthOptions options) {
+      checkArgument(
+          options.getProxyAddress().isPresent()
+              || (options.getProxyUsername().isEmpty() && options.getProxyPassword().isEmpty()),
+          "%s and %s require %s to be set",
+          PROXY_USERNAME_KEY,
+          PROXY_PASSWORD_KEY,
+          PROXY_ADDRESS_KEY);
+      checkArgument(
+          options.getProxyUsername().isPresent() == options.getProxyPassword().isPresent(),
+          "%s and %s must be set or unset together",
+          PROXY_USERNAME_KEY,
+          PROXY_PASSWORD_KEY);
+    }
 
     private static void validateRequiredFields(GcsAuthOptions options) {
       switch (options.getAuthType()) {
