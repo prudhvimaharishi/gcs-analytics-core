@@ -23,6 +23,7 @@ import com.google.api.client.http.HttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.cloud.gcs.analyticscore.client.auth.GcsHttpTransportFactory.CustomSslSocketFactory;
 import com.google.cloud.gcs.analyticscore.common.RedactedString;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.Authenticator;
@@ -34,12 +35,16 @@ import java.net.Socket;
 import java.net.URI;
 import java.security.GeneralSecurityException;
 import java.time.Duration;
+import java.util.stream.Stream;
+import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLSocketFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -137,15 +142,50 @@ class GcsHttpTransportFactoryTest {
   void createNetHttpTransportBuilder_installsCustomSslSocketFactory()
       throws IOException, GeneralSecurityException {
     NetHttpTransport.Builder builder =
-        GcsHttpTransportFactory.createNetHttpTransportBuilder(null, Duration.ofSeconds(5));
+        GcsHttpTransportFactory.createNetHttpTransportBuilder(
+            null, Duration.ofSeconds(5), CertificateTrustStore.GOOGLE_BUNDLED);
 
     assertThat(builder.getSslSocketFactory()).isInstanceOf(CustomSslSocketFactory.class);
   }
 
   @Test
+  void createNetHttpTransportBuilder_googleBundledTrustStore_doesNotUseSystemDefaultSocketFactory()
+      throws IOException, GeneralSecurityException {
+    NetHttpTransport.Builder builder =
+        GcsHttpTransportFactory.createNetHttpTransportBuilder(
+            null, Duration.ofSeconds(5), CertificateTrustStore.GOOGLE_BUNDLED);
+
+    // Google's bundled trust store yields a dedicated SSLSocketFactory, not the JVM default.
+    assertThat(((CustomSslSocketFactory) builder.getSslSocketFactory()).getWrappedSocketFactory())
+        .isNotSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory());
+  }
+
+  @Test
+  void createNetHttpTransportBuilder_systemDefaultTrustStore_usesSystemDefaultSocketFactory()
+      throws IOException, GeneralSecurityException {
+    NetHttpTransport.Builder builder =
+        GcsHttpTransportFactory.createNetHttpTransportBuilder(
+            null, Duration.ofSeconds(5), CertificateTrustStore.SYSTEM_DEFAULT);
+
+    // Custom endpoints, such as Trusted Partner Cloud, validate against the JVM's trust store.
+    assertThat(((CustomSslSocketFactory) builder.getSslSocketFactory()).getWrappedSocketFactory())
+        .isSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory());
+  }
+
+  @Test
   void createHttpTransport_noProxy_createsNetHttpTransport() throws IOException {
     HttpTransport transport =
-        GcsHttpTransportFactory.createHttpTransport(null, null, null, Duration.ofSeconds(5));
+        GcsHttpTransportFactory.createHttpTransport(
+            null, null, null, Duration.ofSeconds(5), CertificateTrustStore.GOOGLE_BUNDLED);
+
+    assertThat(transport).isInstanceOf(NetHttpTransport.class);
+  }
+
+  @Test
+  void createHttpTransport_systemDefaultTrustStore_createsNetHttpTransport() throws IOException {
+    HttpTransport transport =
+        GcsHttpTransportFactory.createHttpTransport(
+            null, null, null, Duration.ofSeconds(5), CertificateTrustStore.SYSTEM_DEFAULT);
 
     assertThat(transport).isInstanceOf(NetHttpTransport.class);
   }
@@ -154,7 +194,11 @@ class GcsHttpTransportFactoryTest {
   void createHttpTransport_withProxy_createsNetHttpTransport() throws IOException {
     HttpTransport transport =
         GcsHttpTransportFactory.createHttpTransport(
-            "proxy.example.com:8080", PROXY_USERNAME, PROXY_PASSWORD, Duration.ofSeconds(10));
+            "proxy.example.com:8080",
+            PROXY_USERNAME,
+            PROXY_PASSWORD,
+            Duration.ofSeconds(10),
+            CertificateTrustStore.GOOGLE_BUNDLED);
 
     assertThat(transport).isInstanceOf(NetHttpTransport.class);
   }
@@ -162,7 +206,11 @@ class GcsHttpTransportFactoryTest {
   @Test
   void createHttpTransport_withProxyCredentials_installsDefaultAuthenticator() throws IOException {
     GcsHttpTransportFactory.createHttpTransport(
-        "proxy.example.com:8080", PROXY_USERNAME, PROXY_PASSWORD, Duration.ofSeconds(10));
+        "proxy.example.com:8080",
+        PROXY_USERNAME,
+        PROXY_PASSWORD,
+        Duration.ofSeconds(10),
+        CertificateTrustStore.GOOGLE_BUNDLED);
 
     assertThat(Authenticator.getDefault()).isNotNull();
   }
@@ -178,7 +226,8 @@ class GcsHttpTransportFactoryTest {
             .setHttpReadTimeout(Duration.ofSeconds(10))
             .build();
 
-    HttpTransport transport = GcsHttpTransportFactory.createHttpTransport(options);
+    HttpTransport transport =
+        GcsHttpTransportFactory.createHttpTransport(options, CertificateTrustStore.GOOGLE_BUNDLED);
 
     assertThat(transport).isInstanceOf(NetHttpTransport.class);
   }
@@ -188,7 +237,8 @@ class GcsHttpTransportFactoryTest {
       throws IOException {
     GcsAuthOptions options = GcsAuthOptions.builder().build();
 
-    HttpTransport transport = GcsHttpTransportFactory.createHttpTransport(options);
+    HttpTransport transport =
+        GcsHttpTransportFactory.createHttpTransport(options, CertificateTrustStore.GOOGLE_BUNDLED);
 
     assertThat(transport).isInstanceOf(NetHttpTransport.class);
   }
@@ -199,7 +249,7 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                null, PROXY_USERNAME, PROXY_PASSWORD, null));
+                null, PROXY_USERNAME, PROXY_PASSWORD, null, CertificateTrustStore.GOOGLE_BUNDLED));
   }
 
   @Test
@@ -208,7 +258,11 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                "proxy.example.com:8080", PROXY_USERNAME, null, null));
+                "proxy.example.com:8080",
+                PROXY_USERNAME,
+                null,
+                null,
+                CertificateTrustStore.GOOGLE_BUNDLED));
   }
 
   @Test
@@ -217,7 +271,11 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                "proxy.example.com:8080", null, PROXY_PASSWORD, null));
+                "proxy.example.com:8080",
+                null,
+                PROXY_PASSWORD,
+                null,
+                CertificateTrustStore.GOOGLE_BUNDLED));
   }
 
   @ParameterizedTest
@@ -227,7 +285,7 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                null, null, null, Duration.ofMillis(millis)));
+                null, null, null, Duration.ofMillis(millis), CertificateTrustStore.GOOGLE_BUNDLED));
   }
 
   @Test
@@ -236,7 +294,9 @@ class GcsHttpTransportFactoryTest {
 
     assertThrows(
         IllegalArgumentException.class,
-        () -> GcsHttpTransportFactory.createHttpTransport(null, null, null, readTimeout));
+        () ->
+            GcsHttpTransportFactory.createHttpTransport(
+                null, null, null, readTimeout, CertificateTrustStore.GOOGLE_BUNDLED));
   }
 
   @Test
@@ -245,60 +305,84 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createNetHttpTransport(
-                null, new PasswordAuthentication("u", "p".toCharArray()), null));
+                null,
+                new PasswordAuthentication("u", "p".toCharArray()),
+                null,
+                CertificateTrustStore.GOOGLE_BUNDLED));
   }
 
-  @Test
-  void customSslSocketFactory_createSocket_enablesKeepAlive() throws IOException {
+  @ParameterizedTest(name = "createSocket overload: {0}")
+  @MethodSource("createSocketOverloads")
+  void customSslSocketFactory_anyCreateSocketOverload_enablesKeepAlive(
+      String overload, CreateSocket createSocket) throws IOException {
     CustomSslSocketFactory socketFactory =
         new CustomSslSocketFactory(new FakeSslSocketFactory(), 0);
 
-    try (Socket socket = socketFactory.createSocket()) {
+    try (Socket socket = createSocket.apply(socketFactory)) {
       assertThat(socket.getKeepAlive()).isTrue();
     }
   }
 
-  @Test
-  void customSslSocketFactory_createSocket_appliesReadTimeout() throws IOException {
+  @ParameterizedTest(name = "createSocket overload: {0}")
+  @MethodSource("createSocketOverloads")
+  void customSslSocketFactory_anyCreateSocketOverload_appliesReadTimeout(
+      String overload, CreateSocket createSocket) throws IOException {
     CustomSslSocketFactory socketFactory =
         new CustomSslSocketFactory(new FakeSslSocketFactory(), 1234);
 
-    try (Socket socket = socketFactory.createSocket()) {
+    try (Socket socket = createSocket.apply(socketFactory)) {
       assertThat(socket.getSoTimeout()).isEqualTo(1234);
     }
   }
 
-  @Test
-  void customSslSocketFactory_createSocket_zeroTimeoutLeavesReadTimeoutUnbounded()
-      throws IOException {
+  @ParameterizedTest(name = "createSocket overload: {0}")
+  @MethodSource("createSocketOverloads")
+  void customSslSocketFactory_anyCreateSocketOverload_zeroTimeoutLeavesReadTimeoutUnbounded(
+      String overload, CreateSocket createSocket) throws IOException {
     CustomSslSocketFactory socketFactory =
         new CustomSslSocketFactory(new FakeSslSocketFactory(), 0);
 
-    try (Socket socket = socketFactory.createSocket()) {
+    try (Socket socket = createSocket.apply(socketFactory)) {
       assertThat(socket.getSoTimeout()).isEqualTo(0);
     }
   }
 
-  @Test
-  void customSslSocketFactory_createSocketForHostAndPort_appliesReadTimeout() throws IOException {
-    CustomSslSocketFactory socketFactory =
-        new CustomSslSocketFactory(new FakeSslSocketFactory(), 4321);
-
-    try (Socket socket = socketFactory.createSocket("host.example.com", 443)) {
-      assertThat(socket.getSoTimeout()).isEqualTo(4321);
-    }
+  /**
+   * Supplies every {@code createSocket} overload of {@link SSLSocketFactory}, so that socket
+   * customization cannot silently regress on an overload that no caller happens to exercise today.
+   */
+  private static Stream<Arguments> createSocketOverloads() throws IOException {
+    InetAddress address = InetAddress.getByName("10.0.0.1");
+    return Stream.of(
+        Arguments.of("()", (CreateSocket) SSLSocketFactory::createSocket),
+        Arguments.of(
+            "(String, int)",
+            (CreateSocket) factory -> factory.createSocket("host.example.com", 443)),
+        Arguments.of(
+            "(String, int, InetAddress, int)",
+            (CreateSocket) factory -> factory.createSocket("host.example.com", 443, address, 0)),
+        Arguments.of(
+            "(InetAddress, int)", (CreateSocket) factory -> factory.createSocket(address, 443)),
+        Arguments.of(
+            "(InetAddress, int, InetAddress, int)",
+            (CreateSocket) factory -> factory.createSocket(address, 443, address, 0)),
+        Arguments.of(
+            "(Socket, String, int, boolean)",
+            (CreateSocket)
+                factory -> factory.createSocket(new Socket(), "host.example.com", 443, false)),
+        Arguments.of(
+            "(Socket, InputStream, boolean)",
+            (CreateSocket)
+                factory ->
+                    factory.createSocket(
+                        new Socket(), new ByteArrayInputStream(new byte[0]), false)));
   }
 
-  @Test
-  void customSslSocketFactory_createSocketLayeredOverSocket_appliesReadTimeout()
-      throws IOException {
-    CustomSslSocketFactory socketFactory =
-        new CustomSslSocketFactory(new FakeSslSocketFactory(), 4321);
+  /** Invokes one of the {@code createSocket} overloads of an {@link SSLSocketFactory}. */
+  @FunctionalInterface
+  private interface CreateSocket {
 
-    try (Socket underlying = new Socket();
-        Socket socket = socketFactory.createSocket(underlying, "host.example.com", 443, false)) {
-      assertThat(socket.getSoTimeout()).isEqualTo(4321);
-    }
+    Socket apply(SSLSocketFactory socketFactory) throws IOException;
   }
 
   @Test

@@ -55,15 +55,18 @@ final class GcsHttpTransportFactory {
    * Creates an {@link HttpTransport} configured according to the provided {@link GcsAuthOptions}.
    *
    * @param options The authentication options containing proxy and timeout configurations.
+   * @param trustStore The trust store to validate the endpoint's TLS certificates against.
    * @return A configured {@link HttpTransport} instance.
    * @throws IOException If there is an issue establishing SSL trust or creating the transport.
    */
-  static HttpTransport createHttpTransport(GcsAuthOptions options) throws IOException {
+  static HttpTransport createHttpTransport(GcsAuthOptions options, CertificateTrustStore trustStore)
+      throws IOException {
     return createHttpTransport(
         options.getProxyAddress().orElse(null),
         options.getProxyUsername().orElse(null),
         options.getProxyPassword().orElse(null),
-        options.getHttpReadTimeout());
+        options.getHttpReadTimeout(),
+        trustStore);
   }
 
   /**
@@ -80,6 +83,7 @@ final class GcsHttpTransportFactory {
    * @param proxyPassword The HTTP proxy password.
    * @param readTimeout The socket read timeout to apply to HTTP requests, which must be positive if
    *     set.
+   * @param trustStore The trust store to validate the endpoint's TLS certificates against.
    * @return The resulting {@link HttpTransport}.
    * @throws IllegalArgumentException If proxy configuration parameters are invalid.
    * @throws IOException If an error occurs initializing the certificate trust store or transport.
@@ -88,13 +92,16 @@ final class GcsHttpTransportFactory {
       @Nullable String proxyAddress,
       @Nullable RedactedString proxyUsername,
       @Nullable RedactedString proxyPassword,
-      @Nullable Duration readTimeout)
+      @Nullable Duration readTimeout,
+      CertificateTrustStore trustStore)
       throws IOException {
     LOG.debug(
-        "createHttpTransport(proxyAddress={}, proxyAuthenticated={}, readTimeout={})",
+        "createHttpTransport(proxyAddress={}, proxyAuthenticated={}, readTimeout={},"
+            + " trustStore={})",
         proxyAddress,
         proxyUsername != null,
-        readTimeout);
+        readTimeout,
+        trustStore);
     checkArgument(
         proxyAddress != null || (proxyUsername == null && proxyPassword == null),
         "if proxyAddress is null then proxyUsername and proxyPassword should be null too");
@@ -109,7 +116,7 @@ final class GcsHttpTransportFactory {
               ? null
               : new PasswordAuthentication(
                   proxyUsername.value(), proxyPassword.value().toCharArray());
-      return createNetHttpTransport(proxyUri, proxyAuth, readTimeout);
+      return createNetHttpTransport(proxyUri, proxyAuth, readTimeout, trustStore);
     } catch (GeneralSecurityException e) {
       throw new IOException("Failed to create NetHttpTransport with SSL trust store", e);
     }
@@ -127,14 +134,18 @@ final class GcsHttpTransportFactory {
    * @param proxyUri The parsed proxy address, or {@code null} to connect directly.
    * @param proxyAuth The proxy credentials, or {@code null} if the proxy needs no authentication.
    * @param readTimeout The socket read timeout, which must be positive if set.
+   * @param trustStore The trust store to validate the endpoint's TLS certificates against.
    * @return The resulting {@link NetHttpTransport}.
    * @throws IllegalArgumentException If proxyAuth is set without a proxyUri.
+   * @throws IOException If an error occurs initializing the certificate trust store.
+   * @throws GeneralSecurityException If the certificate trust store cannot be loaded.
    */
   @VisibleForTesting
   static NetHttpTransport createNetHttpTransport(
       @Nullable URI proxyUri,
       @Nullable PasswordAuthentication proxyAuth,
-      @Nullable Duration readTimeout)
+      @Nullable Duration readTimeout,
+      CertificateTrustStore trustStore)
       throws IOException, GeneralSecurityException {
     checkArgument(
         proxyUri != null || proxyAuth == null,
@@ -157,15 +168,27 @@ final class GcsHttpTransportFactory {
             }
           });
     }
-    return createNetHttpTransportBuilder(proxyUri, readTimeout).build();
+    return createNetHttpTransportBuilder(proxyUri, readTimeout, trustStore).build();
   }
 
+  /**
+   * Creates the {@link NetHttpTransport.Builder} that backs every transport this factory returns.
+   *
+   * @param proxyUri The parsed proxy address, or {@code null} to connect directly.
+   * @param readTimeout The socket read timeout, which must be positive if set.
+   * @param trustStore The trust store to validate the endpoint's TLS certificates against.
+   * @return The configured builder.
+   * @throws IOException If an error occurs initializing the certificate trust store.
+   * @throws GeneralSecurityException If the certificate trust store cannot be loaded.
+   */
   @VisibleForTesting
   static NetHttpTransport.Builder createNetHttpTransportBuilder(
-      @Nullable URI proxyUri, @Nullable Duration readTimeout)
+      @Nullable URI proxyUri, @Nullable Duration readTimeout, CertificateTrustStore trustStore)
       throws IOException, GeneralSecurityException {
-    NetHttpTransport.Builder builder =
-        new NetHttpTransport.Builder().trustCertificates(GoogleUtils.getCertificateTrustStore());
+    NetHttpTransport.Builder builder = new NetHttpTransport.Builder();
+    if (trustStore == CertificateTrustStore.GOOGLE_BUNDLED) {
+      builder.trustCertificates(GoogleUtils.getCertificateTrustStore());
+    }
     SSLSocketFactory wrappedSslSocketFactory =
         requireNonNullElseGet(
             builder.getSslSocketFactory(), HttpsURLConnection::getDefaultSSLSocketFactory);
@@ -265,6 +288,12 @@ final class GcsHttpTransportFactory {
     CustomSslSocketFactory(SSLSocketFactory wrappedSocketFactory, int readTimeoutMillis) {
       this.wrappedSocketFactory = wrappedSocketFactory;
       this.readTimeoutMillis = readTimeoutMillis;
+    }
+
+    /** Returns the socket factory that this factory delegates socket creation to. */
+    @VisibleForTesting
+    SSLSocketFactory getWrappedSocketFactory() {
+      return wrappedSocketFactory;
     }
 
     @Override
