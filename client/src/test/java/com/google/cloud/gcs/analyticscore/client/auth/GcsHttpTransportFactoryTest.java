@@ -27,15 +27,18 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.Authenticator;
+import java.net.Authenticator.RequestorType;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.PasswordAuthentication;
 import java.net.Proxy;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.URI;
 import java.security.GeneralSecurityException;
 import java.time.Duration;
 import java.util.stream.Stream;
+import javax.annotation.Nullable;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLSocketFactory;
 import org.junit.jupiter.api.AfterEach;
@@ -52,6 +55,9 @@ class GcsHttpTransportFactoryTest {
 
   private static final String TUNNELING_DISABLED_SCHEMES_PROPERTY =
       "jdk.http.auth.tunneling.disabledSchemes";
+  private static final String PROXY_HOST = "proxy.example.com";
+  private static final int PROXY_PORT = 8080;
+  private static final String PROXY_ADDRESS = PROXY_HOST + ":" + PROXY_PORT;
   private static final RedactedString PROXY_USERNAME = RedactedString.create("user");
   private static final RedactedString PROXY_PASSWORD = RedactedString.create("pass");
 
@@ -205,14 +211,103 @@ class GcsHttpTransportFactoryTest {
 
   @Test
   void createHttpTransport_withProxyCredentials_installsDefaultAuthenticator() throws IOException {
+    installProxyAuthenticator();
+
+    assertThat(Authenticator.getDefault()).isNotNull();
+  }
+
+  @Test
+  void createHttpTransport_withProxyCredentials_enablesBasicAuthenticationForTunnels()
+      throws IOException {
+    installProxyAuthenticator();
+
+    assertThat(System.getProperty(TUNNELING_DISABLED_SCHEMES_PROPERTY)).isEmpty();
+  }
+
+  @Test
+  void proxyAuthenticator_matchingProxy_returnsProxyUsername() throws IOException {
+    installProxyAuthenticator();
+
+    PasswordAuthentication credentials =
+        requestProxyCredentials(PROXY_HOST, PROXY_PORT, RequestorType.PROXY);
+
+    assertThat(credentials.getUserName()).isEqualTo(PROXY_USERNAME.value());
+  }
+
+  @Test
+  void proxyAuthenticator_matchingProxy_returnsProxyPassword() throws IOException {
+    installProxyAuthenticator();
+
+    PasswordAuthentication credentials =
+        requestProxyCredentials(PROXY_HOST, PROXY_PORT, RequestorType.PROXY);
+
+    assertThat(credentials.getPassword()).isEqualTo(PROXY_PASSWORD.value().toCharArray());
+  }
+
+  @Test
+  void proxyAuthenticator_differentHost_returnsNull() throws IOException {
+    installProxyAuthenticator();
+
+    PasswordAuthentication credentials =
+        requestProxyCredentials("other.example.com", PROXY_PORT, RequestorType.PROXY);
+
+    assertThat(credentials).isNull();
+  }
+
+  @Test
+  void proxyAuthenticator_differentPort_returnsNull() throws IOException {
+    installProxyAuthenticator();
+
+    PasswordAuthentication credentials =
+        requestProxyCredentials(PROXY_HOST, PROXY_PORT + 1, RequestorType.PROXY);
+
+    assertThat(credentials).isNull();
+  }
+
+  @Test
+  void proxyAuthenticator_serverRequestor_returnsNull() throws IOException {
+    installProxyAuthenticator();
+
+    PasswordAuthentication credentials =
+        requestProxyCredentials(PROXY_HOST, PROXY_PORT, RequestorType.SERVER);
+
+    assertThat(credentials).isNull();
+  }
+
+  @Test
+  void proxyAuthenticator_unknownRequestingHost_returnsNull() throws IOException {
+    installProxyAuthenticator();
+
+    // The JDK reports a null host when it only knows the requestor by address.
+    PasswordAuthentication credentials =
+        requestProxyCredentials(/* host= */ null, PROXY_PORT, RequestorType.PROXY);
+
+    assertThat(credentials).isNull();
+  }
+
+  /** Installs the JVM wide {@link Authenticator} that serves the configured proxy credentials. */
+  private static void installProxyAuthenticator() throws IOException {
     GcsHttpTransportFactory.createHttpTransport(
-        "proxy.example.com:8080",
+        PROXY_ADDRESS,
         PROXY_USERNAME,
         PROXY_PASSWORD,
         Duration.ofSeconds(10),
         CertificateTrustStore.GOOGLE_BUNDLED);
+  }
 
-    assertThat(Authenticator.getDefault()).isNotNull();
+  /** Asks the installed {@link Authenticator} for credentials the way the JDK's HTTP stack does. */
+  @Nullable
+  private static PasswordAuthentication requestProxyCredentials(
+      @Nullable String host, int port, RequestorType requestorType) {
+    return Authenticator.requestPasswordAuthentication(
+        host,
+        /* addr= */ null,
+        port,
+        /* protocol= */ "http",
+        /* prompt= */ "",
+        /* scheme= */ "basic",
+        /* url= */ null,
+        requestorType);
   }
 
   @Test
@@ -278,14 +373,56 @@ class GcsHttpTransportFactoryTest {
                 CertificateTrustStore.GOOGLE_BUNDLED));
   }
 
-  @ParameterizedTest
-  @ValueSource(longs = {0L, -1L})
-  void createHttpTransport_nonPositiveReadTimeout_throwsIllegalArgumentException(long millis) {
+  @Test
+  void createHttpTransport_negativeReadTimeout_throwsIllegalArgumentException() {
     assertThrows(
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                null, null, null, Duration.ofMillis(millis), CertificateTrustStore.GOOGLE_BUNDLED));
+                null, null, null, Duration.ofMillis(-1), CertificateTrustStore.GOOGLE_BUNDLED));
+  }
+
+  @Test
+  void createHttpTransport_subMillisecondReadTimeout_throwsIllegalArgumentException() {
+    // Rounding this down to zero would silently leave reads unbounded.
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            GcsHttpTransportFactory.createHttpTransport(
+                null, null, null, Duration.ofNanos(500), CertificateTrustStore.GOOGLE_BUNDLED));
+  }
+
+  @Test
+  void createNetHttpTransportBuilder_zeroReadTimeout_leavesReadTimeoutUnbounded()
+      throws IOException, GeneralSecurityException {
+    NetHttpTransport.Builder builder =
+        GcsHttpTransportFactory.createNetHttpTransportBuilder(
+            null, Duration.ZERO, CertificateTrustStore.GOOGLE_BUNDLED);
+
+    assertThat(((CustomSslSocketFactory) builder.getSslSocketFactory()).getReadTimeoutMillis())
+        .isEqualTo(0);
+  }
+
+  @Test
+  void createNetHttpTransportBuilder_noReadTimeout_leavesReadTimeoutUnbounded()
+      throws IOException, GeneralSecurityException {
+    NetHttpTransport.Builder builder =
+        GcsHttpTransportFactory.createNetHttpTransportBuilder(
+            null, null, CertificateTrustStore.GOOGLE_BUNDLED);
+
+    assertThat(((CustomSslSocketFactory) builder.getSslSocketFactory()).getReadTimeoutMillis())
+        .isEqualTo(0);
+  }
+
+  @Test
+  void createNetHttpTransportBuilder_readTimeout_appliesTimeoutToSocketFactory()
+      throws IOException, GeneralSecurityException {
+    NetHttpTransport.Builder builder =
+        GcsHttpTransportFactory.createNetHttpTransportBuilder(
+            null, Duration.ofSeconds(7), CertificateTrustStore.GOOGLE_BUNDLED);
+
+    assertThat(((CustomSslSocketFactory) builder.getSslSocketFactory()).getReadTimeoutMillis())
+        .isEqualTo(7000);
   }
 
   @Test
@@ -386,6 +523,24 @@ class GcsHttpTransportFactoryTest {
   }
 
   @Test
+  void customSslSocketFactory_customizationFails_propagatesFailure() {
+    CustomSslSocketFactory socketFactory =
+        new CustomSslSocketFactory(new FailingSslSocketFactory(), 1234);
+
+    assertThrows(SocketException.class, socketFactory::createSocket);
+  }
+
+  @Test
+  void customSslSocketFactory_customizationFails_closesSocket() {
+    FailingSslSocketFactory wrapped = new FailingSslSocketFactory();
+    CustomSslSocketFactory socketFactory = new CustomSslSocketFactory(wrapped, 1234);
+
+    assertThrows(SocketException.class, socketFactory::createSocket);
+
+    assertThat(wrapped.lastCreatedSocket.isClosed()).isTrue();
+  }
+
+  @Test
   void customSslSocketFactory_getDefaultCipherSuites_delegatesToWrappedFactory() {
     FakeSslSocketFactory wrapped = new FakeSslSocketFactory();
     CustomSslSocketFactory socketFactory = new CustomSslSocketFactory(wrapped, 0);
@@ -406,7 +561,7 @@ class GcsHttpTransportFactoryTest {
    * An {@link SSLSocketFactory} that hands out unconnected plain sockets, so that socket
    * customization can be asserted without opening a TLS connection.
    */
-  private static final class FakeSslSocketFactory extends SSLSocketFactory {
+  private static class FakeSslSocketFactory extends SSLSocketFactory {
 
     private static final String[] DEFAULT_CIPHER_SUITES = {"FAKE_DEFAULT_CIPHER_SUITE"};
     private static final String[] SUPPORTED_CIPHER_SUITES = {"FAKE_SUPPORTED_CIPHER_SUITE"};
@@ -455,6 +610,27 @@ class GcsHttpTransportFactoryTest {
     public Socket createSocket(
         InetAddress address, int port, InetAddress clientAddress, int clientPort) {
       return new Socket();
+    }
+  }
+
+  /**
+   * An {@link SSLSocketFactory} whose sockets reject customization, standing in for a socket that
+   * dies between creation and configuration.
+   */
+  private static final class FailingSslSocketFactory extends FakeSslSocketFactory {
+
+    private Socket lastCreatedSocket;
+
+    @Override
+    public Socket createSocket() {
+      lastCreatedSocket =
+          new Socket() {
+            @Override
+            public synchronized void setSoTimeout(int timeout) throws SocketException {
+              throw new SocketException("Socket is no longer usable");
+            }
+          };
+      return lastCreatedSocket;
     }
   }
 }

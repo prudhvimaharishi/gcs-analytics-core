@@ -33,7 +33,6 @@ import java.net.InetSocketAddress;
 import java.net.PasswordAuthentication;
 import java.net.Proxy;
 import java.net.Socket;
-import java.net.SocketException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.GeneralSecurityException;
@@ -159,8 +158,10 @@ final class GcsHttpTransportFactory {
             @Nullable
             @Override
             protected PasswordAuthentication getPasswordAuthentication() {
+              // getRequestingHost() is null when the JDK only knows the proxy by address, so the
+              // known proxy host is the receiver of the comparison.
               if (getRequestorType() == RequestorType.PROXY
-                  && getRequestingHost().equalsIgnoreCase(proxyUri.getHost())
+                  && proxyUri.getHost().equalsIgnoreCase(getRequestingHost())
                   && getRequestingPort() == proxyUri.getPort()) {
                 return proxyAuth;
               }
@@ -215,21 +216,46 @@ final class GcsHttpTransportFactory {
   /**
    * Converts a socket read timeout into the milliseconds accepted by {@link Socket#setSoTimeout}.
    *
-   * @param readTimeout The socket read timeout, which must be positive if set.
+   * <p>Both {@code null} and {@link Duration#ZERO} leave the read timeout unbounded, which is the
+   * socket default. A timeout shorter than a millisecond is rejected rather than rounded down,
+   * because rounding it down would silently leave reads unbounded.
+   *
+   * @param readTimeout The socket read timeout, which must not be negative.
    * @return The timeout in milliseconds, or {@code 0} to leave the read timeout unbounded.
-   * @throws IllegalArgumentException If the timeout is not positive or overflows an int.
+   * @throws IllegalArgumentException If the timeout is negative, shorter than a millisecond, or
+   *     overflows an int.
    */
-  private static int toReadTimeoutMillis(@Nullable Duration readTimeout) {
-    if (readTimeout == null) {
+  static int toReadTimeoutMillis(@Nullable Duration readTimeout) {
+    return toTimeoutMillis(readTimeout, "readTimeout");
+  }
+
+  /**
+   * Converts a timeout duration into milliseconds.
+   *
+   * <p>Both {@code null} and {@link Duration#ZERO} leave the timeout unbounded. A timeout shorter
+   * than a millisecond is rejected rather than rounded down.
+   *
+   * @param timeout The timeout duration, which must not be negative.
+   * @param timeoutName The name of the timeout parameter for error reporting.
+   * @return The timeout in milliseconds, or {@code 0} to leave the timeout unbounded.
+   * @throws IllegalArgumentException If the timeout is negative, shorter than a millisecond, or
+   *     overflows an int.
+   */
+  static int toTimeoutMillis(@Nullable Duration timeout, String timeoutName) {
+    if (timeout == null || timeout.isZero()) {
       return 0;
     }
-    long timeoutMillis = readTimeout.toMillis();
-    checkArgument(timeoutMillis > 0, "readTimeout must be positive, but was %s", readTimeout);
+    checkArgument(
+        !timeout.isNegative(), "%s must not be negative, but was %s", timeoutName, timeout);
+    long timeoutMillis = timeout.toMillis();
+    checkArgument(
+        timeoutMillis > 0, "%s must be at least 1 millisecond, but was %s", timeoutName, timeout);
     checkArgument(
         timeoutMillis <= Integer.MAX_VALUE,
-        "readTimeout must not exceed %s milliseconds, but was %s",
+        "%s must not exceed %s milliseconds, but was %s",
+        timeoutName,
         Integer.MAX_VALUE,
-        readTimeout);
+        timeout);
     return (int) timeoutMillis;
   }
 
@@ -296,6 +322,12 @@ final class GcsHttpTransportFactory {
       return wrappedSocketFactory;
     }
 
+    /** Returns the read timeout applied to created sockets, where {@code 0} means unbounded. */
+    @VisibleForTesting
+    int getReadTimeoutMillis() {
+      return readTimeoutMillis;
+    }
+
     @Override
     public String[] getDefaultCipherSuites() {
       return wrappedSocketFactory.getDefaultCipherSuites();
@@ -348,18 +380,28 @@ final class GcsHttpTransportFactory {
           wrappedSocketFactory.createSocket(address, port, clientAddress, clientPort));
     }
 
-    private Socket customizeSocket(Socket socket) throws SocketException {
-      // Enable TCP keep-alive.
-      socket.setKeepAlive(true);
+    private Socket customizeSocket(Socket socket) throws IOException {
+      try {
+        // Enable TCP keep-alive.
+        socket.setKeepAlive(true);
 
-      // Set socket read timeout. This shouldn't be necessary, because we generally set the timeout
-      // through other layers, such as com.google.api.client.http.HttpRequest#setReadTimeout(int).
-      // However, setting it here guarantees that the timeout is enforced during TLS handshake when
-      // using Conscrypt as the security provider. (See discussion in
-      // https://github.com/google/conscrypt/issues/864 .)
-      // A timeout of zero leaves the read timeout unbounded, which is the socket default.
-      socket.setSoTimeout(readTimeoutMillis);
-
+        // Set socket read timeout. This shouldn't be necessary, because we generally set the
+        // timeout through other layers, such as
+        // com.google.api.client.http.HttpRequest#setReadTimeout(int). However, setting it here
+        // guarantees that the timeout is enforced during TLS handshake when using Conscrypt as the
+        // security provider. (See discussion in https://github.com/google/conscrypt/issues/864 .)
+        // A timeout of zero leaves the read timeout unbounded, which is the socket default.
+        socket.setSoTimeout(readTimeoutMillis);
+      } catch (IOException | RuntimeException e) {
+        // The socket is owned by this method until it is returned, so a half configured socket must
+        // not outlive the failure that abandoned it.
+        try {
+          socket.close();
+        } catch (IOException closeFailure) {
+          e.addSuppressed(closeFailure);
+        }
+        throw e;
+      }
       return socket;
     }
   }
