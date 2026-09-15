@@ -14,7 +14,7 @@ These properties govern the core connections, identity, and access parameters be
 | :--- | :--- | :--- |
 | `client-lib-token` | Client library token. | - |
 | `service.host` | The GCS service host. | - |
-| `universe-domain` | Custom Google Cloud universe domain (e.g., `apis-tpclp.goog`) for sovereign or private cloud environments. | `googleapis.com` |
+| `universe-domain` | The Google Cloud universe domain for the GCS client. | - |
 | `user-agent` | The user agent string. | - |
 | `project-id` | The Google Cloud project ID for the GCS client. | - |
 | `user-project` | Project ID whose Google Cloud Project's billing account should be charged for the operation being executed. | - |
@@ -34,11 +34,11 @@ These properties configure standard Google Cloud authentication, OAuth2 token re
 | `auth.refresh-token` | OAuth2 refresh token. Required when `auth.type` is `USER_CREDENTIALS`. | - |
 | `auth.impersonation-service-account` | Service account email to impersonate via static service account impersonation. | - |
 | `auth.token-server-url` | Custom token server URL used to refresh OAuth2 access tokens. | - |
-| `auth.proxy.address` | HTTP proxy address of the form `[https?://]hostname:port`. | - |
+| `auth.proxy.address` | HTTP proxy address of the form `[https?://]hostname:port`. **Note**: Does not apply to the gRPC/bidi data plane, which relies on the standard JVM proxy environment. | - |
 | `auth.proxy.username` | Username for authenticating with the HTTP proxy. | - |
 | `auth.proxy.password` | Password for authenticating with the HTTP proxy. | - |
-| `auth.http.connect-timeout-ms` | Connect timeout for authentication HTTP requests, in milliseconds. Must be positive. | `5000` |
-| `auth.http.read-timeout-ms` | Socket read timeout for authentication HTTP requests, in milliseconds. Must be positive. | `5000` |
+| `auth.http.connect-timeout-ms` | HTTP connect timeout for GCS HTTP-JSON data plane requests, in milliseconds. Must be positive. | `5000` |
+| `auth.http.read-timeout-ms` | Socket read timeout for authentication and HTTP-JSON data plane HTTP requests, in milliseconds. Must be positive. | `5000` |
 
 ### Caching and Prefetching
 
