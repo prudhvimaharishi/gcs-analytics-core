@@ -16,6 +16,7 @@
 package com.google.cloud.gcs.analyticscore.client;
 
 import com.google.auto.value.AutoValue;
+import com.google.cloud.gcs.analyticscore.common.ConfigurationUtil;
 import com.google.cloud.storage.BlobWriteSessionConfig;
 import com.google.cloud.storage.BlobWriteSessionConfigs;
 import com.google.cloud.storage.ParallelCompositeUploadBlobWriteSessionConfig;
@@ -39,7 +40,6 @@ public abstract class GcsClientOptions {
 
   private static final String CLIENT_LIB_TOKEN_KEY = "client-lib-token";
   private static final String SERVICE_HOST_KEY = "service.host";
-  private static final String UNIVERSE_DOMAIN_KEY = "universe-domain";
   private static final String USER_AGENT_KEY = "user-agent";
   static final String PROJECT_ID_KEY = "project-id";
 
@@ -75,8 +75,6 @@ public abstract class GcsClientOptions {
   public abstract Optional<String> getClientLibToken();
 
   public abstract Optional<String> getServiceHost();
-
-  public abstract Optional<String> getUniverseDomain();
 
   public abstract Optional<String> getUserAgent();
 
@@ -127,10 +125,6 @@ public abstract class GcsClientOptions {
     if (analyticsCoreOptions.containsKey(prefix + SERVICE_HOST_KEY)) {
       optionsBuilder.setServiceHost(analyticsCoreOptions.get(prefix + SERVICE_HOST_KEY));
     }
-    Optional.ofNullable(analyticsCoreOptions.get(prefix + UNIVERSE_DOMAIN_KEY))
-        .map(String::trim)
-        .filter(s -> !s.isEmpty())
-        .ifPresent(optionsBuilder::setUniverseDomain);
     if (analyticsCoreOptions.containsKey(prefix + USER_AGENT_KEY)) {
       optionsBuilder.setUserAgent(analyticsCoreOptions.get(prefix + USER_AGENT_KEY));
     }
@@ -179,8 +173,6 @@ public abstract class GcsClientOptions {
     public abstract Builder setClientLibToken(String clientLibToken);
 
     public abstract Builder setServiceHost(String serviceHost);
-
-    public abstract Builder setUniverseDomain(String universeDomain);
 
     public abstract Builder setUserAgent(String userAgent);
 

@@ -16,9 +16,10 @@
 
 package com.google.cloud.gcs.analyticscore.client.auth;
 
+import static com.google.cloud.gcs.analyticscore.common.ConfigurationUtil.getTrimmedValue;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Strings.isNullOrEmpty;
 
 import com.google.auto.value.AutoValue;
 import com.google.cloud.gcs.analyticscore.common.RedactedString;
@@ -43,7 +44,7 @@ public abstract class GcsAuthOptions {
   private static final String REFRESH_TOKEN_KEY = "auth.refresh-token";
   private static final String IMPERSONATION_SERVICE_ACCOUNT_KEY =
       "auth.impersonation-service-account";
-  private static final String TOKEN_SERVER_URL_KEY = "auth.token-server-url";
+  private static final String TOKEN_SERVER_URI_KEY = "auth.token-server-uri";
   private static final String PROXY_ADDRESS_KEY = "auth.proxy.address";
   private static final String PROXY_USERNAME_KEY = "auth.proxy.username";
   private static final String PROXY_PASSWORD_KEY = "auth.proxy.password";
@@ -97,6 +98,8 @@ public abstract class GcsAuthOptions {
    * @param prefix The prefix prepended to configuration property keys, including any trailing
    *     separator.
    * @return A configured {@link GcsAuthOptions} instance.
+   * @throws IllegalArgumentException If a value cannot be parsed, or if a key required by the
+   *     selected {@link AuthType} is missing.
    */
   public static GcsAuthOptions createFromOptions(Map<String, String> options, String prefix) {
     checkNotNull(options, "options cannot be null");
@@ -118,8 +121,8 @@ public abstract class GcsAuthOptions {
         .ifPresent(optionsBuilder::setRefreshToken);
     getTrimmedValue(options, prefix + IMPERSONATION_SERVICE_ACCOUNT_KEY)
         .ifPresent(optionsBuilder::setImpersonationServiceAccount);
-    getTrimmedValue(options, prefix + TOKEN_SERVER_URL_KEY)
-        .map(value -> parseUri(prefix + TOKEN_SERVER_URL_KEY, value))
+    getTrimmedValue(options, prefix + TOKEN_SERVER_URI_KEY)
+        .map(value -> parseUri(prefix + TOKEN_SERVER_URI_KEY, value))
         .ifPresent(optionsBuilder::setTokenServerUri);
     getTrimmedValue(options, prefix + PROXY_ADDRESS_KEY).ifPresent(optionsBuilder::setProxyAddress);
     getTrimmedValue(options, prefix + PROXY_USERNAME_KEY)
@@ -135,21 +138,34 @@ public abstract class GcsAuthOptions {
         .map(value -> parseTimeout(prefix + HTTP_READ_TIMEOUT_KEY, value))
         .ifPresent(optionsBuilder::setHttpReadTimeout);
 
-    return optionsBuilder.build();
+    return optionsBuilder.build(prefix);
   }
 
-  private static Optional<String> getTrimmedValue(Map<String, String> options, String key) {
-    return Optional.ofNullable(options.get(key))
-        .map(String::trim)
-        .filter(value -> !value.isEmpty());
-  }
-
+  /**
+   * Parses an absolute URI.
+   *
+   * <p>{@link URI} accepts relative references such as {@code oauth2.googleapis.com/token}, so
+   * omitting the scheme is rejected here rather than at the first token refresh, where the failure
+   * no longer names the property that caused it.
+   *
+   * @param key The configuration key the value was read from, named in error messages.
+   * @param value The URI string to parse.
+   * @return The parsed URI.
+   * @throws IllegalArgumentException If the value is not a syntactically valid absolute URI.
+   */
   private static URI parseUri(String key, String value) {
+    URI uri;
     try {
-      return new URI(value);
+      uri = new URI(value);
     } catch (URISyntaxException e) {
       throw new IllegalArgumentException(String.format("%s=%s is not a valid URI", key, value), e);
     }
+    checkArgument(
+        uri.isAbsolute() && uri.getHost() != null,
+        "%s=%s must be an absolute URI, for example https://oauth2.googleapis.com/token",
+        key,
+        value);
+    return uri;
   }
 
   private static Duration parseTimeout(String key, String value) {
@@ -162,6 +178,43 @@ public abstract class GcsAuthOptions {
     }
     checkArgument(timeoutMillis > 0, "%s=%s must be positive", key, value);
     return Duration.ofMillis(timeoutMillis);
+  }
+
+  /**
+   * Parses and validates a proxy address of the form {@code [https?://]hostname:port}.
+   *
+   * @param proxyAddress The proxy address string to validate, or {@code null}.
+   * @return The parsed {@link URI}, or {@code null} if {@code proxyAddress} is null or empty.
+   * @throws IllegalArgumentException If the proxy address does not match {@code
+   *     [https?://]hostname:port}.
+   */
+  @Nullable
+  static URI parseProxyAddress(@Nullable String proxyAddress) {
+    if (isNullOrEmpty(proxyAddress)) {
+      return null;
+    }
+    String uriString = (proxyAddress.contains("//") ? "" : "//") + proxyAddress;
+    try {
+      URI uri = new URI(uriString);
+      String scheme = uri.getScheme();
+      String host = uri.getHost();
+      int port = uri.getPort();
+      checkArgument(
+          isNullOrEmpty(scheme) || scheme.matches("https?"),
+          "HTTP proxy address '%s' has invalid scheme '%s'.",
+          proxyAddress,
+          scheme);
+      checkArgument(!isNullOrEmpty(host), "Proxy address '%s' has no host.", proxyAddress);
+      checkArgument(port != -1, "Proxy address '%s' has no port.", proxyAddress);
+      checkArgument(
+          uri.equals(new URI(scheme, null, host, port, null, null, null)),
+          "Invalid proxy address '%s'.",
+          proxyAddress);
+      return uri;
+    } catch (URISyntaxException e) {
+      throw new IllegalArgumentException(
+          String.format("Invalid proxy address '%s'.", proxyAddress), e);
+    }
   }
 
   /** Builder for {@link GcsAuthOptions}. */
@@ -198,9 +251,14 @@ public abstract class GcsAuthOptions {
     public abstract Builder setHttpReadTimeout(Duration httpReadTimeout);
 
     public GcsAuthOptions build() {
+      return build("");
+    }
+
+    GcsAuthOptions build(String prefix) {
       GcsAuthOptions options = autoBuild();
-      validateRequiredFields(options);
-      validateProxyFields(options);
+      validateRequiredFields(options, prefix);
+      validateProxyFields(options, prefix);
+      validateTimeouts(options, prefix);
       return options;
     }
 
@@ -210,49 +268,88 @@ public abstract class GcsAuthOptions {
      * Rejects proxy settings that cannot be honored together, so that a typo in one key is reported
      * against the configuration that caused it rather than when a transport is first created.
      */
-    private static void validateProxyFields(GcsAuthOptions options) {
+    private static void validateProxyFields(GcsAuthOptions options, String prefix) {
       checkArgument(
           options.getProxyAddress().isPresent()
               || (options.getProxyUsername().isEmpty() && options.getProxyPassword().isEmpty()),
           "%s and %s require %s to be set",
-          PROXY_USERNAME_KEY,
-          PROXY_PASSWORD_KEY,
-          PROXY_ADDRESS_KEY);
+          prefix + PROXY_USERNAME_KEY,
+          prefix + PROXY_PASSWORD_KEY,
+          prefix + PROXY_ADDRESS_KEY);
       checkArgument(
           options.getProxyUsername().isPresent() == options.getProxyPassword().isPresent(),
           "%s and %s must be set or unset together",
-          PROXY_USERNAME_KEY,
-          PROXY_PASSWORD_KEY);
+          prefix + PROXY_USERNAME_KEY,
+          prefix + PROXY_PASSWORD_KEY);
+      if (options.getProxyAddress().isPresent()) {
+        String address = options.getProxyAddress().get();
+        checkArgument(!address.trim().isEmpty(), "%s cannot be blank", prefix + PROXY_ADDRESS_KEY);
+        parseProxyAddress(address);
+      }
     }
 
-    private static void validateRequiredFields(GcsAuthOptions options) {
+    private static void validateRequiredFields(GcsAuthOptions options, String prefix) {
       switch (options.getAuthType()) {
         case SERVICE_ACCOUNT_JSON_KEYFILE:
           checkRequiredField(
               options.getServiceAccountJsonKeyfile(),
-              SERVICE_ACCOUNT_JSON_KEYFILE_KEY,
+              prefix + SERVICE_ACCOUNT_JSON_KEYFILE_KEY,
+              prefix + AUTH_TYPE_KEY,
               options.getAuthType());
           break;
         case WORKLOAD_IDENTITY_FEDERATION:
           checkRequiredField(
               options.getWorkloadIdentityCredentialConfigFile(),
-              WORKLOAD_IDENTITY_CREDENTIAL_CONFIG_FILE_KEY,
+              prefix + WORKLOAD_IDENTITY_CREDENTIAL_CONFIG_FILE_KEY,
+              prefix + AUTH_TYPE_KEY,
               options.getAuthType());
           break;
         case USER_CREDENTIALS:
-          checkRequiredField(options.getClientId(), CLIENT_ID_KEY, options.getAuthType());
-          checkRequiredField(options.getClientSecret(), CLIENT_SECRET_KEY, options.getAuthType());
-          checkRequiredField(options.getRefreshToken(), REFRESH_TOKEN_KEY, options.getAuthType());
+          checkRequiredField(
+              options.getClientId(),
+              prefix + CLIENT_ID_KEY,
+              prefix + AUTH_TYPE_KEY,
+              options.getAuthType());
+          checkRequiredField(
+              options.getClientSecret(),
+              prefix + CLIENT_SECRET_KEY,
+              prefix + AUTH_TYPE_KEY,
+              options.getAuthType());
+          checkRequiredField(
+              options.getRefreshToken(),
+              prefix + REFRESH_TOKEN_KEY,
+              prefix + AUTH_TYPE_KEY,
+              options.getAuthType());
           break;
-        default:
+          // Listed rather than defaulted, so that adding an auth type without deciding which keys
+          // it requires is a compile-time failure instead of silently skipped validation.
+        case APPLICATION_DEFAULT:
+        case COMPUTE_ENGINE:
+        case UNAUTHENTICATED:
           break;
       }
     }
 
+    private static void validateTimeouts(GcsAuthOptions options, String prefix) {
+      checkArgument(
+          !options.getHttpConnectTimeout().isNegative()
+              && !options.getHttpConnectTimeout().isZero(),
+          "%s must be positive, got: %s",
+          prefix + HTTP_CONNECT_TIMEOUT_KEY,
+          options.getHttpConnectTimeout());
+      checkArgument(
+          !options.getHttpReadTimeout().isNegative() && !options.getHttpReadTimeout().isZero(),
+          "%s must be positive, got: %s",
+          prefix + HTTP_READ_TIMEOUT_KEY,
+          options.getHttpReadTimeout());
+    }
+
     private static void checkRequiredField(
-        Optional<?> value, String requiredKey, AuthType authType) {
-      checkState(
-          value.isPresent(), "%s is required when %s is %s", requiredKey, AUTH_TYPE_KEY, authType);
+        Optional<?> value, String requiredKey, String authTypeKey, AuthType authType) {
+      boolean isValid =
+          value.isPresent()
+              && (!(value.get() instanceof String) || !((String) value.get()).trim().isEmpty());
+      checkArgument(isValid, "%s is required when %s is %s", requiredKey, authTypeKey, authType);
     }
   }
 }

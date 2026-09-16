@@ -28,6 +28,10 @@ import javax.annotation.Nullable;
  * this type stays redacted in log statements and in the generated {@code toString} of any value
  * class that holds it. Call {@link #value()} to obtain the wrapped string at the point where it is
  * actually needed.
+ *
+ * <p>The protection lasts only as long as the value stays in this type. Assigning {@link #value()}
+ * to a {@code String} field, passing it as a log format argument, or concatenating it into a
+ * message all defeat the redaction, so unwrap it at the point of use and do not retain the result.
  */
 @AutoValue
 public abstract class RedactedString {

@@ -26,6 +26,7 @@ import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class GcsAuthOptionsTest {
@@ -144,7 +145,7 @@ class GcsAuthOptionsTest {
             .put("gcs.auth.client-secret", "client-secret")
             .put("gcs.auth.refresh-token", "refresh-token")
             .put("gcs.auth.impersonation-service-account", "target@iam.gserviceaccount.com")
-            .put("gcs.auth.token-server-url", "https://oauth2.googleapis.com/token")
+            .put("gcs.auth.token-server-uri", "https://oauth2.googleapis.com/token")
             .put("gcs.auth.proxy.address", "https://proxy:8443")
             .put("gcs.auth.proxy.username", "user")
             .put("gcs.auth.proxy.password", "pass")
@@ -199,7 +200,7 @@ class GcsAuthOptionsTest {
             .put("auth.client-secret", "   ")
             .put("auth.refresh-token", "   ")
             .put("auth.impersonation-service-account", "   ")
-            .put("auth.token-server-url", "   ")
+            .put("auth.token-server-uri", "   ")
             .put("auth.proxy.address", "   ")
             .put("auth.proxy.username", "   ")
             .put("auth.proxy.password", "   ")
@@ -237,9 +238,10 @@ class GcsAuthOptionsTest {
     assertThrows(IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, ""));
   }
 
-  @Test
-  void createFromOptions_invalidTokenServerUrl_throwsIllegalArgumentException() {
-    Map<String, String> map = ImmutableMap.of("auth.token-server-url", "http://invalid uri");
+  @ParameterizedTest
+  @ValueSource(strings = {"http://invalid uri", "oauth2.googleapis.com/token", "not-a-url"})
+  void createFromOptions_tokenServerUriIsNotAbsolute_throwsIllegalArgumentException(String uri) {
+    Map<String, String> map = ImmutableMap.of("auth.token-server-uri", uri);
 
     assertThrows(IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, ""));
   }
@@ -257,52 +259,52 @@ class GcsAuthOptionsTest {
   }
 
   @Test
-  void build_userCredentialsWithoutClientId_throwsIllegalStateException() {
+  void build_userCredentialsWithoutClientId_throwsIllegalArgumentException() {
     GcsAuthOptions.Builder optionsBuilder =
         GcsAuthOptions.builder()
             .setAuthType(AuthType.USER_CREDENTIALS)
             .setClientSecret(RedactedString.create(CLIENT_SECRET_VALUE))
             .setRefreshToken(RedactedString.create(REFRESH_TOKEN_VALUE));
 
-    assertThrows(IllegalStateException.class, optionsBuilder::build);
+    assertThrows(IllegalArgumentException.class, optionsBuilder::build);
   }
 
   @Test
-  void build_userCredentialsWithoutClientSecret_throwsIllegalStateException() {
+  void build_userCredentialsWithoutClientSecret_throwsIllegalArgumentException() {
     GcsAuthOptions.Builder optionsBuilder =
         GcsAuthOptions.builder()
             .setAuthType(AuthType.USER_CREDENTIALS)
             .setClientId("my-client-id")
             .setRefreshToken(RedactedString.create(REFRESH_TOKEN_VALUE));
 
-    assertThrows(IllegalStateException.class, optionsBuilder::build);
+    assertThrows(IllegalArgumentException.class, optionsBuilder::build);
   }
 
   @Test
-  void build_userCredentialsWithoutRefreshToken_throwsIllegalStateException() {
+  void build_userCredentialsWithoutRefreshToken_throwsIllegalArgumentException() {
     GcsAuthOptions.Builder optionsBuilder =
         GcsAuthOptions.builder()
             .setAuthType(AuthType.USER_CREDENTIALS)
             .setClientId("my-client-id")
             .setClientSecret(RedactedString.create(CLIENT_SECRET_VALUE));
 
-    assertThrows(IllegalStateException.class, optionsBuilder::build);
+    assertThrows(IllegalArgumentException.class, optionsBuilder::build);
   }
 
   @Test
-  void build_serviceAccountKeyfileAuthWithoutKeyfile_throwsIllegalStateException() {
+  void build_serviceAccountKeyfileAuthWithoutKeyfile_throwsIllegalArgumentException() {
     GcsAuthOptions.Builder optionsBuilder =
         GcsAuthOptions.builder().setAuthType(AuthType.SERVICE_ACCOUNT_JSON_KEYFILE);
 
-    assertThrows(IllegalStateException.class, optionsBuilder::build);
+    assertThrows(IllegalArgumentException.class, optionsBuilder::build);
   }
 
   @Test
-  void build_workloadIdentityFederationWithoutConfigFile_throwsIllegalStateException() {
+  void build_workloadIdentityFederationWithoutConfigFile_throwsIllegalArgumentException() {
     GcsAuthOptions.Builder optionsBuilder =
         GcsAuthOptions.builder().setAuthType(AuthType.WORKLOAD_IDENTITY_FEDERATION);
 
-    assertThrows(IllegalStateException.class, optionsBuilder::build);
+    assertThrows(IllegalArgumentException.class, optionsBuilder::build);
   }
 
   @Test
@@ -320,8 +322,9 @@ class GcsAuthOptionsTest {
             "auth.client-id", "client-id",
             "auth.refresh-token", "refresh-token");
 
-    IllegalStateException exception =
-        assertThrows(IllegalStateException.class, () -> GcsAuthOptions.createFromOptions(map, ""));
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, ""));
 
     assertThat(exception).hasMessageThat().contains("auth.client-secret");
   }
@@ -377,6 +380,94 @@ class GcsAuthOptionsTest {
             IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, ""));
 
     assertThat(exception).hasMessageThat().contains("auth.proxy.address");
+  }
+
+  @Test
+  void createFromOptions_withPrefix_missingRequiredFieldReportsPrefixedKey() {
+    Map<String, String> map =
+        ImmutableMap.of(
+            "gcs.auth.type", "USER_CREDENTIALS",
+            "gcs.auth.client-id", "client-id",
+            "gcs.auth.refresh-token", "refresh-token");
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, "gcs."));
+
+    assertThat(exception).hasMessageThat().contains("gcs.auth.client-secret");
+  }
+
+  @Test
+  void createFromOptions_withPrefix_proxyCredentialsWithoutAddressReportsPrefixedKey() {
+    Map<String, String> map =
+        ImmutableMap.of(
+            "gcs.auth.proxy.username", "user",
+            "gcs.auth.proxy.password", "pass");
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, "gcs."));
+
+    assertThat(exception).hasMessageThat().contains("gcs.auth.proxy.address");
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "proxy.example.com:8080, //proxy.example.com:8080",
+    "http://proxy.example.com:8080, http://proxy.example.com:8080",
+    "https://proxy.example.com:8443, https://proxy.example.com:8443",
+    "127.0.0.1:3128, //127.0.0.1:3128"
+  })
+  void parseProxyAddress_validAddress_returnsExpectedUri(String input, String expected) {
+    URI uri = GcsAuthOptions.parseProxyAddress(input);
+
+    assertThat(uri).isEqualTo(URI.create(expected));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "this is not a proxy",
+        "proxy.example.com",
+        "ftp://proxy.example.com:8080",
+        "http://proxy.example.com:8080/path",
+        ":8080",
+        "http://proxy.example.com:notaport"
+      })
+  void build_invalidProxyAddress_throwsIllegalArgumentException(String invalidProxy) {
+    GcsAuthOptions.Builder builder = GcsAuthOptions.builder().setProxyAddress(invalidProxy);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @ParameterizedTest
+  @ValueSource(longs = {0L, -5L})
+  void build_nonPositiveConnectTimeout_throwsIllegalArgumentException(long seconds) {
+    GcsAuthOptions.Builder builder =
+        GcsAuthOptions.builder().setHttpConnectTimeout(Duration.ofSeconds(seconds));
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @ParameterizedTest
+  @ValueSource(longs = {0L, -5L})
+  void build_nonPositiveReadTimeout_throwsIllegalArgumentException(long seconds) {
+    GcsAuthOptions.Builder builder =
+        GcsAuthOptions.builder().setHttpReadTimeout(Duration.ofSeconds(seconds));
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", "   "})
+  void build_serviceAccountKeyfileAuthWithBlankKeyfile_throwsIllegalArgumentException(
+      String blankKeyfile) {
+    GcsAuthOptions.Builder builder =
+        GcsAuthOptions.builder()
+            .setAuthType(AuthType.SERVICE_ACCOUNT_JSON_KEYFILE)
+            .setServiceAccountJsonKeyfile(blankKeyfile);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
   }
 
   private static GcsAuthOptions createOptionsWithSecrets() {

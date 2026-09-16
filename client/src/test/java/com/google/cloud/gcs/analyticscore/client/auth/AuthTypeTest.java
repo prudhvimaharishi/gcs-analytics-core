@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class AuthTypeTest {
 
@@ -56,8 +57,19 @@ class AuthTypeTest {
     assertThrows(NullPointerException.class, () -> AuthType.fromString(null));
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"", "   "})
+  void fromString_blankInput_throwsIllegalArgumentException(String input) {
+    assertThrows(IllegalArgumentException.class, () -> AuthType.fromString(input));
+  }
+
   @Test
-  void fromString_invalidInput_throwsIllegalArgumentException() {
-    assertThrows(IllegalArgumentException.class, () -> AuthType.fromString("UNKNOWN_AUTH_TYPE"));
+  void fromString_typoedAuthType_reportsValueAndSupportedValues() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> AuthType.fromString("APPLICATON_DEFAULT"));
+
+    assertThat(exception).hasMessageThat().contains("APPLICATON_DEFAULT");
+    assertThat(exception).hasMessageThat().contains("APPLICATION_DEFAULT");
   }
 }
