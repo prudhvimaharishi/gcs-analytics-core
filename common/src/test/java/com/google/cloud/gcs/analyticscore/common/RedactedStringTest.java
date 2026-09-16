@@ -17,6 +17,7 @@
 package com.google.cloud.gcs.analyticscore.common;
 
 import static com.google.common.truth.Truth.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.junit.jupiter.api.Test;
 
@@ -59,12 +60,17 @@ class RedactedStringTest {
   }
 
   @Test
-  void create_nullValue_returnsNull() {
-    assertThat(RedactedString.create(null)).isNull();
+  void create_nullValue_throwsNullPointerException() {
+    assertThrows(NullPointerException.class, () -> RedactedString.create(null));
   }
 
   @Test
-  void create_emptyValue_returnsNull() {
-    assertThat(RedactedString.create("")).isNull();
+  void create_emptyValue_throwsIllegalArgumentException() {
+    assertThrows(IllegalArgumentException.class, () -> RedactedString.create(""));
+  }
+
+  @Test
+  void create_blankValue_throwsIllegalArgumentException() {
+    assertThrows(IllegalArgumentException.class, () -> RedactedString.create("   "));
   }
 }

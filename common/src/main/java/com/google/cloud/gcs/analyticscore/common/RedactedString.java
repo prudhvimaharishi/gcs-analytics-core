@@ -16,10 +16,10 @@
 
 package com.google.cloud.gcs.analyticscore.common;
 
-import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auto.value.AutoValue;
-import javax.annotation.Nullable;
 
 /**
  * Holder for a string that must never be logged, such as a credential or an encryption key.
@@ -41,15 +41,19 @@ public abstract class RedactedString {
   /**
    * Wraps a secret so that it stays redacted when logged.
    *
-   * <p>An unset secret is represented by {@code null} rather than by an instance wrapping an empty
-   * string, so that a caller can pass an absent configuration value straight through.
+   * <p>A blank secret is rejected rather than wrapped, so that a misconfigured credential is
+   * reported against the configuration that caused it rather than as an opaque authentication
+   * failure later. Represent an unset secret by not calling this method at all.
    *
-   * @param value The secret to wrap, which may be null or empty.
-   * @return The wrapped secret, or {@code null} if {@code value} is null or empty.
+   * @param value The secret to wrap.
+   * @return The wrapped secret.
+   * @throws NullPointerException If {@code value} is null.
+   * @throws IllegalArgumentException If {@code value} is empty or contains only whitespace.
    */
-  @Nullable
-  public static RedactedString create(@Nullable String value) {
-    return isNullOrEmpty(value) ? null : new AutoValue_RedactedString(value);
+  public static RedactedString create(String value) {
+    checkNotNull(value, "value cannot be null");
+    checkArgument(!value.trim().isEmpty(), "value cannot be blank");
+    return new AutoValue_RedactedString(value);
   }
 
   public abstract String value();

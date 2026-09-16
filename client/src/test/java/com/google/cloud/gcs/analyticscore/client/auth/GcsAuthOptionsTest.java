@@ -27,6 +27,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class GcsAuthOptionsTest {
@@ -246,6 +247,14 @@ class GcsAuthOptionsTest {
     assertThrows(IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, ""));
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"mailto:tokens@example.com", "urn:isbn:0451450523"})
+  void createFromOptions_tokenServerUriHasNoHost_throwsIllegalArgumentException(String uri) {
+    Map<String, String> map = ImmutableMap.of("auth.token-server-uri", uri);
+
+    assertThrows(IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, ""));
+  }
+
   @Test
   void createFromOptions_nullOptions_throwsNullPointerException() {
     assertThrows(NullPointerException.class, () -> GcsAuthOptions.createFromOptions(null, "gcs."));
@@ -305,6 +314,17 @@ class GcsAuthOptionsTest {
         GcsAuthOptions.builder().setAuthType(AuthType.WORKLOAD_IDENTITY_FEDERATION);
 
     assertThrows(IllegalArgumentException.class, optionsBuilder::build);
+  }
+
+  @Test
+  void build_workloadIdentityFederationWithConfigFile_succeeds() {
+    GcsAuthOptions options =
+        GcsAuthOptions.builder()
+            .setAuthType(AuthType.WORKLOAD_IDENTITY_FEDERATION)
+            .setWorkloadIdentityCredentialConfigFile("/path/to/wif.json")
+            .build();
+
+    assertThat(options.getWorkloadIdentityCredentialConfigFile()).hasValue("/path/to/wif.json");
   }
 
   @Test
@@ -369,6 +389,28 @@ class GcsAuthOptionsTest {
   }
 
   @Test
+  void build_proxyPasswordWithoutAddressOrUsername_throwsIllegalArgumentException() {
+    GcsAuthOptions.Builder builder =
+        GcsAuthOptions.builder().setProxyPassword(RedactedString.create(PROXY_PASSWORD_VALUE));
+
+    IllegalArgumentException exception =
+        assertThrows(IllegalArgumentException.class, builder::build);
+
+    assertThat(exception).hasMessageThat().contains("auth.proxy.address");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", "   "})
+  void build_blankProxyAddress_throwsIllegalArgumentException(String blankAddress) {
+    GcsAuthOptions.Builder builder = GcsAuthOptions.builder().setProxyAddress(blankAddress);
+
+    IllegalArgumentException exception =
+        assertThrows(IllegalArgumentException.class, builder::build);
+
+    assertThat(exception).hasMessageThat().contains("auth.proxy.address");
+  }
+
+  @Test
   void createFromOptions_proxyCredentialsWithoutAddress_throwsIllegalArgumentException() {
     Map<String, String> map =
         ImmutableMap.of(
@@ -422,6 +464,14 @@ class GcsAuthOptionsTest {
     URI uri = GcsAuthOptions.parseProxyAddress(input);
 
     assertThat(uri).isEqualTo(URI.create(expected));
+  }
+
+  @ParameterizedTest
+  @NullAndEmptySource
+  void parseProxyAddress_nullOrEmptyAddress_returnsNull(String proxyAddress) {
+    URI uri = GcsAuthOptions.parseProxyAddress(proxyAddress);
+
+    assertThat(uri).isNull();
   }
 
   @ParameterizedTest
