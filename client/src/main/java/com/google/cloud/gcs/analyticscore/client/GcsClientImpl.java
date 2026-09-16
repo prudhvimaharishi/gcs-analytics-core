@@ -25,6 +25,8 @@ import com.google.api.gax.rpc.NotFoundException;
 import com.google.auth.Credentials;
 import com.google.cloud.gcs.analyticscore.client.GcsClientOptions.Protocol;
 import com.google.cloud.gcs.analyticscore.client.GcsReadChannel.ItemInfoProvider;
+import com.google.cloud.gcs.analyticscore.client.auth.GcsAuthOptions;
+import com.google.cloud.gcs.analyticscore.client.auth.GcsTransportOptionsProvider;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BlobId;
@@ -96,31 +98,72 @@ class GcsClientImpl implements GcsClient {
   @VisibleForTesting volatile StorageControlClient storageControlClient;
   private volatile boolean isStorageControlClientClosed = false;
 
+  private final GcsTransportOptionsProvider transportOptionsProvider;
+
+  GcsClientImpl(
+      Credentials credentials,
+      GcsClientOptions clientOptions,
+      Supplier<ExecutorService> executorServiceSupplier,
+      Telemetry telemetry,
+      GcsTransportOptionsProvider transportOptionsProvider) {
+    this(
+        Optional.of(credentials),
+        clientOptions,
+        executorServiceSupplier,
+        telemetry,
+        transportOptionsProvider);
+  }
+
   GcsClientImpl(
       Credentials credentials,
       GcsClientOptions clientOptions,
       Supplier<ExecutorService> executorServiceSupplier,
       Telemetry telemetry) {
-    this(Optional.of(credentials), clientOptions, executorServiceSupplier, telemetry);
+    this(
+        Optional.of(credentials),
+        clientOptions,
+        executorServiceSupplier,
+        telemetry,
+        defaultTransportOptionsProvider(clientOptions));
   }
 
   GcsClientImpl(
       GcsClientOptions clientOptions,
       Supplier<ExecutorService> executorServiceSupplier,
       Telemetry telemetry) {
-    this(Optional.empty(), clientOptions, executorServiceSupplier, telemetry);
+    this(
+        Optional.empty(),
+        clientOptions,
+        executorServiceSupplier,
+        telemetry,
+        defaultTransportOptionsProvider(clientOptions));
   }
 
   private GcsClientImpl(
       Optional<Credentials> credentials,
       GcsClientOptions clientOptions,
       Supplier<ExecutorService> executorServiceSupplier,
-      Telemetry telemetry) {
+      Telemetry telemetry,
+      GcsTransportOptionsProvider transportOptionsProvider) {
     this.clientOptions = clientOptions;
     this.credentials = credentials;
     this.executorServiceSupplier = executorServiceSupplier;
     this.telemetry = telemetry;
+    this.transportOptionsProvider = transportOptionsProvider;
     this.storage = createStorage(credentials);
+  }
+
+  /**
+   * Builds a transport provider for callers that supply their own credentials and therefore have no
+   * authentication options to contribute. The storage endpoint and universe domain still matter,
+   * because they determine the trust store the data plane validates against.
+   */
+  private static GcsTransportOptionsProvider defaultTransportOptionsProvider(
+      GcsClientOptions clientOptions) {
+    return new GcsTransportOptionsProvider(
+        GcsAuthOptions.builder().build(),
+        clientOptions.getServiceHost().orElse(null),
+        clientOptions.getUniverseDomain().orElse(null));
   }
 
   @Override
@@ -417,13 +460,26 @@ class GcsClientImpl implements GcsClient {
 
   @VisibleForTesting
   protected Storage createStorage(Optional<Credentials> credentials) {
-    StorageOptions.Builder builder =
-        clientOptions.isGrpcEnabled() ? StorageOptions.grpc() : StorageOptions.newBuilder();
+    boolean isGrpc = clientOptions.isGrpcEnabled();
+
+    // Log warning on gRPC + Proxy configuration per requirements.
+    if (isGrpc && transportOptionsProvider.hasProxyConfiguration()) {
+      LOG.warn(
+          "Proxy configuration (auth.proxy.*) is not currently supported for gRPC/Bidi data paths. The gRPC client will ignore 'auth.proxy.*' and may rely on standard JVM environment proxy settings.");
+    }
+
+    StorageOptions.Builder builder = isGrpc ? StorageOptions.grpc() : StorageOptions.newBuilder();
+
+    if (!isGrpc) {
+      builder.setTransportOptions(transportOptionsProvider.getStorageTransportOptions());
+    }
+
     String userAgent = getUserAgent();
     builder.setHeaderProvider(FixedHeaderProvider.create(ImmutableMap.of("User-Agent", userAgent)));
     clientOptions.getProjectId().ifPresent(builder::setProjectId);
     clientOptions.getClientLibToken().ifPresent(builder::setClientLibToken);
     clientOptions.getServiceHost().ifPresent(builder::setHost);
+    clientOptions.getUniverseDomain().ifPresent(builder::setUniverseDomain);
     credentials.ifPresent(builder::setCredentials);
     builder.setBlobWriteSessionConfig(clientOptions.generateSessionConfig());
 

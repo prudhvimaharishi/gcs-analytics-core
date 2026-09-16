@@ -35,6 +35,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -81,6 +82,31 @@ public final class GcsCredentialsFactory {
     HttpTransport impersonationTransport = createImpersonationTransport(options, tokenTransport);
 
     return createCredentials(options, () -> tokenTransport, () -> impersonationTransport);
+  }
+
+  /**
+   * Creates a {@link Credentials} instance according to the specified {@link GcsAuthOptions}, using
+   * the provided transport provider for token fetching.
+   */
+  public static Credentials createCredentials(
+      GcsAuthOptions options, GcsTransportOptionsProvider transportProvider) throws IOException {
+    checkNotNull(options, "options cannot be null");
+    checkNotNull(transportProvider, "transportProvider cannot be null");
+    if (options.getAuthType() == AuthType.UNAUTHENTICATED) {
+      return NoCredentials.getInstance();
+    }
+
+    try {
+      HttpTransport impersonationTransport = transportProvider.getAuthTransportFactory().create();
+      HttpTransport tokenTransport =
+          tokenTrustStoreSource(options) == TrustStoreSource.GOOGLE_BUNDLED
+              ? impersonationTransport
+              : GcsHttpTransportFactory.createHttpTransport(
+                  options, TrustStoreSource.SYSTEM_DEFAULT);
+      return createCredentials(options, () -> tokenTransport, () -> impersonationTransport);
+    } catch (UncheckedIOException e) {
+      throw e.getCause();
+    }
   }
 
   /**
