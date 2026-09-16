@@ -20,6 +20,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auth.Credentials;
 import com.google.cloud.gcs.analyticscore.client.auth.GcsCredentialsFactory;
+import com.google.cloud.gcs.analyticscore.client.auth.GcsTransportOptionsProvider;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants;
 import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryOptions;
 import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryReporter;
@@ -76,12 +77,40 @@ public class GcsFileSystemImpl implements GcsFileSystem {
    * @throws IOException If credentials cannot be resolved from the authentication options.
    */
   public GcsFileSystemImpl(GcsFileSystemOptions fileSystemOptions) throws IOException {
+    this(fileSystemOptions, createTransportProvider(fileSystemOptions));
+  }
+
+  private GcsFileSystemImpl(
+      GcsFileSystemOptions fileSystemOptions, GcsTransportOptionsProvider transportProvider)
+      throws IOException {
     this(
-        GcsCredentialsFactory.createCredentials(fileSystemOptions.getGcsAuthOptions()),
-        fileSystemOptions);
+        GcsCredentialsFactory.createCredentials(
+            fileSystemOptions.getGcsAuthOptions(), transportProvider),
+        fileSystemOptions,
+        transportProvider);
   }
 
   public GcsFileSystemImpl(Credentials credentials, GcsFileSystemOptions fileSystemOptions) {
+    this(credentials, fileSystemOptions, createTransportProvider(fileSystemOptions));
+  }
+
+  /**
+   * Builds the transport provider, pairing the authentication options with the storage endpoint and
+   * universe domain so that the token and data plane transports each validate against the right
+   * trust store.
+   */
+  private static GcsTransportOptionsProvider createTransportProvider(
+      GcsFileSystemOptions fileSystemOptions) {
+    return new GcsTransportOptionsProvider(
+        fileSystemOptions.getGcsAuthOptions(),
+        fileSystemOptions.getGcsClientOptions().getServiceHost().orElse(null),
+        fileSystemOptions.getGcsClientOptions().getUniverseDomain().orElse(null));
+  }
+
+  private GcsFileSystemImpl(
+      Credentials credentials,
+      GcsFileSystemOptions fileSystemOptions,
+      GcsTransportOptionsProvider transportProvider) {
     checkNotNull(credentials, "credentials should not be null");
     this.fileSystemOptions = fileSystemOptions;
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
@@ -98,7 +127,8 @@ public class GcsFileSystemImpl implements GcsFileSystem {
                     credentials,
                     fileSystemOptions.getGcsClientOptions(),
                     readExecutorServiceSupplier,
-                    telemetry));
+                    telemetry,
+                    transportProvider));
     this.flatStrategy = new FlatNamespaceStrategyImpl(this.gcsClient);
     this.hnsStrategy = new HierarchicalNamespaceStrategyImpl(this.gcsClient);
   }

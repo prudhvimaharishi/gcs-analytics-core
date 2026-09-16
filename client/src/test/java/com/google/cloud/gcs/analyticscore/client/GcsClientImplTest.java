@@ -33,6 +33,8 @@ import com.google.api.gax.paging.Page;
 import com.google.api.gax.rpc.NotFoundException;
 import com.google.auth.Credentials;
 import com.google.cloud.NoCredentials;
+import com.google.cloud.gcs.analyticscore.client.auth.GcsAuthOptions;
+import com.google.cloud.gcs.analyticscore.client.auth.GcsTransportOptionsProvider;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BlobId;
@@ -385,6 +387,87 @@ class GcsClientImplTest {
         new GcsClientImpl(credentials, TEST_GCS_CLIENT_OPTIONS, executorServiceSupplier, telemetry);
 
     assertThat(client.storage.getOptions().getCredentials()).isEqualTo(credentials);
+  }
+
+  @Test
+  void createStorage_withProxyConfigured_setsTransportOptions() throws Exception {
+    GcsAuthOptions authOptions =
+        GcsAuthOptions.builder().setProxyAddress("http://proxy.example.com:8080").build();
+    GcsTransportOptionsProvider provider = new GcsTransportOptionsProvider(authOptions);
+
+    GcsClientImpl client =
+        new GcsClientImpl(
+            NoCredentials.getInstance(),
+            TEST_GCS_CLIENT_OPTIONS,
+            executorServiceSupplier,
+            telemetry,
+            provider);
+
+    assertThat(client.storage.getOptions()).isInstanceOf(HttpStorageOptions.class);
+    assertThat(((HttpStorageOptions) client.storage.getOptions()).getTransportOptions())
+        .isNotNull();
+    com.google.cloud.http.HttpTransportOptions transportOpts =
+        (com.google.cloud.http.HttpTransportOptions)
+            ((HttpStorageOptions) client.storage.getOptions()).getTransportOptions();
+    assertThat(transportOpts.getHttpTransportFactory()).isNotNull();
+  }
+
+  @Test
+  void createStorage_withNoProxyConfigured_setsTransportOptions() throws Exception {
+    GcsAuthOptions authOptions = GcsAuthOptions.builder().build();
+    GcsTransportOptionsProvider provider = new GcsTransportOptionsProvider(authOptions);
+
+    GcsClientImpl client =
+        new GcsClientImpl(
+            NoCredentials.getInstance(),
+            TEST_GCS_CLIENT_OPTIONS,
+            executorServiceSupplier,
+            telemetry,
+            provider);
+
+    assertThat(client.storage.getOptions()).isInstanceOf(HttpStorageOptions.class);
+    assertThat(((HttpStorageOptions) client.storage.getOptions()).getTransportOptions())
+        .isNotNull();
+  }
+
+  @Test
+  void createStorage_grpcPathWithProxy_ignoresProxyAndDoesNotThrow() throws Exception {
+    GcsAuthOptions authOptions =
+        GcsAuthOptions.builder().setProxyAddress("http://proxy.example.com:8080").build();
+    GcsReadOptions readOptions = GcsReadOptions.builder().setBidiReadEnabled(true).build();
+    GcsClientOptions grpcClientOptions =
+        GcsClientOptions.builder().setProjectId("a").setGcsReadOptions(readOptions).build();
+    GcsTransportOptionsProvider provider = new GcsTransportOptionsProvider(authOptions);
+
+    GcsClientImpl client =
+        new GcsClientImpl(
+            NoCredentials.getInstance(),
+            grpcClientOptions,
+            executorServiceSupplier,
+            telemetry,
+            provider);
+
+    assertThat(client.storage.getOptions()).isInstanceOf(GrpcStorageOptions.class);
+  }
+
+  @Test
+  void createStorage_grpcPathWithProxy_doesNotApplyTransportOptions() throws Exception {
+    GcsAuthOptions authOptions =
+        GcsAuthOptions.builder().setProxyAddress("http://proxy.example.com:8080").build();
+    GcsReadOptions readOptions = GcsReadOptions.builder().setBidiReadEnabled(true).build();
+    GcsClientOptions grpcClientOptions =
+        GcsClientOptions.builder().setProjectId("a").setGcsReadOptions(readOptions).build();
+    GcsTransportOptionsProvider provider = new GcsTransportOptionsProvider(authOptions);
+
+    GcsClientImpl client =
+        new GcsClientImpl(
+            NoCredentials.getInstance(),
+            grpcClientOptions,
+            executorServiceSupplier,
+            telemetry,
+            provider);
+
+    assertThat(client.storage.getOptions()).isInstanceOf(GrpcStorageOptions.class);
   }
 
   @Test
@@ -868,6 +951,16 @@ class GcsClientImplTest {
 
     assertThat(getBlobWriteSessionConfig(client.storage.getOptions()))
         .isInstanceOf(BufferToDiskThenUpload.class);
+  }
+
+  @Test
+  void createStorage_withUniverseDomain_setsUniverseDomainOnStorageOptions() {
+    GcsClientOptions clientOptions =
+        GcsClientOptions.builder().setUniverseDomain("custom-universe.goog").build();
+
+    GcsClientImpl client = createClientWithClientOptions(clientOptions);
+
+    assertThat(client.storage.getOptions().getUniverseDomain()).isEqualTo("custom-universe.goog");
   }
 
   @Test

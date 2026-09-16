@@ -19,7 +19,6 @@ package com.google.cloud.gcs.analyticscore.client.auth;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
-import com.google.api.client.http.HttpTransport;
 import com.google.auth.Credentials;
 import com.google.auth.http.HttpTransportFactory;
 import com.google.auth.oauth2.ComputeEngineCredentials;
@@ -30,14 +29,12 @@ import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.auth.oauth2.UserCredentials;
 import com.google.cloud.NoCredentials;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.util.Optional;
-import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,20 +66,20 @@ public final class GcsCredentialsFactory {
    */
   public static Credentials createCredentials(GcsAuthOptions options) throws IOException {
     checkNotNull(options, "options cannot be null");
-    boolean useSystemDefaultTrustStore = options.getTokenServerUri().isPresent();
-    Supplier<HttpTransport> memoizedTransport =
-        Suppliers.memoize(
-            () -> {
-              try {
-                return GcsHttpTransportFactory.createHttpTransport(
-                    options, useSystemDefaultTrustStore);
-              } catch (IOException e) {
-                throw new UncheckedIOException(e);
-              }
-            });
+    return createCredentials(options, new GcsTransportOptionsProvider(options));
+  }
+
+  /**
+   * Creates a {@link Credentials} instance according to the specified {@link GcsAuthOptions}, using
+   * the provided transport provider for token fetching.
+   */
+  public static Credentials createCredentials(
+      GcsAuthOptions options, GcsTransportOptionsProvider transportProvider) throws IOException {
+    checkNotNull(options, "options cannot be null");
+    checkNotNull(transportProvider, "transportProvider cannot be null");
 
     try {
-      return createCredentials(options, memoizedTransport::get);
+      return createCredentials(options, transportProvider.getAuthTransportFactory());
     } catch (UncheckedIOException e) {
       throw e.getCause();
     }
