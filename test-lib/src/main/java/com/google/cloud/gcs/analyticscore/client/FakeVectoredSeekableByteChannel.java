@@ -75,6 +75,19 @@ public final class FakeVectoredSeekableByteChannel implements VectoredSeekableBy
     return slice;
   }
 
+  /** Completes every requested range whose future is still pending. */
+  public void completeDeferredRanges() {
+    for (GcsObjectRange range : ImmutableList.copyOf(requestedRanges)) {
+      if (range.getByteBufferFuture().isDone()) {
+        continue;
+      }
+      ByteBuffer target = ByteBuffer.allocate(range.getLength());
+      target.put(sliceContent(range.getOffset(), range.getLength()));
+      target.flip();
+      range.getByteBufferFuture().complete(target);
+    }
+  }
+
   @Override
   public void readVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
       throws IOException {

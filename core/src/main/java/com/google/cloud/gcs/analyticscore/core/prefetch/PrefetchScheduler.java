@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import javax.annotation.Nullable;
 
 /**
  * Issues speculative reads for whole blocks and publishes the results into a {@link
@@ -58,8 +59,7 @@ final class PrefetchScheduler implements AutoCloseable {
   private final PrefetchBufferCache bufferCache;
   private final Telemetry telemetry;
   private final int maxConcurrentBlocks;
-  private final Map<Long, CompletableFuture<ByteBuffer>> inFlightByOffset =
-      new ConcurrentHashMap<>();
+  private final Map<Long, InFlightBlock> inFlightByOffset = new ConcurrentHashMap<>();
 
   PrefetchScheduler(PrefetchBufferCache bufferCache, Telemetry telemetry, int maxConcurrentBlocks) {
     this.bufferCache = checkNotNull(bufferCache, "bufferCache cannot be null");
@@ -111,8 +111,8 @@ final class PrefetchScheduler implements AutoCloseable {
 
   /** Cancels every outstanding speculative request. */
   void cancelAll() {
-    for (CompletableFuture<ByteBuffer> pending : inFlightByOffset.values()) {
-      pending.cancel(/* mayInterruptIfRunning= */ false);
+    for (InFlightBlock pending : inFlightByOffset.values()) {
+      pending.request.cancel(/* mayInterruptIfRunning= */ false);
     }
     inFlightByOffset.clear();
   }
@@ -127,6 +127,19 @@ final class PrefetchScheduler implements AutoCloseable {
     return ImmutableList.copyOf(inFlightByOffset.keySet());
   }
 
+  /**
+   * Returns a stage that settles once the block at {@code blockOffset} has been published into the
+   * cache, or {@code null} when no request for it is outstanding.
+   *
+   * <p>The returned stage is not the request itself: waiting on the request would race the handler
+   * that stores the bytes, so a caller could wake up to find the block still absent.
+   */
+  @Nullable
+  CompletableFuture<ByteBuffer> getPublishedFuture(long blockOffset) {
+    InFlightBlock pending = inFlightByOffset.get(blockOffset);
+    return pending == null ? null : pending.published;
+  }
+
   private int blockLength(long blockOffset, long fileSize) {
     return (int) Math.min(bufferCache.getBlockSizeBytes(), fileSize - blockOffset);
   }
@@ -139,14 +152,14 @@ final class PrefetchScheduler implements AutoCloseable {
   }
 
   private GcsObjectRange createRange(GcsItemId itemId, long blockOffset, int blockLength) {
-    CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
-    inFlightByOffset.put(blockOffset, future);
-    CompletableFuture<ByteBuffer> unusedPublishStage =
-        future.whenComplete((data, error) -> publish(itemId, blockOffset, data, error));
+    CompletableFuture<ByteBuffer> request = new CompletableFuture<>();
+    CompletableFuture<ByteBuffer> published =
+        request.whenComplete((data, error) -> publish(itemId, blockOffset, data, error));
+    inFlightByOffset.put(blockOffset, new InFlightBlock(request, published));
     return GcsObjectRange.builder()
         .setOffset(blockOffset)
         .setLength(blockLength)
-        .setByteBufferFuture(future)
+        .setByteBufferFuture(request)
         .build();
   }
 
@@ -165,5 +178,16 @@ final class PrefetchScheduler implements AutoCloseable {
   private void abandon(GcsItemId itemId, long blockOffset) {
     inFlightByOffset.remove(blockOffset);
     bufferCache.releaseClaim(itemId, blockOffset);
+  }
+
+  /** A speculative request together with the stage that settles once its bytes are cached. */
+  private static final class InFlightBlock {
+    private final CompletableFuture<ByteBuffer> request;
+    private final CompletableFuture<ByteBuffer> published;
+
+    InFlightBlock(CompletableFuture<ByteBuffer> request, CompletableFuture<ByteBuffer> published) {
+      this.request = request;
+      this.published = published;
+    }
   }
 }

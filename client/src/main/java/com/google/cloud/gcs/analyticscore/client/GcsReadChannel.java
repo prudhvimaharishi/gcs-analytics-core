@@ -203,6 +203,12 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   }
 
   @Override
+  public void advanceAfterExternalRead(long newPosition) throws IOException {
+    position(newPosition);
+    strategy.recordExternalReadAdvance(newPosition);
+  }
+
+  @Override
   public long size() throws IOException {
     if (itemInfo != null || extractMetadataAfterRead(this.strategy)) {
       return itemInfo.getSize();

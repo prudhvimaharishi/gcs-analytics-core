@@ -42,6 +42,11 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
 
@@ -53,14 +58,14 @@ import javax.annotation.Nullable;
  * Serving a read is therefore pure arithmetic and works even when the footer cannot be parsed; the
  * Parquet layout is consulted only to decide what to fetch next.
  *
- * <p>Learning is batched rather than per read. Each read records the block it landed in, and when
- * the engine crosses into a new row group those blocks are resolved against the previous row
- * group's column chunks in a single pass. This keeps column identity, which is what transfers to
- * the next row group and to later files with the same schema, off the hot path.
+ * <p>Learning uses the exact byte range of each request rather than the block it happens to land
+ * in, because a block is large enough to hold columns the query never asked for and fetching those
+ * again in every following row group costs more than it saves.
  *
- * <p>A vectored request is learned from directly instead, because it already names every column the
- * engine wants from a row group. Only the following row group is then speculated: the current one
- * is on its way to the caller, so fetching it again would duplicate bytes already in flight.
+ * <p>Speculation stays strictly ahead of the reader: the block under the cursor is already being
+ * streamed by the channel, so refetching it would duplicate bytes already on the wire. When a
+ * wanted block turns out to be mid-flight the read waits for it instead of issuing its own copy of
+ * the same request.
  *
  * <p>Instances are bound to a single stream and are not thread-safe.
  */
@@ -70,6 +75,13 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private static final int FOOTER_READ_BYTES = 1024 * 1024;
   private static final int MAX_CONCURRENT_PREFETCH_BLOCKS = 32;
 
+  /**
+   * How long a read waits for a block that is already being fetched before giving up and reading
+   * the bytes itself. Bounded so that a prefetch stuck behind a saturated thread pool delays a read
+   * rather than stalling it.
+   */
+  private static final long IN_FLIGHT_WAIT_TIMEOUT_MILLIS = 5_000;
+
   private final GcsPrefetchOptions prefetchOptions;
   private final Telemetry telemetry;
 
@@ -78,13 +90,16 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private PrefetchBufferCache bufferCache;
   private SchemaAccessHistory accessHistory;
   private PrefetchScheduler scheduler;
+  @Nullable private VectoredSeekableByteChannel sourceChannel;
 
   private long fileSize = -1;
   private boolean layoutLoadAttempted;
+  private boolean firstRowGroupPrefetched;
   @Nullable private ParquetFileLayout layout;
   private long[] rowGroupStartOffsets = new long[0];
   private long[] rowGroupEndOffsets = new long[0];
   private int currentRowGroupOrdinal = -1;
+  private int pendingSpeculationRowGroupOrdinal = -1;
   private final Set<Long> accessedBlockOffsets = new HashSet<>();
 
   public PredictivePrefetchOptimizer(GcsPrefetchOptions prefetchOptions, Telemetry telemetry) {
@@ -119,14 +134,16 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   @Override
   public int read(long position, ByteBuffer dst, VectoredSeekableByteChannel source)
       throws IOException {
+    this.sourceChannel = source;
     if (fileSize < 0) {
       fileSize = source.size();
     }
+    int requestedLength = dst.remaining();
     int servedBytes = serveFromCache(position, dst);
 
     ensureLayoutLoaded(source);
     if (layout != null) {
-      observeAccess(source, position);
+      observeAccess(source, position, requestedLength);
     }
     return servedBytes;
   }
@@ -149,6 +166,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       IntFunction<ByteBuffer> allocate,
       VectoredSeekableByteChannel source)
       throws IOException {
+    this.sourceChannel = source;
     if (fileSize < 0) {
       fileSize = source.size();
     }
@@ -156,9 +174,30 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
     ensureLayoutLoaded(source);
     if (layout != null) {
-      observeVectoredAccess(source, ranges);
+      recordVectoredAccess(ranges);
     }
     return unservedRanges;
+  }
+
+  /**
+   * Fetches what the recorded ranges imply about the row group that follows them.
+   *
+   * <p>A vectored request already spans every column the engine needs from the row groups it
+   * touches, so unlike the streaming path there is nothing left worth speculating in those row
+   * groups; fetching them again would duplicate bytes already in flight.
+   */
+  @Override
+  public void afterReadVectored(List<GcsObjectRange> ranges, VectoredSeekableByteChannel source) {
+    if (layout == null) {
+      return;
+    }
+    if (pendingSpeculationRowGroupOrdinal < 0) {
+      prefetchFirstRowGroupOnce(source);
+      return;
+    }
+    firstRowGroupPrefetched = true;
+    speculateRowGroup(source, pendingSpeculationRowGroupOrdinal);
+    pendingSpeculationRowGroupOrdinal = -1;
   }
 
   @Override
@@ -170,6 +209,9 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   private int serveFromCache(long position, ByteBuffer dst) {
     int servedBytes = copyFromCache(position, dst);
+    if (servedBytes == 0) {
+      servedBytes = awaitInFlightBlockAndCopy(position, dst);
+    }
     if (servedBytes == 0) {
       telemetry.recordMetric(Metric.PREFETCH_CACHE_MISS, 1L, Collections.emptyMap());
       return 0;
@@ -195,8 +237,54 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     return servedBytes;
   }
 
+  /**
+   * Waits for the block holding {@code position} when a speculative request for it is already
+   * outstanding, then serves the read from it.
+   *
+   * <p>Waiting beats reading the same bytes again: the request is typically most of the way done,
+   * and a second one would compete with it for the same connection pool.
+   */
+  private int awaitInFlightBlockAndCopy(long position, ByteBuffer dst) {
+    CompletableFuture<ByteBuffer> pending = pendingBlockFuture(position);
+    if (pending == null) {
+      return 0;
+    }
+    try {
+      ByteBuffer unused = pending.get(IN_FLIGHT_WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return 0;
+    } catch (ExecutionException | TimeoutException | CancellationException e) {
+      return 0;
+    }
+    return copyFromCache(position, dst);
+  }
+
+  @Nullable
+  private CompletableFuture<ByteBuffer> pendingBlockFuture(long position) {
+    if (scheduler == null) {
+      return null;
+    }
+    return scheduler.getPublishedFuture(bufferCache.alignDown(position));
+  }
+
+  /**
+   * Takes ownership of {@code range} when its bytes are cached or already being fetched, and
+   * returns whether the caller can stop treating it as outstanding.
+   */
   private boolean tryCompleteFromCache(GcsObjectRange range, IntFunction<ByteBuffer> allocate) {
-    if (bufferCache == null || !bufferCache.isCached(itemId, range.getOffset())) {
+    if (bufferCache == null) {
+      return false;
+    }
+    if (completeFromCache(range, allocate)) {
+      return true;
+    }
+    return completeWhenInFlightBlocksArrive(range, allocate);
+  }
+
+  /** Completes {@code range} from resident blocks, or returns false if any of them is absent. */
+  private boolean completeFromCache(GcsObjectRange range, IntFunction<ByteBuffer> allocate) {
+    if (!isFullyCached(range)) {
       return false;
     }
     ByteBuffer target = allocate.apply(range.getLength());
@@ -214,40 +302,98 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     return true;
   }
 
+  private boolean isFullyCached(GcsObjectRange range) {
+    long endOffset = range.getOffset() + range.getLength();
+    for (long blockOffset = bufferCache.alignDown(range.getOffset());
+        blockOffset < endOffset;
+        blockOffset += bufferCache.getBlockSizeBytes()) {
+      if (!bufferCache.isCached(itemId, blockOffset)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /**
-   * Notes the block this read landed in and, the first time a block is touched, resolves it to the
-   * columns that occupy it and speculates ahead.
-   *
-   * <p>Resolving once per block rather than once per read is what removes the need for an
-   * offset-to-chunk index: a row group spans few blocks, so a direct pass over its chunks is
-   * cheaper than maintaining a sorted index of every chunk in the file.
+   * Arranges for {@code range} to be completed once the speculative requests covering it settle,
+   * and returns whether every missing block was indeed already being fetched.
    */
-  private void observeAccess(VectoredSeekableByteChannel source, long position) {
-    int rowGroupOrdinal = findRowGroupOrdinal(position);
-    if (rowGroupOrdinal < 0) {
+  private boolean completeWhenInFlightBlocksArrive(
+      GcsObjectRange range, IntFunction<ByteBuffer> allocate) {
+    List<CompletableFuture<ByteBuffer>> pendingBlocks = new ArrayList<>();
+    long endOffset = range.getOffset() + range.getLength();
+    for (long blockOffset = bufferCache.alignDown(range.getOffset());
+        blockOffset < endOffset;
+        blockOffset += bufferCache.getBlockSizeBytes()) {
+      if (bufferCache.isCached(itemId, blockOffset)) {
+        continue;
+      }
+      CompletableFuture<ByteBuffer> pending = pendingBlockFuture(blockOffset);
+      if (pending == null) {
+        return false;
+      }
+      pendingBlocks.add(pending);
+    }
+    if (pendingBlocks.isEmpty()) {
+      return false;
+    }
+    CompletableFuture<Void> unused =
+        CompletableFuture.allOf(pendingBlocks.toArray(new CompletableFuture<?>[0]))
+            .whenComplete((ignored, error) -> completeAfterPrefetch(range, allocate));
+    return true;
+  }
+
+  /** Serves {@code range} from the blocks that just arrived, falling back to a read of its own. */
+  private void completeAfterPrefetch(GcsObjectRange range, IntFunction<ByteBuffer> allocate) {
+    if (completeFromCache(range, allocate)) {
       return;
     }
+    VectoredSeekableByteChannel source = sourceChannel;
+    if (source == null) {
+      range
+          .getByteBufferFuture()
+          .completeExceptionally(
+              new IOException(
+                  String.format("No channel available to read range %s of %s", range, itemId)));
+      return;
+    }
+    try {
+      source.readVectored(ImmutableList.of(range), allocate);
+    } catch (IOException | RuntimeException e) {
+      range.getByteBufferFuture().completeExceptionally(e);
+    }
+  }
+
+  /**
+   * Records the columns this read touched and, the first time a block is entered, speculates ahead
+   * of it.
+   *
+   * <p>Recording uses the requested range so that a column sharing a block with columns the query
+   * ignores does not drag them along, while speculation stays keyed to blocks because that is the
+   * unit the cache stores.
+   */
+  private void observeAccess(
+      VectoredSeekableByteChannel source, long position, int requestedLength) {
+    int rowGroupOrdinal = findRowGroupOrdinal(position);
+    if (rowGroupOrdinal < 0) {
+      prefetchFirstRowGroupOnce(source);
+      return;
+    }
+    firstRowGroupPrefetched = true;
     if (rowGroupOrdinal != currentRowGroupOrdinal) {
       currentRowGroupOrdinal = rowGroupOrdinal;
       accessedBlockOffsets.clear();
     }
+    recordColumnsInRange(rowGroupOrdinal, position, position + requestedLength);
     long currentBlockOffset = bufferCache.alignDown(position);
     if (!accessedBlockOffsets.add(currentBlockOffset)) {
       return;
     }
-    recordColumnsInBlock(rowGroupOrdinal, currentBlockOffset);
     speculateRowGroups(source, rowGroupOrdinal, currentBlockOffset);
   }
 
-  /**
-   * Records the columns covered by {@code ranges} and speculates the row group that follows them.
-   *
-   * <p>A vectored request already spans every column the engine needs from the row groups it
-   * touches, so unlike the streaming path there is nothing left worth speculating in those row
-   * groups; fetching them again would duplicate bytes already in flight.
-   */
-  private void observeVectoredAccess(
-      VectoredSeekableByteChannel source, List<GcsObjectRange> ranges) {
+  /** Records the columns covered by {@code ranges} and notes the row group to speculate next. */
+  private void recordVectoredAccess(List<GcsObjectRange> ranges) {
     int lastRowGroupOrdinal = -1;
     for (GcsObjectRange range : ranges) {
       int rowGroupOrdinal = findRowGroupOrdinal(range.getOffset());
@@ -261,13 +407,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     if (lastRowGroupOrdinal < 0) {
       return;
     }
-    speculateRowGroup(source, lastRowGroupOrdinal + 1);
-  }
-
-  /** Records every column of {@code rowGroupOrdinal} whose bytes fall in the given block. */
-  private void recordColumnsInBlock(int rowGroupOrdinal, long blockOffset) {
-    recordColumnsInRange(
-        rowGroupOrdinal, blockOffset, blockOffset + bufferCache.getBlockSizeBytes());
+    pendingSpeculationRowGroupOrdinal = lastRowGroupOrdinal + 1;
   }
 
   /** Records every column of {@code rowGroupOrdinal} whose bytes fall in the given byte range. */
@@ -298,21 +438,38 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   }
 
   /**
+   * Fetches the columns already known for this schema in the first row group, once per stream.
+   *
+   * <p>Doing this as soon as the layout is known matters for files that are opened by reading their
+   * footer: that read lands outside every row group, so without it nothing would be fetched until
+   * the engine asks for column data it then has to wait for.
+   */
+  private void prefetchFirstRowGroupOnce(VectoredSeekableByteChannel source) {
+    if (firstRowGroupPrefetched) {
+      return;
+    }
+    firstRowGroupPrefetched = true;
+    speculateRowGroup(source, 0);
+  }
+
+  /**
    * Fetches the columns already known for this schema in the current row group and the next one.
    *
    * <p>Restricting lookahead to a single row group bounds resident memory, which matters because a
    * file can hold dozens of row groups and a query may stop after the first.
    *
-   * <p>Candidates before {@code currentBlockOffset} are dropped: a column chunk can span many
-   * blocks, and the reader has already moved past the ones behind it.
+   * <p>Candidates up to and including {@code currentBlockOffset} are dropped: the reader has moved
+   * past the blocks behind it, and the channel is already streaming the one it is sitting in.
    */
   private void speculateRowGroups(
       VectoredSeekableByteChannel source, int rowGroupOrdinal, long currentBlockOffset) {
     SortedSet<Long> blockOffsets = collectLearnedBlocks(rowGroupOrdinal, rowGroupOrdinal + 1);
-    if (blockOffsets.isEmpty()) {
+    SortedSet<Long> blocksAhead =
+        blockOffsets.tailSet(currentBlockOffset + bufferCache.getBlockSizeBytes());
+    if (blocksAhead.isEmpty()) {
       return;
     }
-    scheduler.schedule(source, itemId, blockOffsets.tailSet(currentBlockOffset), fileSize);
+    scheduler.schedule(source, itemId, blocksAhead, fileSize);
   }
 
   /** Fetches the columns already known for this schema in a single row group. */

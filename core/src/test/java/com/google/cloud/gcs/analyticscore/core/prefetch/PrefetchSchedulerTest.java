@@ -27,6 +27,7 @@ import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -201,6 +202,31 @@ class PrefetchSchedulerTest {
     schedule(BLOCK_OFFSET);
 
     assertThat(scheduler.getInFlightOffsets()).containsExactly(BLOCK_OFFSET);
+  }
+
+  @Test
+  void getPublishedFuture_requestNotSettled_returnsAPendingStage() {
+    channel.deferVectoredCompletion();
+    schedule(BLOCK_OFFSET);
+
+    assertThat(scheduler.getPublishedFuture(BLOCK_OFFSET).isDone()).isFalse();
+  }
+
+  @Test
+  void getPublishedFuture_settledRequest_hasAlreadyCachedTheBlock() {
+    channel.deferVectoredCompletion();
+    schedule(BLOCK_OFFSET);
+    CompletableFuture<ByteBuffer> published = scheduler.getPublishedFuture(BLOCK_OFFSET);
+
+    channel.completeDeferredRanges();
+
+    assertThat(published.thenApply(data -> bufferCache.isCached(ITEM_ID, BLOCK_OFFSET)).join())
+        .isTrue();
+  }
+
+  @Test
+  void getPublishedFuture_blockNotRequested_returnsNull() {
+    assertThat(scheduler.getPublishedFuture(BLOCK_OFFSET)).isNull();
   }
 
   @Test

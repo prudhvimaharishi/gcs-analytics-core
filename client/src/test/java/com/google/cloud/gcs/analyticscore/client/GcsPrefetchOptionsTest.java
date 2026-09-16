@@ -150,7 +150,7 @@ class GcsPrefetchOptionsTest {
   void build_defaultValues_returnsDefaultBufferCacheTtlSeconds() {
     GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
 
-    assertThat(options.getBufferCacheTtlSeconds()).isEqualTo(5);
+    assertThat(options.getBufferCacheTtlSeconds()).isEqualTo(60);
   }
 
   @Test

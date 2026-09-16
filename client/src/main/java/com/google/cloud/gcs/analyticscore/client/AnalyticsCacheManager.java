@@ -79,7 +79,8 @@ public class AnalyticsCacheManager {
             prefetchOptions.getBufferCacheMaxSizeBytes(),
             prefetchOptions.getBufferCacheTtlSeconds(),
             prefetchOptions.getBlockSizeBytes());
-    this.schemaAccessHistory = new SchemaAccessHistory(prefetchOptions.getHistoryMaxColumns());
+    this.schemaAccessHistory =
+        SchemaAccessHistory.getSharedInstance(prefetchOptions.getHistoryMaxColumns());
   }
 
   /** Returns the cache holding speculatively prefetched byte blocks. */
@@ -87,7 +88,12 @@ public class AnalyticsCacheManager {
     return prefetchBufferCache;
   }
 
-  /** Returns the column access history shared across objects with the same schema. */
+  /**
+   * Returns the column access history shared across objects with the same schema.
+   *
+   * <p>The history is shared by every cache manager in the process, so learning outlives the file
+   * system instance that observed it.
+   */
   public SchemaAccessHistory getSchemaAccessHistory() {
     return schemaAccessHistory;
   }

@@ -131,6 +131,13 @@ class SmartReadChannelTest {
             })
         .when(mockDelegate)
         .position(anyLong());
+    doAnswer(
+            inv -> {
+              delegatePosition[0] = inv.getArgument(0);
+              return null;
+            })
+        .when(mockDelegate)
+        .advanceAfterExternalRead(anyLong());
 
     when(mockOptimizer.read(eq(0L), any(ByteBuffer.class), eq(mockDelegate)))
         .thenReturn(bytesToRead);
@@ -225,19 +232,39 @@ class SmartReadChannelTest {
   }
 
   @Test
-  void readVectored_delegatesToDelegate() throws IOException {
+  void readVectored_withoutOptimizers_delegatesToDelegate() throws IOException {
     SmartReadChannel smartChannel =
         SmartReadChannel.builder()
             .setDelegate(mockDelegate)
             .setItemId(ITEM_ID)
             .setCacheManager(mockCacheManager)
             .build();
-    List<GcsObjectRange> ranges = ImmutableList.of();
+    List<GcsObjectRange> ranges =
+        ImmutableList.of(
+            GcsObjectRange.builder()
+                .setOffset(0)
+                .setLength(10)
+                .setByteBufferFuture(new CompletableFuture<>())
+                .build());
     IntFunction<ByteBuffer> allocate = (i) -> ByteBuffer.allocate(i);
 
     smartChannel.readVectored(ranges, allocate);
 
     verify(mockDelegate).readVectored(ranges, allocate);
+  }
+
+  @Test
+  void readVectored_noRanges_doesNotCallDelegate() throws IOException {
+    SmartReadChannel smartChannel =
+        SmartReadChannel.builder()
+            .setDelegate(mockDelegate)
+            .setItemId(ITEM_ID)
+            .setCacheManager(mockCacheManager)
+            .build();
+
+    smartChannel.readVectored(ImmutableList.of(), ByteBuffer::allocate);
+
+    verify(mockDelegate, never()).readVectored(any(), any());
   }
 
   @Test

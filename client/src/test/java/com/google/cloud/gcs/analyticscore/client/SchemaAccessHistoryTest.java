@@ -37,6 +37,29 @@ class SchemaAccessHistoryTest {
   }
 
   @Test
+  void getSharedInstance_sameCapacity_returnsTheSameInstance() {
+    SchemaAccessHistory history = SchemaAccessHistory.getSharedInstance(MAX_COLUMNS);
+
+    SchemaAccessHistory sameHistory = SchemaAccessHistory.getSharedInstance(MAX_COLUMNS);
+
+    assertThat(sameHistory).isSameInstanceAs(history);
+  }
+
+  @Test
+  void getSharedInstance_differentCapacity_returnsADifferentInstance() {
+    SchemaAccessHistory history = SchemaAccessHistory.getSharedInstance(MAX_COLUMNS);
+
+    SchemaAccessHistory otherHistory = SchemaAccessHistory.getSharedInstance(MAX_COLUMNS + 1);
+
+    assertThat(otherHistory).isNotSameInstanceAs(history);
+  }
+
+  @Test
+  void getSharedInstance_nonPositiveCapacity_throwsException() {
+    assertThrows(IllegalArgumentException.class, () -> SchemaAccessHistory.getSharedInstance(0));
+  }
+
+  @Test
   void recordDataAccess_singleColumn_isReturned() {
     SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
 

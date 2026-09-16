@@ -48,7 +48,7 @@ public abstract class GcsPrefetchOptions {
 
   private static final PrefetchMode DEFAULT_PREFETCH_MODE = PrefetchMode.DISABLED;
   private static final long DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES = 2L * 1024 * 1024 * 1024; // 2 GB
-  private static final long DEFAULT_BUFFER_CACHE_TTL_SECONDS = 5;
+  private static final long DEFAULT_BUFFER_CACHE_TTL_SECONDS = 60;
   private static final int DEFAULT_BLOCK_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB
   private static final int DEFAULT_HISTORY_MAX_COLUMNS = 15;
 
@@ -62,8 +62,8 @@ public abstract class GcsPrefetchOptions {
   public abstract long getBufferCacheMaxSizeBytes();
 
   /**
-   * Returns how long (in seconds) an unread prefetched block is retained in the buffer cache.
-   * Defaults to {@code 5} seconds.
+   * Returns how long (in seconds) a prefetched block is retained in the buffer cache after it was
+   * last read or written. Defaults to {@code 60} seconds.
    */
   public abstract long getBufferCacheTtlSeconds();
 
@@ -171,8 +171,8 @@ public abstract class GcsPrefetchOptions {
     public abstract Builder setBufferCacheMaxSizeBytes(long bufferCacheMaxSizeBytes);
 
     /**
-     * Sets how long (in seconds) an unread prefetched block is retained in the buffer cache.
-     * Defaults to {@code 5} seconds.
+     * Sets how long (in seconds) a prefetched block is retained in the buffer cache after it was
+     * last read or written. Defaults to {@code 60} seconds.
      */
     public abstract Builder setBufferCacheTtlSeconds(long bufferCacheTtlSeconds);
 

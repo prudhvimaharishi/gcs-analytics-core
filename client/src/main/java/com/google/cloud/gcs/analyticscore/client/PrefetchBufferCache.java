@@ -35,8 +35,10 @@ import java.util.concurrent.TimeUnit;
  * need to know where a block begins, and bytes fetched for one purpose are reusable by any later
  * read that lands in the same block.
  *
- * <p>Entries are bounded by total bytes and expire shortly after being written, because a block
- * that the engine has not consumed quickly is unlikely to be wanted at all.
+ * <p>Entries are bounded by total bytes and expire once they have been idle for the configured
+ * time, because a block nobody comes back to is unlikely to be wanted at all. Retention is counted
+ * from the last read rather than from the download, so a block stays resident while the engine is
+ * still working through it however long that takes.
  *
  * <p>This class is thread-safe.
  */
@@ -50,7 +52,7 @@ public final class PrefetchBufferCache {
    * Creates a cache.
    *
    * @param maxSizeBytes the maximum total size of retained blocks
-   * @param ttlSeconds how long an unread block is retained
+   * @param ttlSeconds how long a block is retained after it was last read or written
    * @param blockSizeBytes the fixed size of a block
    */
   public PrefetchBufferCache(long maxSizeBytes, long ttlSeconds, int blockSizeBytes) {
@@ -62,7 +64,7 @@ public final class PrefetchBufferCache {
         Caffeine.newBuilder()
             .maximumWeight(maxSizeBytes)
             .weigher((BlockKey key, ByteBuffer value) -> value.remaining())
-            .expireAfterWrite(ttlSeconds, TimeUnit.SECONDS)
+            .expireAfterAccess(ttlSeconds, TimeUnit.SECONDS)
             .build();
   }
 

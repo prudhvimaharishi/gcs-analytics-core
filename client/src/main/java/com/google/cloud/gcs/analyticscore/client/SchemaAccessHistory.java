@@ -24,6 +24,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.collect.ImmutableSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * Records which columns an engine actually reads, keyed by a schema fingerprint.
@@ -42,6 +43,9 @@ public final class SchemaAccessHistory {
 
   private static final int MAX_TRACKED_SCHEMAS = 1024;
 
+  private static final ConcurrentMap<Integer, SchemaAccessHistory> SHARED_INSTANCES =
+      new ConcurrentHashMap<>();
+
   private final int maxColumnsPerSchema;
   private final Cache<Integer, TrackedColumns> historyBySchema;
 
@@ -54,6 +58,21 @@ public final class SchemaAccessHistory {
     checkArgument(maxColumnsPerSchema > 0, "maxColumnsPerSchema must be positive");
     this.maxColumnsPerSchema = maxColumnsPerSchema;
     this.historyBySchema = Caffeine.newBuilder().maximumSize(MAX_TRACKED_SCHEMAS).build();
+  }
+
+  /**
+   * Returns the history shared by the whole process for the given capacity.
+   *
+   * <p>Query engines hand every task its own file system instance, so a history owned by that
+   * instance is discarded as soon as the task ends and each task relearns the same columns from
+   * scratch. Sharing one history per process instead lets the first task of a scan teach every task
+   * that follows, which is what makes files after the first one prefetchable.
+   *
+   * @param maxColumnsPerSchema the maximum number of columns tracked for a single schema
+   */
+  public static SchemaAccessHistory getSharedInstance(int maxColumnsPerSchema) {
+    checkArgument(maxColumnsPerSchema > 0, "maxColumnsPerSchema must be positive");
+    return SHARED_INSTANCES.computeIfAbsent(maxColumnsPerSchema, SchemaAccessHistory::new);
   }
 
   /** Returns the columns previously read into their data pages for the given schema. */
