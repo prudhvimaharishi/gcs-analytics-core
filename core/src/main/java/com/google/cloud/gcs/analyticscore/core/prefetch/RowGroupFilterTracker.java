@@ -1,0 +1,174 @@
+/*
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.cloud.gcs.analyticscore.core.prefetch;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
+
+/**
+ * Tracks row-group filter outcomes within a single Parquet stream to predict which upcoming row
+ * group will actually be read by the query engine.
+ *
+ * <p>Prediction relies on two deterministic signals observable within the current file:
+ *
+ * <ol>
+ *   <li><b>Upfront Dictionary Sweep</b>: Engines such as Apache Iceberg evaluate footer min/max
+ *       statistics across all row groups at file open and immediately read the dictionary pages of
+ *       surviving candidate row groups. Any row group ordinal skipped during this sweep failed the
+ *       min/max check and will never be read.
+ *   <li><b>Rejected Min/Max Range Containment</b>: Whenever the engine skips data pages for a row
+ *       group, that row group's filter-column {@code [min, max]} range is recorded as rejected. Any
+ *       subsequent row group whose filter-column {@code [min, max]} falls completely within a
+ *       rejected range is guaranteed to be filtered out as well.
+ * </ol>
+ */
+final class RowGroupFilterTracker {
+
+  private final SortedSet<Integer> dictionaryTouchedOrdinals = new TreeSet<>();
+  private final SortedSet<Integer> dataTouchedOrdinals = new TreeSet<>();
+  private final Set<Integer> processedSkippedOrdinals = new HashSet<>();
+  private final Set<String> filterColumnPaths = new HashSet<>();
+  private final Map<String, List<ParquetColumnStatistics>> rejectedRangesByColumn = new HashMap<>();
+
+  /** Records that a dictionary page in {@code rowGroupOrdinal} was read for {@code columnPath}. */
+  void recordDictionaryRead(int rowGroupOrdinal, String columnPath) {
+    checkNotNull(columnPath, "columnPath cannot be null");
+    dictionaryTouchedOrdinals.add(rowGroupOrdinal);
+    filterColumnPaths.add(columnPath);
+  }
+
+  /**
+   * Records that data pages in {@code rowGroupOrdinal} were read, marking any earlier untouched row
+   * groups as skipped and capturing their filter-column statistics as rejected.
+   */
+  void recordDataRead(
+      ParquetFileLayout layout, int rowGroupOrdinal, Set<String> knownDictionaryColumns) {
+    checkNotNull(layout, "layout cannot be null");
+    checkNotNull(knownDictionaryColumns, "knownDictionaryColumns cannot be null");
+    dataTouchedOrdinals.add(rowGroupOrdinal);
+    markSkippedRowGroupsBefore(layout, rowGroupOrdinal, knownDictionaryColumns);
+  }
+
+  /**
+   * Returns the next row group ordinal strictly after {@code afterOrdinal} that has not been
+   * eliminated by upfront footer pruning or rejected min/max statistics, or empty if no remaining
+   * row group survives.
+   */
+  OptionalInt findNextSurvivingRowGroup(
+      ParquetFileLayout layout, int afterOrdinal, Set<String> knownDictionaryColumns) {
+    checkNotNull(layout, "layout cannot be null");
+    checkNotNull(knownDictionaryColumns, "knownDictionaryColumns cannot be null");
+
+    int rowGroupCount = layout.getRowGroups().size();
+    int maxDictOrdinal =
+        dictionaryTouchedOrdinals.isEmpty() ? -1 : dictionaryTouchedOrdinals.last();
+
+    for (int candidate = afterOrdinal + 1; candidate < rowGroupCount; candidate++) {
+      if (isSkippedByUpfrontDictionarySweep(candidate, afterOrdinal, maxDictOrdinal)) {
+        continue;
+      }
+      if (isRejectedByStatistics(layout, candidate)) {
+        continue;
+      }
+      return OptionalInt.of(candidate);
+    }
+    return OptionalInt.empty();
+  }
+
+  private boolean isSkippedByUpfrontDictionarySweep(
+      int candidate, int afterOrdinal, int maxDictOrdinal) {
+    return maxDictOrdinal > afterOrdinal
+        && candidate <= maxDictOrdinal
+        && !dictionaryTouchedOrdinals.contains(candidate);
+  }
+
+  private boolean isRejectedByStatistics(ParquetFileLayout layout, int candidateOrdinal) {
+    if (rejectedRangesByColumn.isEmpty()) {
+      return false;
+    }
+    Optional<ParquetRowGroup> rowGroup = layout.getRowGroup(candidateOrdinal);
+    if (!rowGroup.isPresent()) {
+      return false;
+    }
+    for (Map.Entry<String, List<ParquetColumnStatistics>> entry :
+        rejectedRangesByColumn.entrySet()) {
+      String columnPath = entry.getKey();
+      List<ParquetColumnStatistics> rejectedRanges = entry.getValue();
+      Optional<ParquetColumnStatistics> candidateStats =
+          rowGroup.get().getColumnChunk(columnPath).flatMap(ParquetColumnChunk::getStatistics);
+      if (candidateStats.isPresent() && isContainedInAny(candidateStats.get(), rejectedRanges)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isContainedInAny(
+      ParquetColumnStatistics candidate, List<ParquetColumnStatistics> rejectedRanges) {
+    for (ParquetColumnStatistics rejected : rejectedRanges) {
+      if (candidate.isContainedIn(rejected)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void markSkippedRowGroupsBefore(
+      ParquetFileLayout layout, int currentDataOrdinal, Set<String> knownDictionaryColumns) {
+    Set<String> activeFilterColumns = new HashSet<>(filterColumnPaths);
+    activeFilterColumns.addAll(knownDictionaryColumns);
+    if (activeFilterColumns.isEmpty()) {
+      return;
+    }
+
+    for (int ordinal = 0; ordinal < currentDataOrdinal; ordinal++) {
+      if (dataTouchedOrdinals.contains(ordinal) || !processedSkippedOrdinals.add(ordinal)) {
+        continue;
+      }
+      recordRejectedStatisticsForRowGroup(layout, ordinal, activeFilterColumns);
+    }
+  }
+
+  private void recordRejectedStatisticsForRowGroup(
+      ParquetFileLayout layout, int skippedOrdinal, Set<String> activeFilterColumns) {
+    Optional<ParquetRowGroup> skippedRowGroup = layout.getRowGroup(skippedOrdinal);
+    if (!skippedRowGroup.isPresent()) {
+      return;
+    }
+    for (String columnPath : activeFilterColumns) {
+      skippedRowGroup
+          .get()
+          .getColumnChunk(columnPath)
+          .flatMap(ParquetColumnChunk::getStatistics)
+          .ifPresent(
+              stats ->
+                  rejectedRangesByColumn
+                      .computeIfAbsent(columnPath, unused -> new ArrayList<>())
+                      .add(stats));
+    }
+  }
+}
