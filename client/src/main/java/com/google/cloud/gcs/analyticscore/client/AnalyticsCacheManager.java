@@ -75,7 +75,7 @@ public class AnalyticsCacheManager {
         AnalyticsCacheCaffeineImpl.createWithTtlOnly(
             BUCKET_PROPERTIES_CACHE_TTL_MINUTES, TimeUnit.MINUTES);
     this.prefetchBufferCache =
-        new PrefetchBufferCache(
+        PrefetchBufferCache.getSharedInstance(
             prefetchOptions.getBufferCacheMaxSizeBytes(),
             prefetchOptions.getBufferCacheTtlSeconds(),
             prefetchOptions.getBlockSizeBytes());
@@ -83,7 +83,12 @@ public class AnalyticsCacheManager {
         SchemaAccessHistory.getSharedInstance(prefetchOptions.getHistoryMaxColumns());
   }
 
-  /** Returns the cache holding speculatively prefetched byte blocks. */
+  /**
+   * Returns the cache holding speculatively prefetched byte blocks.
+   *
+   * <p>The cache is shared by every cache manager in the process configured the same way, so its
+   * size limit bounds the whole process rather than each file system instance.
+   */
   public PrefetchBufferCache getPrefetchBufferCache() {
     return prefetchBufferCache;
   }

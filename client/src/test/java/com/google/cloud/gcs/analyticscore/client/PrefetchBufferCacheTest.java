@@ -20,6 +20,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.ByteBuffer;
+import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
 
 class PrefetchBufferCacheTest {
@@ -61,6 +62,77 @@ class PrefetchBufferCacheTest {
             () -> new PrefetchBufferCache(MAX_SIZE_BYTES, TTL_SECONDS, 0));
 
     assertThat(exception).hasMessageThat().isEqualTo("blockSizeBytes must be positive");
+  }
+
+  @Test
+  void getSharedInstance_sameConfiguration_returnsTheSameCache() {
+    PrefetchBufferCache cache =
+        PrefetchBufferCache.getSharedInstance(MAX_SIZE_BYTES, TTL_SECONDS, BLOCK_SIZE_BYTES);
+
+    PrefetchBufferCache sameCache =
+        PrefetchBufferCache.getSharedInstance(MAX_SIZE_BYTES, TTL_SECONDS, BLOCK_SIZE_BYTES);
+
+    assertThat(sameCache).isSameInstanceAs(cache);
+  }
+
+  @Test
+  void getSharedInstance_differentBlockSize_returnsADifferentCache() {
+    PrefetchBufferCache cache =
+        PrefetchBufferCache.getSharedInstance(MAX_SIZE_BYTES, TTL_SECONDS, BLOCK_SIZE_BYTES);
+
+    PrefetchBufferCache otherCache =
+        PrefetchBufferCache.getSharedInstance(MAX_SIZE_BYTES, TTL_SECONDS, BLOCK_SIZE_BYTES * 2);
+
+    assertThat(otherCache).isNotSameInstanceAs(cache);
+  }
+
+  @Test
+  void getInFlight_noRegisteredFetch_returnsNull() {
+    PrefetchBufferCache cache = newCache();
+
+    assertThat(cache.getInFlight(itemId("object"), FIRST_BLOCK_OFFSET)).isNull();
+  }
+
+  @Test
+  void getInFlight_registeredFetch_returnsTheRegisteredStage() {
+    PrefetchBufferCache cache = newCache();
+    CompletableFuture<ByteBuffer> published = new CompletableFuture<>();
+    cache.registerInFlight(itemId("object"), FIRST_BLOCK_OFFSET, published);
+
+    CompletableFuture<ByteBuffer> found = cache.getInFlight(itemId("object"), FIRST_BLOCK_OFFSET);
+
+    assertThat(found).isSameInstanceAs(published);
+  }
+
+  @Test
+  void getInFlight_positionInSameBlock_returnsTheRegisteredStage() {
+    PrefetchBufferCache cache = newCache();
+    CompletableFuture<ByteBuffer> published = new CompletableFuture<>();
+    cache.registerInFlight(itemId("object"), FIRST_BLOCK_OFFSET, published);
+
+    CompletableFuture<ByteBuffer> found = cache.getInFlight(itemId("object"), 3);
+
+    assertThat(found).isSameInstanceAs(published);
+  }
+
+  @Test
+  void getInFlight_afterReleaseClaim_returnsNull() {
+    PrefetchBufferCache cache = newCache();
+    cache.registerInFlight(itemId("object"), FIRST_BLOCK_OFFSET, new CompletableFuture<>());
+
+    cache.releaseClaim(itemId("object"), FIRST_BLOCK_OFFSET);
+
+    assertThat(cache.getInFlight(itemId("object"), FIRST_BLOCK_OFFSET)).isNull();
+  }
+
+  @Test
+  void getInFlight_afterInvalidateAll_returnsNull() {
+    PrefetchBufferCache cache = newCache();
+    cache.registerInFlight(itemId("object"), FIRST_BLOCK_OFFSET, new CompletableFuture<>());
+
+    cache.invalidateAll();
+
+    assertThat(cache.getInFlight(itemId("object"), FIRST_BLOCK_OFFSET)).isNull();
   }
 
   @Test

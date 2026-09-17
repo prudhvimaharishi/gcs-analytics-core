@@ -205,18 +205,18 @@ class PrefetchSchedulerTest {
   }
 
   @Test
-  void getPublishedFuture_requestNotSettled_returnsAPendingStage() {
+  void schedule_requestNotSettled_publishesAPendingStageToTheCache() {
     channel.deferVectoredCompletion();
     schedule(BLOCK_OFFSET);
 
-    assertThat(scheduler.getPublishedFuture(BLOCK_OFFSET).isDone()).isFalse();
+    assertThat(bufferCache.getInFlight(ITEM_ID, BLOCK_OFFSET).isDone()).isFalse();
   }
 
   @Test
-  void getPublishedFuture_settledRequest_hasAlreadyCachedTheBlock() {
+  void schedule_settledRequest_hasAlreadyCachedTheBlockWhenTheStageSettles() {
     channel.deferVectoredCompletion();
     schedule(BLOCK_OFFSET);
-    CompletableFuture<ByteBuffer> published = scheduler.getPublishedFuture(BLOCK_OFFSET);
+    CompletableFuture<ByteBuffer> published = bufferCache.getInFlight(ITEM_ID, BLOCK_OFFSET);
 
     channel.completeDeferredRanges();
 
@@ -225,8 +225,8 @@ class PrefetchSchedulerTest {
   }
 
   @Test
-  void getPublishedFuture_blockNotRequested_returnsNull() {
-    assertThat(scheduler.getPublishedFuture(BLOCK_OFFSET)).isNull();
+  void getInFlight_blockNotRequested_returnsNull() {
+    assertThat(bufferCache.getInFlight(ITEM_ID, BLOCK_OFFSET)).isNull();
   }
 
   @Test

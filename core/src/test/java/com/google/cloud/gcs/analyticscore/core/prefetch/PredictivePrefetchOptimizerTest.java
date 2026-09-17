@@ -77,8 +77,9 @@ class PredictivePrefetchOptimizerTest {
     telemetry = new Telemetry(ImmutableList.of(metricListener));
     channel = new FakeVectoredSeekableByteChannel(content);
     optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
-    // The access history is shared by the whole process, so a test must start from a clean one.
+    // The history and buffer cache are shared by the whole process, so a test must start clean.
     cacheManager.getSchemaAccessHistory().invalidateAll();
+    cacheManager.getPrefetchBufferCache().invalidateAll();
   }
 
   @AfterEach

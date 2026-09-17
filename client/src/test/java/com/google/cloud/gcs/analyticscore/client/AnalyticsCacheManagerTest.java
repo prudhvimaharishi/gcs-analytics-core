@@ -242,4 +242,13 @@ class AnalyticsCacheManagerTest {
     assertThat(otherManager.getSchemaAccessHistory())
         .isSameInstanceAs(manager.getSchemaAccessHistory());
   }
+
+  @Test
+  void getPrefetchBufferCache_twoManagers_shareTheSameCache() {
+    AnalyticsCacheManager otherManager =
+        new AnalyticsCacheManager(GcsCacheOptions.builder().build());
+
+    assertThat(otherManager.getPrefetchBufferCache())
+        .isSameInstanceAs(manager.getPrefetchBufferCache());
+  }
 }

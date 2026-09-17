@@ -283,12 +283,19 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     return copyFromCache(position, dst);
   }
 
+  /**
+   * Returns the outstanding fetch covering {@code position}, from whichever stream issued it.
+   *
+   * <p>The lookup goes through the buffer cache rather than this stream's scheduler because a block
+   * this stream skipped is typically one another stream claimed, and that is exactly the request
+   * worth waiting for.
+   */
   @Nullable
   private CompletableFuture<ByteBuffer> pendingBlockFuture(long position) {
-    if (scheduler == null) {
+    if (bufferCache == null) {
       return null;
     }
-    return scheduler.getPublishedFuture(bufferCache.alignDown(position));
+    return bufferCache.getInFlight(itemId, bufferCache.alignDown(position));
   }
 
   /**

@@ -24,8 +24,11 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.auto.value.AutoValue;
 import java.nio.ByteBuffer;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
 
 /**
  * Holds speculatively fetched bytes as fixed-size blocks addressed by absolute file position.
@@ -44,8 +47,13 @@ import java.util.concurrent.TimeUnit;
  */
 public final class PrefetchBufferCache {
 
+  private static final ConcurrentMap<CacheConfig, PrefetchBufferCache> SHARED_INSTANCES =
+      new ConcurrentHashMap<>();
+
   private final Cache<BlockKey, ByteBuffer> blocks;
   private final Set<BlockKey> claimedBlocks = ConcurrentHashMap.newKeySet();
+  private final ConcurrentMap<BlockKey, CompletableFuture<ByteBuffer>> inFlightBlocks =
+      new ConcurrentHashMap<>();
   private final int blockSizeBytes;
 
   /**
@@ -66,6 +74,28 @@ public final class PrefetchBufferCache {
             .weigher((BlockKey key, ByteBuffer value) -> value.remaining())
             .expireAfterAccess(ttlSeconds, TimeUnit.SECONDS)
             .build();
+  }
+
+  /**
+   * Returns the cache shared by the whole process for the given configuration.
+   *
+   * <p>Query engines hand every task its own file system instance, and a cache owned by that
+   * instance means {@code maxSizeBytes} is a budget per task rather than per process: a host
+   * running a dozen tasks would hold a dozen full-size caches. Sharing one cache instead keeps the
+   * configured bound meaningful and lets tasks reading the same object reuse each other's blocks.
+   *
+   * @param maxSizeBytes the maximum total size of retained blocks
+   * @param ttlSeconds how long a block is retained after it was last read or written
+   * @param blockSizeBytes the fixed size of a block
+   */
+  public static PrefetchBufferCache getSharedInstance(
+      long maxSizeBytes, long ttlSeconds, int blockSizeBytes) {
+    CacheConfig config = CacheConfig.create(maxSizeBytes, ttlSeconds, blockSizeBytes);
+    return SHARED_INSTANCES.computeIfAbsent(
+        config,
+        key ->
+            new PrefetchBufferCache(
+                key.getMaxSizeBytes(), key.getTtlSeconds(), key.getBlockSizeBytes()));
   }
 
   /** Returns the fixed size of a block in bytes. */
@@ -152,9 +182,11 @@ public final class PrefetchBufferCache {
     return claimedBlocks.add(BlockKey.create(itemId, toBlockIndex(position)));
   }
 
-  /** Releases a claim taken by {@link #tryClaim}. */
+  /** Releases a claim taken by {@link #tryClaim}, along with any fetch registered for it. */
   public void releaseClaim(GcsItemId itemId, long position) {
-    claimedBlocks.remove(BlockKey.create(itemId, toBlockIndex(position)));
+    BlockKey key = BlockKey.create(itemId, toBlockIndex(position));
+    claimedBlocks.remove(key);
+    inFlightBlocks.remove(key);
   }
 
   /** Returns whether a fetch for the block containing {@code position} is currently claimed. */
@@ -162,10 +194,34 @@ public final class PrefetchBufferCache {
     return claimedBlocks.contains(BlockKey.create(itemId, toBlockIndex(position)));
   }
 
-  /** Discards all cached blocks and claims. */
+  /**
+   * Records the stage that settles once the claimed block containing {@code position} has been
+   * stored, so that other readers can wait for it instead of fetching the same bytes again.
+   *
+   * <p>The registry lives here rather than with the component that issued the fetch because claims
+   * do too: a reader that skips a block because someone else claimed it has to be able to find that
+   * someone else's request, even when the two belong to different streams.
+   */
+  public void registerInFlight(
+      GcsItemId itemId, long position, CompletableFuture<ByteBuffer> published) {
+    checkNotNull(published, "published cannot be null");
+    inFlightBlocks.put(BlockKey.create(itemId, toBlockIndex(position)), published);
+  }
+
+  /**
+   * Returns the stage that settles once the block containing {@code position} has been stored, or
+   * {@code null} when no fetch for it is outstanding.
+   */
+  @Nullable
+  public CompletableFuture<ByteBuffer> getInFlight(GcsItemId itemId, long position) {
+    return inFlightBlocks.get(BlockKey.create(itemId, toBlockIndex(position)));
+  }
+
+  /** Discards all cached blocks, claims and outstanding fetches. */
   public void invalidateAll() {
     blocks.invalidateAll();
     claimedBlocks.clear();
+    inFlightBlocks.clear();
   }
 
   private long toBlockIndex(long position) {
@@ -183,6 +239,22 @@ public final class PrefetchBufferCache {
     static BlockKey create(GcsItemId itemId, long blockIndex) {
       checkNotNull(itemId, "itemId cannot be null");
       return new AutoValue_PrefetchBufferCache_BlockKey(itemId, blockIndex);
+    }
+  }
+
+  /** Identifies a shared cache by the configuration it was created with. */
+  @AutoValue
+  abstract static class CacheConfig {
+
+    abstract long getMaxSizeBytes();
+
+    abstract long getTtlSeconds();
+
+    abstract int getBlockSizeBytes();
+
+    static CacheConfig create(long maxSizeBytes, long ttlSeconds, int blockSizeBytes) {
+      return new AutoValue_PrefetchBufferCache_CacheConfig(
+          maxSizeBytes, ttlSeconds, blockSizeBytes);
     }
   }
 }
