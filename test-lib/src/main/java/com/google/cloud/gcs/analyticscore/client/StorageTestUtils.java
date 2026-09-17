@@ -24,11 +24,19 @@ import java.nio.charset.StandardCharsets;
 public class StorageTestUtils {
 
   public static void createBlobInStorage(Storage storage, BlobId blobId, String content) {
-    BlobInfo blobInfo = BlobInfo.newBuilder(blobId).build();
-    storage.create(blobInfo, content.getBytes(StandardCharsets.UTF_8));
+    createBlobInStorage(storage, blobId, content.getBytes(StandardCharsets.UTF_8));
   }
 
   public static void createBlobInStorage(Storage storage, GcsItemId itemId, String content) {
+    createBlobInStorage(storage, itemId, content.getBytes(StandardCharsets.UTF_8));
+  }
+
+  public static void createBlobInStorage(Storage storage, BlobId blobId, byte[] content) {
+    BlobInfo blobInfo = BlobInfo.newBuilder(blobId).build();
+    storage.create(blobInfo, content);
+  }
+
+  public static void createBlobInStorage(Storage storage, GcsItemId itemId, byte[] content) {
     BlobId blobId = BlobId.of(itemId.getBucketName(), itemId.getObjectName().get(), 0L);
     createBlobInStorage(storage, blobId, content);
   }

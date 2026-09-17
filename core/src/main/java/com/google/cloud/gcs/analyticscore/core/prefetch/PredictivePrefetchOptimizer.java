@@ -23,6 +23,7 @@ import com.google.cloud.gcs.analyticscore.client.CachedRange;
 import com.google.cloud.gcs.analyticscore.client.GcsFileInfo;
 import com.google.cloud.gcs.analyticscore.client.GcsItemId;
 import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions;
 import com.google.cloud.gcs.analyticscore.client.PrefetchBufferCache;
 import com.google.cloud.gcs.analyticscore.client.SchemaAccessHistory;
 import com.google.cloud.gcs.analyticscore.client.VectoredSeekableByteChannel;
@@ -65,7 +66,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private static final String PARQUET_EXTENSION = ".parquet";
   private static final int MAX_CONCURRENT_PREFETCH_RANGES = 32;
 
-  private final boolean enabled;
+  private final GcsPrefetchOptions prefetchOptions;
   private final Telemetry telemetry;
 
   private GcsItemId itemId;
@@ -84,14 +85,14 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private int pendingSpeculationRowGroupOrdinal = -1;
   private RowGroupFilterTracker filterTracker = new RowGroupFilterTracker();
 
-  public PredictivePrefetchOptimizer(boolean enabled, Telemetry telemetry) {
-    this.enabled = enabled;
+  public PredictivePrefetchOptimizer(GcsPrefetchOptions prefetchOptions, Telemetry telemetry) {
+    this.prefetchOptions = checkNotNull(prefetchOptions, "prefetchOptions cannot be null");
     this.telemetry = checkNotNull(telemetry, "telemetry cannot be null");
   }
 
   @Override
   public boolean isApplicable(GcsItemId itemId) {
-    return enabled
+    return prefetchOptions.isEnabled()
         && itemId
             .getObjectName()
             .map(name -> name.toLowerCase().endsWith(PARQUET_EXTENSION))

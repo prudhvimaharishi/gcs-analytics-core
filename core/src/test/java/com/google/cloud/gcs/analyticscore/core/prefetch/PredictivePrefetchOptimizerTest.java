@@ -23,6 +23,8 @@ import com.google.cloud.gcs.analyticscore.client.FakeVectoredSeekableByteChannel
 import com.google.cloud.gcs.analyticscore.client.GcsCacheOptions;
 import com.google.cloud.gcs.analyticscore.client.GcsItemId;
 import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions;
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.PrefetchMode;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
@@ -46,6 +48,8 @@ class PredictivePrefetchOptimizerTest {
   private static final int RECORD_COUNT = 500;
   private static final int MULTI_ROW_GROUP_RECORD_COUNT = 5000;
   private static final int SLICE_LENGTH = 64;
+  private static final int BLOCK_SIZE_BYTES = 64;
+  private static final int WHOLE_FILE_BLOCK_SIZE_BYTES = 1024 * 1024;
 
   @TempDir File temporaryDirectory;
 
@@ -70,7 +74,7 @@ class PredictivePrefetchOptimizerTest {
     metricListener = new RecordingOperationListener();
     telemetry = new Telemetry(ImmutableList.of(metricListener));
     channel = new FakeVectoredSeekableByteChannel(content);
-    optimizer = createOptimizer(true);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
     cacheManager.getSchemaAccessHistory().invalidateAll();
   }
 
@@ -104,7 +108,7 @@ class PredictivePrefetchOptimizerTest {
 
   @Test
   void isApplicable_prefetchDisabled_returnsFalse() {
-    PredictivePrefetchOptimizer disabledOptimizer = createOptimizer(false);
+    PredictivePrefetchOptimizer disabledOptimizer = createOptimizer(PrefetchMode.DISABLED);
 
     assertThat(disabledOptimizer.isApplicable(ITEM_ID)).isFalse();
   }
@@ -244,7 +248,7 @@ class PredictivePrefetchOptimizerTest {
   @Test
   void read_smallSliceOfOneColumn_doesNotRecordOtherColumns() throws IOException {
     optimizer.onClose();
-    optimizer = createOptimizer(true);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP, WHOLE_FILE_BLOCK_SIZE_BYTES);
     cacheManager.getSchemaAccessHistory().invalidateAll();
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
 
@@ -259,7 +263,7 @@ class PredictivePrefetchOptimizerTest {
     byte[] multiRowGroupContent = createMultiRowGroupContent();
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
-    optimizer = createOptimizer(true);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
     ParquetColumnChunk firstIdChunk =
         columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk secondIdChunk =
@@ -275,7 +279,7 @@ class PredictivePrefetchOptimizerTest {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
     FakeVectoredSeekableByteChannel newChannel = new FakeVectoredSeekableByteChannel(content);
-    PredictivePrefetchOptimizer newOptimizer = createOptimizer(true);
+    PredictivePrefetchOptimizer newOptimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
 
     newOptimizer.afterRead(content.length - 16, 16, newChannel);
     newOptimizer.onClose();
@@ -369,7 +373,7 @@ class PredictivePrefetchOptimizerTest {
     byte[] multiRowGroupContent = createMultiRowGroupContent();
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
-    optimizer = createOptimizer(true);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
     ParquetColumnChunk firstIdChunk =
         columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
 
@@ -385,7 +389,7 @@ class PredictivePrefetchOptimizerTest {
     byte[] multiRowGroupContent = createMultiRowGroupContent();
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
-    optimizer = createOptimizer(true);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
     ParquetColumnChunk firstIdChunk =
         columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk secondIdChunk =
@@ -437,7 +441,7 @@ class PredictivePrefetchOptimizerTest {
     byte[] multiRowGroupContent = createMultiRowGroupContent();
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
-    optimizer = createOptimizer(true);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
     ParquetColumnChunk rg0DictChunk =
         columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
     ParquetColumnChunk rg2DictChunk =
@@ -507,10 +511,16 @@ class PredictivePrefetchOptimizerTest {
 
   @Test
   void read_footerCacheDisabled_skipsPrefetching() throws IOException {
+    GcsPrefetchOptions prefetchOptions =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setBlockSizeBytes(BLOCK_SIZE_BYTES)
+            .build();
     AnalyticsCacheManager disabledFooterCacheManager =
-        new AnalyticsCacheManager(GcsCacheOptions.builder().setFooterCacheEnabled(false).build());
+        new AnalyticsCacheManager(
+            GcsCacheOptions.builder().setFooterCacheEnabled(false).build(), prefetchOptions);
     PredictivePrefetchOptimizer optimizerWithDisabledFooterCache =
-        new PredictivePrefetchOptimizer(true, telemetry);
+        new PredictivePrefetchOptimizer(prefetchOptions, telemetry);
     optimizerWithDisabledFooterCache.onOpen(ITEM_ID, disabledFooterCacheManager);
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
 
@@ -521,17 +531,28 @@ class PredictivePrefetchOptimizerTest {
     assertThat(channel.getRequestedOffsets()).isEmpty();
   }
 
-  private PredictivePrefetchOptimizer createOptimizer(boolean enabled) {
+  private PredictivePrefetchOptimizer createOptimizer(PrefetchMode prefetchMode) {
+    return createOptimizer(prefetchMode, BLOCK_SIZE_BYTES);
+  }
+
+  private PredictivePrefetchOptimizer createOptimizer(
+      PrefetchMode prefetchMode, int blockSizeBytes) {
+    GcsPrefetchOptions prefetchOptions =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(prefetchMode)
+            .setBlockSizeBytes(blockSizeBytes)
+            .build();
     if (cacheManager == null) {
       cacheManager =
-          new AnalyticsCacheManager(GcsCacheOptions.builder().setFooterCacheEnabled(true).build());
+          new AnalyticsCacheManager(
+              GcsCacheOptions.builder().setFooterCacheEnabled(true).build(), prefetchOptions);
     }
     if (channel != null && channel.size() > 0) {
       cacheManager.putFooter(
           ITEM_ID, ByteBuffer.wrap(channel.sliceContent(0, (int) channel.size())));
     }
     PredictivePrefetchOptimizer createdOptimizer =
-        new PredictivePrefetchOptimizer(enabled, telemetry);
+        new PredictivePrefetchOptimizer(prefetchOptions, telemetry);
     createdOptimizer.onOpen(ITEM_ID, cacheManager);
     return createdOptimizer;
   }
