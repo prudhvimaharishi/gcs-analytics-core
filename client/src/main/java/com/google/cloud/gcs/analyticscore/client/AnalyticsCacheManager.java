@@ -24,6 +24,7 @@ import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImp
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -38,9 +39,15 @@ public class AnalyticsCacheManager {
    */
   private static final long BUCKET_PROPERTIES_CACHE_TTL_MINUTES = 10;
 
+  private static final long DEFAULT_PREFETCH_BUFFER_CACHE_MAX_SIZE_BYTES = 256L * 1024 * 1024;
+  private static final long DEFAULT_PREFETCH_BUFFER_CACHE_TTL_SECONDS = 60;
+  private static final int DEFAULT_HISTORY_MAX_COLUMNS = 64;
+
   private final AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
   private final AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
   private final AnalyticsCache<String, BucketProperties> bucketPropertiesCache;
+  private final PrefetchBufferCache prefetchBufferCache;
+  private final SchemaAccessHistory schemaAccessHistory;
 
   /**
    * Creates a new {@link AnalyticsCacheManager} with the specified options.
@@ -61,6 +68,37 @@ public class AnalyticsCacheManager {
     this.bucketPropertiesCache =
         AnalyticsCacheCaffeineImpl.createWithTtlOnly(
             BUCKET_PROPERTIES_CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+    this.prefetchBufferCache =
+        new PrefetchBufferCache(
+            DEFAULT_PREFETCH_BUFFER_CACHE_MAX_SIZE_BYTES,
+            DEFAULT_PREFETCH_BUFFER_CACHE_TTL_SECONDS);
+    this.schemaAccessHistory = new SchemaAccessHistory(DEFAULT_HISTORY_MAX_COLUMNS);
+  }
+
+  /** Returns the cache holding speculatively prefetched byte blocks. */
+  public PrefetchBufferCache getPrefetchBufferCache() {
+    return prefetchBufferCache;
+  }
+
+  /** Returns the column access history shared across objects opened with this cache manager. */
+  public SchemaAccessHistory getSchemaAccessHistory() {
+    return schemaAccessHistory;
+  }
+
+  /**
+   * Returns the cached footer for the given {@code itemId}, or {@code Optional.empty()} if it is
+   * not present in the cache.
+   */
+  public Optional<ByteBuffer> getFooter(GcsItemId itemId) {
+    checkNotNull(itemId, "itemId cannot be null");
+    return footerCache.get(itemId).map(ByteBuffer::asReadOnlyBuffer);
+  }
+
+  /** Stores the given {@code footer} buffer in the footer cache for {@code itemId}. */
+  public void putFooter(GcsItemId itemId, ByteBuffer footer) {
+    checkNotNull(itemId, "itemId cannot be null");
+    checkNotNull(footer, "footer cannot be null");
+    footerCache.put(itemId, footer.asReadOnlyBuffer());
   }
 
   /**
