@@ -69,6 +69,44 @@ class SequentialReadStrategyTest {
   }
 
   @Test
+  void recordExternalReadAdvance_beyondInplaceSeekLimit_releasesTheOpenStream() throws IOException {
+    StorageTestUtils.createBlobInStorage(storage, itemId, "a".repeat(1000));
+    SequentialReadStrategy strategy =
+        new SequentialReadStrategy(storage, itemId, options, itemInfo);
+    strategy.getReadChannel(0, 10);
+
+    strategy.recordExternalReadAdvance(500);
+
+    assertThat(strategy.channel).isNull();
+  }
+
+  @Test
+  void recordExternalReadAdvance_withinInplaceSeekLimit_keepsTheOpenStream() throws IOException {
+    StorageTestUtils.createBlobInStorage(storage, itemId, "a".repeat(1000));
+    SequentialReadStrategy strategy =
+        new SequentialReadStrategy(storage, itemId, options, itemInfo);
+    strategy.getReadChannel(0, 10);
+
+    strategy.recordExternalReadAdvance(50);
+
+    assertThat(strategy.channel).isNotNull();
+  }
+
+  @Test
+  void getReadChannel_afterReleasingTheStream_readsFromTheNewPosition() throws IOException {
+    StorageTestUtils.createBlobInStorage(storage, itemId, "a".repeat(500) + "b".repeat(500));
+    SequentialReadStrategy strategy =
+        new SequentialReadStrategy(storage, itemId, options, itemInfo);
+    strategy.getReadChannel(0, 10);
+    strategy.recordExternalReadAdvance(500);
+
+    ByteBuffer destination = ByteBuffer.allocate(1);
+    strategy.getReadChannel(500, 1).read(destination);
+
+    assertThat(destination.array()).isEqualTo(new byte[] {'b'});
+  }
+
+  @Test
   void getLimit_returnsMaxValue() throws IOException {
     StorageTestUtils.createBlobInStorage(storage, itemId, "a".repeat(1000));
     SequentialReadStrategy strategy =

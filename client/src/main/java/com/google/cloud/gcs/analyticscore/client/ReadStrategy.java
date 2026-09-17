@@ -50,8 +50,9 @@ interface ReadStrategy {
    * served from a cache are not mistaken for a random seek.
    *
    * @param newPosition the position the reader has reached
+   * @throws IOException if releasing a stream the advance made useless fails
    */
-  default void recordExternalReadAdvance(long newPosition) {}
+  default void recordExternalReadAdvance(long newPosition) throws IOException {}
 
   /**
    * Returns the limit up to which data can be read by this strategy.

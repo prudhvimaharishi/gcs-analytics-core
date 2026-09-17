@@ -58,6 +58,23 @@ abstract class AbstractReadStrategy implements ReadStrategy {
     this.position = newPosition;
   }
 
+  /**
+   * Releases the open stream once the reader has moved further ahead than an in-place skip could
+   * cover.
+   *
+   * <p>The bytes in between were served from somewhere else, so a stream still sitting behind them
+   * is of no use: the next read has to reopen it wherever the reader ended up. Closing it now hands
+   * the connection back instead of holding it idle for however long the reader spends working
+   * through the bytes it was given.
+   */
+  @Override
+  public void recordExternalReadAdvance(long newPosition) throws IOException {
+    if (channel == null || newPosition - position <= options.getInplaceSeekLimit()) {
+      return;
+    }
+    close();
+  }
+
   @Override
   public void close() throws IOException {
     if (channel != null) {

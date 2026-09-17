@@ -68,14 +68,15 @@ class AdaptiveReadStrategy extends AbstractReadStrategy {
   }
 
   /**
-   * Moves the sequentiality watermark forward without touching the delegate, which still sits
-   * wherever its last network read left it.
+   * Moves the sequentiality watermark forward without claiming the delegate has read that far, and
+   * lets the delegate decide whether the stream it still holds is worth keeping.
    */
   @Override
-  public void recordExternalReadAdvance(long newPosition) {
+  public void recordExternalReadAdvance(long newPosition) throws IOException {
     if (newPosition > lastReadEndPosition) {
       this.lastReadEndPosition = newPosition;
     }
+    currentStrategy.recordExternalReadAdvance(newPosition);
   }
 
   @Override
