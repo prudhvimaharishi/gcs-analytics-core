@@ -75,13 +75,6 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private static final int FOOTER_READ_BYTES = 1024 * 1024;
   private static final int MAX_CONCURRENT_PREFETCH_BLOCKS = 32;
 
-  /**
-   * How long a read waits for a block that is already being fetched before giving up and reading
-   * the bytes itself. Bounded so that a prefetch stuck behind a saturated thread pool delays a read
-   * rather than stalling it.
-   */
-  private static final long IN_FLIGHT_WAIT_TIMEOUT_MILLIS = 5_000;
-
   private final GcsPrefetchOptions prefetchOptions;
   private final Telemetry telemetry;
 
@@ -269,8 +262,9 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
    * Waits for the block holding {@code position} when a speculative request for it is already
    * outstanding, then serves the read from it.
    *
-   * <p>Waiting beats reading the same bytes again: the request is typically most of the way done,
-   * and a second one would compete with it for the same connection pool.
+   * <p>Waiting beats reading the same bytes again while the request is close to done, because a
+   * second one would compete with it for the same connection pool. Past the configured budget the
+   * opposite is true, so the wait is bounded and the caller falls back to reading for itself.
    */
   private int awaitInFlightBlockAndCopy(long position, ByteBuffer dst) {
     CompletableFuture<ByteBuffer> pending = pendingBlockFuture(position);
@@ -278,7 +272,8 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       return 0;
     }
     try {
-      ByteBuffer unused = pending.get(IN_FLIGHT_WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+      ByteBuffer unused =
+          pending.get(prefetchOptions.getInFlightWaitMillis(), TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       return 0;
@@ -367,8 +362,20 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     }
     CompletableFuture<Void> unused =
         CompletableFuture.allOf(pendingBlocks.toArray(new CompletableFuture<?>[0]))
+            .orTimeout(waitBudgetMillis(), TimeUnit.MILLISECONDS)
             .whenComplete((ignored, error) -> completeAfterPrefetch(range, allocate));
     return true;
+  }
+
+  /**
+   * Returns the time a caller may spend waiting on speculation, never less than a millisecond.
+   *
+   * <p>A zero budget means "do not wait" for a caller that can read the bytes itself, but this path
+   * has already taken ownership of the range, so it has to give the request some chance to land
+   * before falling back.
+   */
+  private long waitBudgetMillis() {
+    return Math.max(1, prefetchOptions.getInFlightWaitMillis());
   }
 
   /** Serves {@code range} from the blocks that just arrived, falling back to a read of its own. */

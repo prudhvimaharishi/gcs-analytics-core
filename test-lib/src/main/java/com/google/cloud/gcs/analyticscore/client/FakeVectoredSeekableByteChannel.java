@@ -51,6 +51,11 @@ public final class FakeVectoredSeekableByteChannel implements VectoredSeekableBy
     this.deferVectoredCompletion = true;
   }
 
+  /** Completes subsequent vectored reads again, leaving already deferred futures pending. */
+  public void resumeVectoredCompletion() {
+    this.deferVectoredCompletion = false;
+  }
+
   /** Makes every subsequent {@link #readVectored} call throw {@code failure}. */
   public void failVectoredReadsWith(IOException failure) {
     this.vectoredFailure = failure;

@@ -45,12 +45,14 @@ public abstract class GcsPrefetchOptions {
       "analytics-core.prefetch.buffer.cache.ttl-seconds";
   static final String BLOCK_SIZE_BYTES_KEY = "analytics-core.prefetch.block.size-bytes";
   static final String HISTORY_MAX_COLUMNS_KEY = "analytics-core.prefetch.history.max-columns";
+  static final String IN_FLIGHT_WAIT_MILLIS_KEY = "analytics-core.prefetch.in-flight-wait-millis";
 
   private static final PrefetchMode DEFAULT_PREFETCH_MODE = PrefetchMode.DISABLED;
   private static final long DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES = 2L * 1024 * 1024 * 1024; // 2 GB
   private static final long DEFAULT_BUFFER_CACHE_TTL_SECONDS = 60;
   private static final int DEFAULT_BLOCK_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB
   private static final int DEFAULT_HISTORY_MAX_COLUMNS = 15;
+  private static final long DEFAULT_IN_FLIGHT_WAIT_MILLIS = 200;
 
   /** Returns the prefetching strategy to apply. Defaults to {@code DISABLED}. */
   public abstract PrefetchMode getPrefetchMode();
@@ -83,6 +85,16 @@ public abstract class GcsPrefetchOptions {
   public abstract int getHistoryMaxColumns();
 
   /**
+   * Returns how long (in milliseconds) a read waits for a block that a speculative request is
+   * already fetching before reading the bytes itself. Defaults to {@code 200} milliseconds.
+   *
+   * <p>The alternative to waiting is issuing the read directly, which costs roughly one round trip
+   * plus the transfer, so a budget much beyond that turns a prefetch queued behind a busy thread
+   * pool into added latency rather than saved latency. Setting it to {@code 0} never waits.
+   */
+  public abstract long getInFlightWaitMillis();
+
+  /**
    * Returns whether predictive prefetching is enabled, that is whether the prefetch mode is
    * anything other than {@code DISABLED}.
    */
@@ -103,7 +115,8 @@ public abstract class GcsPrefetchOptions {
         .setBufferCacheMaxSizeBytes(DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES)
         .setBufferCacheTtlSeconds(DEFAULT_BUFFER_CACHE_TTL_SECONDS)
         .setBlockSizeBytes(DEFAULT_BLOCK_SIZE_BYTES)
-        .setHistoryMaxColumns(DEFAULT_HISTORY_MAX_COLUMNS);
+        .setHistoryMaxColumns(DEFAULT_HISTORY_MAX_COLUMNS)
+        .setInFlightWaitMillis(DEFAULT_IN_FLIGHT_WAIT_MILLIS);
   }
 
   /**
@@ -155,6 +168,12 @@ public abstract class GcsPrefetchOptions {
               historyMaxColumnsFullKey, analyticsCoreOptions.get(historyMaxColumnsFullKey)));
     }
 
+    String inFlightWaitMillisFullKey = prefix + IN_FLIGHT_WAIT_MILLIS_KEY;
+    if (analyticsCoreOptions.containsKey(inFlightWaitMillisFullKey)) {
+      optionsBuilder.setInFlightWaitMillis(
+          Long.parseLong(analyticsCoreOptions.get(inFlightWaitMillisFullKey)));
+    }
+
     return optionsBuilder.build();
   }
 
@@ -188,6 +207,12 @@ public abstract class GcsPrefetchOptions {
      */
     public abstract Builder setHistoryMaxColumns(int historyMaxColumns);
 
+    /**
+     * Sets how long (in milliseconds) a read waits for a block that a speculative request is
+     * already fetching before reading the bytes itself. Defaults to {@code 200} milliseconds.
+     */
+    public abstract Builder setInFlightWaitMillis(long inFlightWaitMillis);
+
     abstract GcsPrefetchOptions autoBuild();
 
     /**
@@ -195,7 +220,8 @@ public abstract class GcsPrefetchOptions {
      *
      * @throws IllegalArgumentException if {@code bufferCacheMaxSizeBytes}, {@code
      *     bufferCacheTtlSeconds}, {@code blockSizeBytes} or {@code historyMaxColumns} is
-     *     non-positive while the prefetch mode is not {@code DISABLED}
+     *     non-positive, or {@code inFlightWaitMillis} is negative, while the prefetch mode is not
+     *     {@code DISABLED}
      */
     public GcsPrefetchOptions build() {
       GcsPrefetchOptions options = autoBuild();
@@ -212,6 +238,9 @@ public abstract class GcsPrefetchOptions {
         checkArgument(
             options.getHistoryMaxColumns() > 0,
             "historyMaxColumns must be positive when prefetch is enabled");
+        checkArgument(
+            options.getInFlightWaitMillis() >= 0,
+            "inFlightWaitMillis cannot be negative when prefetch is enabled");
       }
       return options;
     }

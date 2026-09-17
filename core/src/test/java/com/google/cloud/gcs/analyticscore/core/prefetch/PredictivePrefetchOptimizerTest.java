@@ -49,6 +49,9 @@ class PredictivePrefetchOptimizerTest {
   private static final int SLICE_LENGTH = 64;
   private static final int BLOCK_SIZE_BYTES = 64;
   private static final int WHOLE_FILE_BLOCK_SIZE_BYTES = 1024 * 1024;
+  // Long enough that a test never observes the fallback unless it asks for it.
+  private static final long UNREACHED_IN_FLIGHT_WAIT_MILLIS = 30_000;
+  private static final long IMMEDIATE_IN_FLIGHT_WAIT_MILLIS = 1;
 
   @TempDir File temporaryDirectory;
 
@@ -492,6 +495,22 @@ class PredictivePrefetchOptimizerTest {
     return servedBytes;
   }
 
+  @Test
+  void readVectored_prefetchDoesNotArriveInTime_readsTheRangeFromTheChannel() throws IOException {
+    optimizer.onClose();
+    optimizer =
+        createOptimizer(
+            PrefetchMode.PREDICTIVE_ROW_GROUP, BLOCK_SIZE_BYTES, IMMEDIATE_IN_FLIGHT_WAIT_MILLIS);
+    long inFlightOffset = scheduleWithoutCompleting();
+    GcsObjectRange range = createRange(inFlightOffset, 16);
+    channel.resumeVectoredCompletion();
+
+    optimizer.readVectored(ImmutableList.of(range), ByteBuffer::allocate);
+
+    assertThat(range.getByteBufferFuture().join().array())
+        .isEqualTo(sliceOfContent(inFlightOffset, 16));
+  }
+
   /** Leaves a speculative request outstanding and returns the block offset it covers. */
   private long scheduleWithoutCompleting() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
@@ -556,10 +575,16 @@ class PredictivePrefetchOptimizerTest {
 
   private PredictivePrefetchOptimizer createOptimizer(
       PrefetchMode prefetchMode, int blockSizeBytes) {
+    return createOptimizer(prefetchMode, blockSizeBytes, UNREACHED_IN_FLIGHT_WAIT_MILLIS);
+  }
+
+  private PredictivePrefetchOptimizer createOptimizer(
+      PrefetchMode prefetchMode, int blockSizeBytes, long inFlightWaitMillis) {
     GcsPrefetchOptions prefetchOptions =
         GcsPrefetchOptions.builder()
             .setPrefetchMode(prefetchMode)
             .setBlockSizeBytes(blockSizeBytes)
+            .setInFlightWaitMillis(inFlightWaitMillis)
             .build();
     cacheManager = new AnalyticsCacheManager(GcsCacheOptions.builder().build(), prefetchOptions);
     PredictivePrefetchOptimizer createdOptimizer =

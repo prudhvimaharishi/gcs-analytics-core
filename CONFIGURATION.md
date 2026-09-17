@@ -45,6 +45,7 @@ These settings control the predictive prefetcher, which learns the column access
 | `analytics-core.prefetch.buffer.cache.ttl-seconds` | Long | How long (in seconds) a prefetched block is retained in the buffer cache after it was last read or written. | `60` |
 | `analytics-core.prefetch.block.size-bytes` | Integer | The granularity (in bytes) at which the prefetcher requests and caches data. Every speculative request is aligned to this size, and cached bytes are resolved by block index. | `4194304` (4 MB) |
 | `analytics-core.prefetch.history.max-columns` | Integer | The maximum number of columns tracked per Parquet schema in the access history. | `15` |
+| `analytics-core.prefetch.in-flight-wait-millis` | Long | How long a read waits for a block that a speculative request is already fetching before reading the bytes itself. Beyond roughly one round trip, waiting on a prefetch queued behind a busy thread pool costs more than reading directly. `0` never waits. | `200` |
 
 ### Read Performance and I/O Tuning
 

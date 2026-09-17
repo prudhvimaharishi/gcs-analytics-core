@@ -260,6 +260,44 @@ class GcsPrefetchOptionsTest {
     assertThrows(IllegalArgumentException.class, builder::build);
   }
 
+  @Test
+  void build_defaultValues_returnsDefaultInFlightWaitMillis() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getInFlightWaitMillis()).isEqualTo(200);
+  }
+
+  @Test
+  void createFromOptions_mapWithInFlightWaitMillis_parsesInFlightWaitMillis() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.IN_FLIGHT_WAIT_MILLIS_KEY, "50");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getInFlightWaitMillis()).isEqualTo(50);
+  }
+
+  @Test
+  void build_enabledWithZeroInFlightWaitMillis_buildsOptions() {
+    GcsPrefetchOptions options =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setInFlightWaitMillis(0)
+            .build();
+
+    assertThat(options.getInFlightWaitMillis()).isEqualTo(0);
+  }
+
+  @Test
+  void build_enabledWithNegativeInFlightWaitMillis_throwsIllegalArgumentException() {
+    GcsPrefetchOptions.Builder builder =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setInFlightWaitMillis(-1);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
   private static Map<String, String> prefetchModeOptions(String mode) {
     return ImmutableMap.of(PREFIX + GcsPrefetchOptions.PREFETCH_MODE_KEY, mode);
   }
