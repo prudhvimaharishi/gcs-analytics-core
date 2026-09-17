@@ -20,6 +20,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.ByteBuffer;
+import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
 
 class PrefetchBufferCacheTest {
@@ -27,11 +28,11 @@ class PrefetchBufferCacheTest {
   private static final long MAX_SIZE_BYTES = 1024;
   private static final long TTL_SECONDS = 60;
   private static final int BLOCK_SIZE_BYTES = 4;
-  private static final long FIRST_BLOCK_OFFSET = 0;
-  private static final long SECOND_BLOCK_OFFSET = 4;
-  private static final byte[] ONE_BLOCK = {1, 2, 3, 4};
-  private static final byte[] OTHER_BLOCK = {5, 6, 7, 8};
-  private static final byte[] TWO_BLOCKS = {1, 2, 3, 4, 5, 6, 7, 8};
+  private static final long FIRST_RANGE_OFFSET = 0;
+  private static final long SECOND_RANGE_OFFSET = 4;
+  private static final byte[] FIRST_RANGE = {1, 2, 3, 4};
+  private static final byte[] SECOND_RANGE = {5, 6, 7, 8};
+  private static final byte[] COMBINED_RANGES = {1, 2, 3, 4, 5, 6, 7, 8};
 
   @Test
   void constructor_zeroMaxSizeBytes_throwsIllegalArgumentException() {
@@ -64,20 +65,11 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
-  void alignDown_positionInsideBlock_returnsBlockStart() {
+  void copyInto_absentRange_returnsZero() {
     PrefetchBufferCache cache = newCache();
+    ByteBuffer destination = ByteBuffer.allocate(FIRST_RANGE.length);
 
-    long alignedOffset = cache.alignDown(6);
-
-    assertThat(alignedOffset).isEqualTo(SECOND_BLOCK_OFFSET);
-  }
-
-  @Test
-  void copyInto_absentBlock_returnsZero() {
-    PrefetchBufferCache cache = newCache();
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
-
-    int copiedBytes = cache.copyInto(itemId("object"), FIRST_BLOCK_OFFSET, destination);
+    int copiedBytes = cache.copyInto(itemId("object"), FIRST_RANGE_OFFSET, destination);
 
     assertThat(copiedBytes).isEqualTo(0);
   }
@@ -85,19 +77,19 @@ class PrefetchBufferCacheTest {
   @Test
   void copyInto_afterPutRange_copiesStoredBytes() {
     PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(ONE_BLOCK));
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
+    ByteBuffer destination = ByteBuffer.allocate(FIRST_RANGE.length);
 
-    int unusedCopiedBytes = cache.copyInto(itemId("object"), FIRST_BLOCK_OFFSET, destination);
+    int unusedCopiedBytes = cache.copyInto(itemId("object"), FIRST_RANGE_OFFSET, destination);
 
-    assertThat(writtenBytes(destination)).isEqualTo(ONE_BLOCK);
+    assertThat(writtenBytes(destination)).isEqualTo(FIRST_RANGE);
   }
 
   @Test
-  void copyInto_positionInsideBlock_copiesFromThatPosition() {
+  void copyInto_positionInsideRange_copiesFromThatPosition() {
     PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(ONE_BLOCK));
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
+    ByteBuffer destination = ByteBuffer.allocate(FIRST_RANGE.length);
 
     int unusedCopiedBytes = cache.copyInto(itemId("object"), 2, destination);
 
@@ -105,108 +97,79 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
-  void copyInto_destinationLargerThanBlock_stopsAtBlockBoundary() {
+  void copyInto_unalignedRangeStart_copiesStoredBytes() {
     PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(TWO_BLOCKS));
-    ByteBuffer destination = ByteBuffer.allocate(TWO_BLOCKS.length);
+    cache.putRange(itemId("object"), 13, bufferOf(FIRST_RANGE));
+    ByteBuffer destination = ByteBuffer.allocate(FIRST_RANGE.length);
 
-    int copiedBytes = cache.copyInto(itemId("object"), FIRST_BLOCK_OFFSET, destination);
+    int copiedBytes = cache.copyInto(itemId("object"), 13, destination);
 
-    assertThat(copiedBytes).isEqualTo(BLOCK_SIZE_BYTES);
+    assertThat(copiedBytes).isEqualTo(FIRST_RANGE.length);
+    assertThat(writtenBytes(destination)).isEqualTo(FIRST_RANGE);
   }
 
   @Test
-  void copyInto_calledPerBlock_servesRangeSpanningTwoBlocks() {
+  void copyInto_calledAcrossAdjacentRanges_servesCombinedBytes() {
     PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(TWO_BLOCKS));
-    ByteBuffer destination = ByteBuffer.allocate(TWO_BLOCKS.length);
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
+    cache.putRange(itemId("object"), SECOND_RANGE_OFFSET, bufferOf(SECOND_RANGE));
+    ByteBuffer destination = ByteBuffer.allocate(COMBINED_RANGES.length);
 
-    int firstCopy = cache.copyInto(itemId("object"), FIRST_BLOCK_OFFSET, destination);
+    int firstCopy = cache.copyInto(itemId("object"), FIRST_RANGE_OFFSET, destination);
     int unusedSecondCopy = cache.copyInto(itemId("object"), firstCopy, destination);
 
-    assertThat(writtenBytes(destination)).isEqualTo(TWO_BLOCKS);
+    assertThat(writtenBytes(destination)).isEqualTo(COMBINED_RANGES);
   }
 
   @Test
-  void putRange_multipleBlocks_storesEachBlockSeparately() {
+  void putRange_sameOffsetTwice_replacesPreviousRange() {
     PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(TWO_BLOCKS));
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
+    ByteBuffer destination = ByteBuffer.allocate(FIRST_RANGE.length);
 
-    int unusedCopiedBytes = cache.copyInto(itemId("object"), SECOND_BLOCK_OFFSET, destination);
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(SECOND_RANGE));
 
-    assertThat(writtenBytes(destination)).isEqualTo(OTHER_BLOCK);
+    int unusedCopiedBytes = cache.copyInto(itemId("object"), FIRST_RANGE_OFFSET, destination);
+    assertThat(writtenBytes(destination)).isEqualTo(SECOND_RANGE);
   }
 
   @Test
-  void putRange_finalBlockShorterThanBlockSize_storesPartialBlock() {
+  void copyInto_differentItemIdsSameOffset_returnsIndependentRanges() {
     PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(new byte[] {1, 2, 3, 4, 5}));
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
+    cache.putRange(itemId("other-object"), FIRST_RANGE_OFFSET, bufferOf(SECOND_RANGE));
+    ByteBuffer destination = ByteBuffer.allocate(FIRST_RANGE.length);
 
-    int copiedBytes = cache.copyInto(itemId("object"), SECOND_BLOCK_OFFSET, destination);
+    int unusedCopiedBytes = cache.copyInto(itemId("object"), FIRST_RANGE_OFFSET, destination);
 
-    assertThat(copiedBytes).isEqualTo(1);
-  }
-
-  @Test
-  void putRange_unalignedRangeStart_throwsIllegalArgumentException() {
-    PrefetchBufferCache cache = newCache();
-
-    assertThrows(
-        IllegalArgumentException.class,
-        () -> cache.putRange(itemId("object"), 2, bufferOf(ONE_BLOCK)));
-  }
-
-  @Test
-  void putRange_sameOffsetTwice_replacesPreviousBlock() {
-    PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(ONE_BLOCK));
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
-
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(OTHER_BLOCK));
-
-    int unusedCopiedBytes = cache.copyInto(itemId("object"), FIRST_BLOCK_OFFSET, destination);
-    assertThat(writtenBytes(destination)).isEqualTo(OTHER_BLOCK);
-  }
-
-  @Test
-  void copyInto_differentItemIdsSameOffset_returnsIndependentBlocks() {
-    PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(ONE_BLOCK));
-    cache.putRange(itemId("other-object"), FIRST_BLOCK_OFFSET, bufferOf(OTHER_BLOCK));
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
-
-    int unusedCopiedBytes = cache.copyInto(itemId("object"), FIRST_BLOCK_OFFSET, destination);
-
-    assertThat(writtenBytes(destination)).isEqualTo(ONE_BLOCK);
+    assertThat(writtenBytes(destination)).isEqualTo(FIRST_RANGE);
   }
 
   @Test
   void copyInto_itemIdWithDifferentContentGeneration_returnsZero() {
     PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(ONE_BLOCK));
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
+    ByteBuffer destination = ByteBuffer.allocate(FIRST_RANGE.length);
 
     int copiedBytes =
-        cache.copyInto(itemIdWithGeneration("object", 2L), FIRST_BLOCK_OFFSET, destination);
+        cache.copyInto(itemIdWithGeneration("object", 2L), FIRST_RANGE_OFFSET, destination);
 
     assertThat(copiedBytes).isEqualTo(0);
   }
 
   @Test
-  void isCached_absentBlock_returnsFalse() {
+  void isCached_absentRange_returnsFalse() {
     PrefetchBufferCache cache = newCache();
 
-    boolean cached = cache.isCached(itemId("object"), FIRST_BLOCK_OFFSET);
+    boolean cached = cache.isCached(itemId("object"), FIRST_RANGE_OFFSET);
 
     assertThat(cached).isFalse();
   }
 
   @Test
-  void isCached_positionInsideStoredBlock_returnsTrue() {
+  void isCached_positionInsideStoredRange_returnsTrue() {
     PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(ONE_BLOCK));
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
 
     boolean cached = cache.isCached(itemId("object"), 3);
 
@@ -214,101 +177,99 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
-  void tryClaim_unclaimedBlock_returnsTrue() {
+  void isRangeCached_fullyCoveredRange_returnsTrue() {
     PrefetchBufferCache cache = newCache();
+    cache.putRange(itemId("object"), 10, bufferOf(COMBINED_RANGES));
 
-    boolean claimed = cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
-
-    assertThat(claimed).isTrue();
+    assertThat(cache.isRangeCached(itemId("object"), 12, 4)).isTrue();
   }
 
   @Test
-  void tryClaim_alreadyClaimedBlock_returnsFalse() {
+  void isRangeCached_partiallyMissingRange_returnsFalse() {
     PrefetchBufferCache cache = newCache();
-    cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
+    cache.putRange(itemId("object"), 10, bufferOf(FIRST_RANGE));
 
-    boolean claimedAgain = cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
-
-    assertThat(claimedAgain).isFalse();
+    assertThat(cache.isRangeCached(itemId("object"), 10, 6)).isFalse();
   }
 
   @Test
-  void tryClaim_positionInSameBlock_returnsFalse() {
+  void registerRange_unregisteredRange_returnsTrue() {
     PrefetchBufferCache cache = newCache();
-    cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
 
-    boolean claimedAgain = cache.tryClaim(itemId("object"), 3);
+    boolean registered =
+        cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, new CompletableFuture<>());
 
-    assertThat(claimedAgain).isFalse();
+    assertThat(registered).isTrue();
   }
 
   @Test
-  void tryClaim_differentBlock_returnsTrue() {
+  void registerRange_alreadyCoveredByInFlightRange_returnsFalse() {
     PrefetchBufferCache cache = newCache();
-    cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
+    cache.registerRange(itemId("object"), 10, 8, new CompletableFuture<>());
 
-    boolean claimed = cache.tryClaim(itemId("object"), SECOND_BLOCK_OFFSET);
+    boolean registeredAgain =
+        cache.registerRange(itemId("object"), 12, 4, new CompletableFuture<>());
 
-    assertThat(claimed).isTrue();
+    assertThat(registeredAgain).isFalse();
   }
 
   @Test
-  void tryClaim_afterReleaseClaim_returnsTrue() {
+  void registerRange_differentRange_returnsTrue() {
     PrefetchBufferCache cache = newCache();
-    cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
-    cache.releaseClaim(itemId("object"), FIRST_BLOCK_OFFSET);
+    cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, new CompletableFuture<>());
 
-    boolean claimedAgain = cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
+    boolean registered =
+        cache.registerRange(itemId("object"), SECOND_RANGE_OFFSET, 4, new CompletableFuture<>());
 
-    assertThat(claimedAgain).isTrue();
+    assertThat(registered).isTrue();
   }
 
   @Test
-  void isClaimed_unclaimedBlock_returnsFalse() {
+  void registerRange_failedFuture_isRemovedAutomatically() {
     PrefetchBufferCache cache = newCache();
+    CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
+    cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, future);
 
-    boolean claimed = cache.isClaimed(itemId("object"), FIRST_BLOCK_OFFSET);
+    future.completeExceptionally(new RuntimeException("network error"));
 
-    assertThat(claimed).isFalse();
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 4)).isEmpty();
+    assertThat(
+            cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, new CompletableFuture<>()))
+        .isTrue();
   }
 
   @Test
-  void isClaimed_claimedBlock_returnsTrue() {
+  void getRangeCovering_inFlightRange_returnsCachedRange() {
     PrefetchBufferCache cache = newCache();
+    CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
+    cache.registerRange(itemId("object"), 10, 8, future);
 
-    cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
+    assertThat(cache.getRangeCovering(itemId("object"), 12, 4)).isPresent();
+    assertThat(cache.isRangeCached(itemId("object"), 12, 4)).isFalse();
 
-    assertThat(cache.isClaimed(itemId("object"), FIRST_BLOCK_OFFSET)).isTrue();
+    future.complete(bufferOf(COMBINED_RANGES));
+
+    assertThat(cache.isRangeCached(itemId("object"), 12, 4)).isTrue();
   }
 
   @Test
-  void isClaimed_afterReleaseClaim_returnsFalse() {
+  void invalidateAll_discardsCachedRanges() {
     PrefetchBufferCache cache = newCache();
-    cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
-
-    cache.releaseClaim(itemId("object"), FIRST_BLOCK_OFFSET);
-
-    assertThat(cache.isClaimed(itemId("object"), FIRST_BLOCK_OFFSET)).isFalse();
-  }
-
-  @Test
-  void invalidateAll_discardsCachedBlocks() {
-    PrefetchBufferCache cache = newCache();
-    cache.putRange(itemId("object"), FIRST_BLOCK_OFFSET, bufferOf(ONE_BLOCK));
+    cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
 
     cache.invalidateAll();
 
-    assertThat(cache.isCached(itemId("object"), FIRST_BLOCK_OFFSET)).isFalse();
+    assertThat(cache.isCached(itemId("object"), FIRST_RANGE_OFFSET)).isFalse();
   }
 
   @Test
-  void invalidateAll_discardsClaims() {
+  void invalidateAll_discardsInFlightRanges() {
     PrefetchBufferCache cache = newCache();
-    cache.tryClaim(itemId("object"), FIRST_BLOCK_OFFSET);
+    cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, new CompletableFuture<>());
 
     cache.invalidateAll();
 
-    assertThat(cache.isClaimed(itemId("object"), FIRST_BLOCK_OFFSET)).isFalse();
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 4)).isEmpty();
   }
 
   private static PrefetchBufferCache newCache() {

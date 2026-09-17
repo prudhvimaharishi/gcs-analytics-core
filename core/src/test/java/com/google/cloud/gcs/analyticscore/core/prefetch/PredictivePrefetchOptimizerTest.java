@@ -35,6 +35,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -74,7 +75,6 @@ class PredictivePrefetchOptimizerTest {
     telemetry = new Telemetry(ImmutableList.of(metricListener));
     channel = new FakeVectoredSeekableByteChannel(content);
     optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
-    // The access history is shared by the whole process, so a test must start from a clean one.
     cacheManager.getSchemaAccessHistory().invalidateAll();
   }
 
@@ -133,38 +133,28 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void read_firstReadOfDataPage_schedulesTheBlockAheadOfTheReader() throws IOException {
+  void read_firstReadOfDataPage_schedulesTheUnreadRemainderOfTheColumnChunk() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
 
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
 
-    assertThat(channel.getRequestedOffsets()).contains(nextBlockStart(idChunk.getDataPageOffset()));
+    assertThat(channel.getRequestedOffsets()).contains(idChunk.getDataPageOffset() + SLICE_LENGTH);
   }
 
   @Test
-  void read_firstReadOfDataPage_doesNotScheduleTheBlockBeingRead() throws IOException {
+  void read_firstReadOfDataPage_doesNotScheduleBytesAlreadyRead() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
 
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
 
-    assertThat(channel.getRequestedOffsets())
-        .doesNotContain(blockStart(idChunk.getDataPageOffset()));
-  }
-
-  @Test
-  void read_firstReadOfDataPage_schedulesBlockAlignedOffsetsOnly() throws IOException {
-    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
-
-    optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
-
-    assertThat(unalignedRequestedOffsets()).isEmpty();
+    assertThat(channel.getRequestedOffsets()).doesNotContain(idChunk.getDataPageOffset());
   }
 
   @Test
   void read_afterSpeculation_servesTheRequestedLength() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
-    long prefetchedOffset = nextBlockStart(idChunk.getDataPageOffset());
+    long prefetchedOffset = idChunk.getDataPageOffset() + SLICE_LENGTH;
 
     int servedBytes = optimizer.read(prefetchedOffset, ByteBuffer.allocate(SLICE_LENGTH), channel);
 
@@ -172,22 +162,10 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void read_spanningTwoBlocks_servesBytesFromBothBlocks() throws IOException {
-    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
-    optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
-    long unalignedOffset = nextBlockStart(idChunk.getDataPageOffset()) + BLOCK_SIZE_BYTES - 8;
-
-    ByteBuffer destination = ByteBuffer.allocate(16);
-    optimizer.read(unalignedOffset, destination, channel);
-
-    assertThat(destination.array()).isEqualTo(sliceOfContent(unalignedOffset, 16));
-  }
-
-  @Test
   void read_servedFromCache_returnsTheSameBytesAsTheObject() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
-    long prefetchedOffset = nextBlockStart(idChunk.getDataPageOffset());
+    long prefetchedOffset = idChunk.getDataPageOffset() + SLICE_LENGTH;
 
     ByteBuffer destination = ByteBuffer.allocate(SLICE_LENGTH);
     optimizer.read(prefetchedOffset, destination, channel);
@@ -201,7 +179,7 @@ class PredictivePrefetchOptimizerTest {
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
 
     optimizer.read(
-        nextBlockStart(idChunk.getDataPageOffset()), ByteBuffer.allocate(SLICE_LENGTH), channel);
+        idChunk.getDataPageOffset() + SLICE_LENGTH, ByteBuffer.allocate(SLICE_LENGTH), channel);
 
     assertThat(metricListener.getTotal(Metric.PREFETCH_CACHE_HIT)).isEqualTo(1);
   }
@@ -212,7 +190,7 @@ class PredictivePrefetchOptimizerTest {
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
 
     optimizer.read(
-        nextBlockStart(idChunk.getDataPageOffset()), ByteBuffer.allocate(SLICE_LENGTH), channel);
+        idChunk.getDataPageOffset() + SLICE_LENGTH, ByteBuffer.allocate(SLICE_LENGTH), channel);
 
     assertThat(metricListener.getTotal(Metric.PREFETCH_BYTES_CONSUMED)).isEqualTo(SLICE_LENGTH);
   }
@@ -225,28 +203,18 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void read_offsetBeyondLastRowGroup_schedulesNothing() throws IOException {
+  void read_offsetBeyondLastRowGroup_schedulesNothingWhenSchemaIsUnlearned() throws IOException {
     optimizer.read(content.length - 16, ByteBuffer.allocate(16), channel);
 
     assertThat(channel.getRequestedOffsets()).isEmpty();
   }
 
   @Test
-  void read_objectIsNotParquet_returnsZero() throws IOException {
-    channel = new FakeVectoredSeekableByteChannel(new byte[4096]);
-    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
+  void read_footerNotInGlobalCache_skipsPrefetching() throws IOException {
+    cacheManager.invalidateFooter(ITEM_ID);
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
 
-    int servedBytes = optimizer.read(0, ByteBuffer.allocate(SLICE_LENGTH), channel);
-
-    assertThat(servedBytes).isEqualTo(0);
-  }
-
-  @Test
-  void read_objectIsNotParquet_schedulesNothing() throws IOException {
-    channel = new FakeVectoredSeekableByteChannel(new byte[4096]);
-    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
-
-    optimizer.read(0, ByteBuffer.allocate(SLICE_LENGTH), channel);
+    optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
 
     assertThat(channel.getRequestedOffsets()).isEmpty();
   }
@@ -266,18 +234,19 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void read_sameBlockReadTwice_schedulesNoAdditionalBlocks() throws IOException {
+  void read_alreadyCachedRemainder_schedulesNoAdditionalDuplicateRequests() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
     int scheduledAfterFirstRead = channel.getRequestedOffsets().size();
 
-    optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
+    optimizer.read(
+        idChunk.getDataPageOffset() + SLICE_LENGTH, ByteBuffer.allocate(SLICE_LENGTH), channel);
 
     assertThat(channel.getRequestedOffsets()).hasSize(scheduledAfterFirstRead);
   }
 
   @Test
-  void read_smallSliceOfOneColumn_doesNotRecordColumnsSharingTheBlock() throws IOException {
+  void read_smallSliceOfOneColumn_doesNotRecordOtherColumns() throws IOException {
     optimizer.onClose();
     optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP, WHOLE_FILE_BLOCK_SIZE_BYTES);
     cacheManager.getSchemaAccessHistory().invalidateAll();
@@ -290,7 +259,7 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void read_rowGroupMode_schedulesTheAccessedColumnInTheNextRowGroup() throws IOException {
+  void read_rowGroupMode_schedulesTheExactColumnRangeInTheNextRowGroup() throws IOException {
     byte[] multiRowGroupContent = createMultiRowGroupContent();
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
@@ -302,21 +271,20 @@ class PredictivePrefetchOptimizerTest {
 
     optimizer.read(firstIdChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
 
-    assertThat(channel.getRequestedOffsets())
-        .contains(blockStart(secondIdChunk.getDataPageOffset()));
+    assertThat(channel.getRequestedOffsets()).contains(secondIdChunk.getStartOffset());
   }
 
   @Test
-  void read_outsideRowGroupsWithLearnedSchema_prefetchesTheFirstRowGroup() throws IOException {
+  void afterRead_outsideRowGroupsWithLearnedSchema_prefetchesTheFirstRowGroup() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
     FakeVectoredSeekableByteChannel newChannel = new FakeVectoredSeekableByteChannel(content);
     PredictivePrefetchOptimizer newOptimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
 
-    newOptimizer.read(content.length - 16, ByteBuffer.allocate(16), newChannel);
+    newOptimizer.afterRead(content.length - 16, 16, newChannel);
     newOptimizer.onClose();
 
-    assertThat(newChannel.getRequestedOffsets()).contains(blockStart(idChunk.getStartOffset()));
+    assertThat(newChannel.getRequestedOffsets()).contains(idChunk.getStartOffset());
   }
 
   @Test
@@ -330,10 +298,10 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void readVectored_rangeInsidePrefetchedBlock_returnsNoUnservedRanges() throws IOException {
+  void readVectored_rangeInsidePrefetchedChunk_returnsNoUnservedRanges() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
-    GcsObjectRange range = createRange(nextBlockStart(idChunk.getDataPageOffset()), 16);
+    GcsObjectRange range = createRange(idChunk.getDataPageOffset() + 16, 16);
 
     List<GcsObjectRange> unservedRanges =
         optimizer.readVectored(ImmutableList.of(range), ByteBuffer::allocate);
@@ -342,15 +310,15 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void readVectored_rangeInsidePrefetchedBlock_completesWithObjectBytes() throws IOException {
+  void readVectored_rangeInsidePrefetchedChunk_completesWithObjectBytes() throws Exception {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
-    long prefetchedOffset = nextBlockStart(idChunk.getDataPageOffset());
+    long prefetchedOffset = idChunk.getDataPageOffset() + 16;
     GcsObjectRange range = createRange(prefetchedOffset, 16);
 
     optimizer.readVectored(ImmutableList.of(range), ByteBuffer::allocate);
 
-    assertThat(range.getByteBufferFuture().join().array())
+    assertThat(range.getByteBufferFuture().get(5, TimeUnit.SECONDS).array())
         .isEqualTo(sliceOfContent(prefetchedOffset, 16));
   }
 
@@ -367,7 +335,7 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void readVectored_blockStillInFlight_returnsNoUnservedRanges() throws IOException {
+  void readVectored_rangeStillInFlight_returnsNoUnservedRanges() throws IOException {
     long inFlightOffset = scheduleWithoutCompleting();
     GcsObjectRange range = createRange(inFlightOffset, 16);
 
@@ -378,14 +346,14 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void readVectored_blockStillInFlight_completesOnceThePrefetchArrives() throws IOException {
+  void readVectored_rangeStillInFlight_completesOnceThePrefetchArrives() throws Exception {
     long inFlightOffset = scheduleWithoutCompleting();
     GcsObjectRange range = createRange(inFlightOffset, 16);
     optimizer.readVectored(ImmutableList.of(range), ByteBuffer::allocate);
 
     channel.completeDeferredRanges();
 
-    assertThat(range.getByteBufferFuture().join().array())
+    assertThat(range.getByteBufferFuture().get(5, TimeUnit.SECONDS).array())
         .isEqualTo(sliceOfContent(inFlightOffset, 16));
   }
 
@@ -416,7 +384,8 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void afterReadVectored_firstVectoredRequest_schedulesTheNextRowGroup() throws IOException {
+  void afterReadVectored_firstVectoredRequest_schedulesTheNextRowGroupExactRange()
+      throws IOException {
     byte[] multiRowGroupContent = createMultiRowGroupContent();
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
@@ -430,7 +399,7 @@ class PredictivePrefetchOptimizerTest {
 
     optimizer.afterReadVectored(ranges, channel);
 
-    assertThat(channel.getRequestedOffsets()).contains(blockStart(secondIdChunk.getStartOffset()));
+    assertThat(channel.getRequestedOffsets()).contains(secondIdChunk.getStartOffset());
   }
 
   @Test
@@ -455,11 +424,11 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void readVectoredWithChannel_rangeInsidePrefetchedBlock_returnsNoUnservedRanges()
+  void readVectoredWithChannel_rangeInsidePrefetchedChunk_returnsNoUnservedRanges()
       throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
-    GcsObjectRange range = createRange(nextBlockStart(idChunk.getDataPageOffset()), 16);
+    GcsObjectRange range = createRange(idChunk.getDataPageOffset() + 16, 16);
 
     List<GcsObjectRange> unservedRanges =
         optimizer.readVectored(ImmutableList.of(range), ByteBuffer::allocate, channel);
@@ -467,7 +436,36 @@ class PredictivePrefetchOptimizerTest {
     assertThat(unservedRanges).isEmpty();
   }
 
-  /** Leaves a speculative request outstanding and returns the block offset it covers. */
+  @Test
+  void afterReadVectored_skipsRowGroupOmittedDuringUpfrontDictionarySweep() throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent();
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg2DictChunk =
+        columnChunk(multiRowGroupLayout, 2, ParquetTestFiles.CATEGORY_COLUMN);
+    optimizer.read(
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(), ByteBuffer.allocate(8), channel);
+    optimizer.read(
+        rg2DictChunk.getDictionaryPageOffset().getAsLong(), ByteBuffer.allocate(8), channel);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    ParquetColumnChunk rg1DataChunk =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.ID_COLUMN);
+    ParquetColumnChunk rg2DataChunk =
+        columnChunk(multiRowGroupLayout, 2, ParquetTestFiles.ID_COLUMN);
+    List<GcsObjectRange> ranges = ImmutableList.of(rangeOverChunk(rg0DataChunk));
+    optimizer.readVectored(ranges, ByteBuffer::allocate, channel);
+
+    optimizer.afterReadVectored(ranges, channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(rg2DataChunk.getStartOffset());
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg1DataChunk.getStartOffset());
+  }
+
+  /** Leaves a speculative request outstanding and returns the start offset it covers. */
   private long scheduleWithoutCompleting() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     channel.deferVectoredCompletion();
@@ -484,14 +482,6 @@ class PredictivePrefetchOptimizerTest {
     return fileLayout.getRowGroup(rowGroupOrdinal).get().getColumnChunk(columnPath).get();
   }
 
-  private static long blockStart(long offset) {
-    return offset - (offset % BLOCK_SIZE_BYTES);
-  }
-
-  private static long nextBlockStart(long offset) {
-    return blockStart(offset) + BLOCK_SIZE_BYTES;
-  }
-
   private static GcsObjectRange createRange(long offset, int length) {
     return GcsObjectRange.builder()
         .setOffset(offset)
@@ -503,12 +493,6 @@ class PredictivePrefetchOptimizerTest {
   private static GcsObjectRange rangeOverChunk(ParquetColumnChunk chunk) {
     return createRange(
         chunk.getStartOffset(), (int) (chunk.getEndOffset() - chunk.getStartOffset()));
-  }
-
-  private List<Long> unalignedRequestedOffsets() {
-    return channel.getRequestedOffsets().stream()
-        .filter(offset -> offset % BLOCK_SIZE_BYTES != 0)
-        .collect(ImmutableList.toImmutableList());
   }
 
   private byte[] createMultiRowGroupContent() throws IOException {
@@ -525,6 +509,28 @@ class PredictivePrefetchOptimizerTest {
     return Arrays.copyOfRange(content, (int) offset, (int) offset + length);
   }
 
+  @Test
+  void read_footerCacheDisabled_skipsPrefetching() throws IOException {
+    GcsPrefetchOptions prefetchOptions =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setBlockSizeBytes(BLOCK_SIZE_BYTES)
+            .build();
+    AnalyticsCacheManager disabledFooterCacheManager =
+        new AnalyticsCacheManager(
+            GcsCacheOptions.builder().setFooterCacheEnabled(false).build(), prefetchOptions);
+    PredictivePrefetchOptimizer optimizerWithDisabledFooterCache =
+        new PredictivePrefetchOptimizer(prefetchOptions, telemetry);
+    optimizerWithDisabledFooterCache.onOpen(ITEM_ID, disabledFooterCacheManager);
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+
+    optimizerWithDisabledFooterCache.read(
+        idChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
+    optimizerWithDisabledFooterCache.onClose();
+
+    assertThat(channel.getRequestedOffsets()).isEmpty();
+  }
+
   private PredictivePrefetchOptimizer createOptimizer(PrefetchMode prefetchMode) {
     return createOptimizer(prefetchMode, BLOCK_SIZE_BYTES);
   }
@@ -536,7 +542,13 @@ class PredictivePrefetchOptimizerTest {
             .setPrefetchMode(prefetchMode)
             .setBlockSizeBytes(blockSizeBytes)
             .build();
-    cacheManager = new AnalyticsCacheManager(GcsCacheOptions.builder().build(), prefetchOptions);
+    cacheManager =
+        new AnalyticsCacheManager(
+            GcsCacheOptions.builder().setFooterCacheEnabled(true).build(), prefetchOptions);
+    if (channel != null && channel.size() > 0) {
+      cacheManager.putFooter(
+          ITEM_ID, ByteBuffer.wrap(channel.sliceContent(0, (int) channel.size())));
+    }
     PredictivePrefetchOptimizer createdOptimizer =
         new PredictivePrefetchOptimizer(prefetchOptions, telemetry);
     createdOptimizer.onOpen(ITEM_ID, cacheManager);

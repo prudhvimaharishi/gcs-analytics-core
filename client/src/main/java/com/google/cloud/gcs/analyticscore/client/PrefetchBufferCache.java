@@ -21,168 +21,222 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.google.auto.value.AutoValue;
 import java.nio.ByteBuffer;
-import java.util.Set;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Holds speculatively fetched bytes as fixed-size blocks addressed by absolute file position.
+ * Holds speculatively fetched bytes as exact byte ranges addressed by absolute file offset.
  *
- * <p>The object is partitioned into a grid of {@code blockSizeBytes} blocks, so the block holding a
- * position is pure arithmetic rather than a property of the file format. Callers therefore never
- * need to know where a block begins, and bytes fetched for one purpose are reusable by any later
- * read that lands in the same block.
+ * <p>Each cached entry is encapsulated in a {@link CachedRange} value object holding a {@link
+ * CompletableFuture}, unifying in-flight background downloads and resident buffers under a single
+ * representation.
  *
  * <p>Entries are bounded by total bytes and expire once they have been idle for the configured
- * time, because a block nobody comes back to is unlikely to be wanted at all. Retention is counted
- * from the last read rather than from the download, so a block stays resident while the engine is
- * still working through it however long that takes.
+ * time.
  *
  * <p>This class is thread-safe.
  */
 public final class PrefetchBufferCache {
 
-  private final Cache<BlockKey, ByteBuffer> blocks;
-  private final Set<BlockKey> claimedBlocks = ConcurrentHashMap.newKeySet();
+  private static final int DEFAULT_BLOCK_SIZE_BYTES = 4 * 1024 * 1024;
+
+  private final Cache<RangeKey, CachedRange> ranges;
+  private final ConcurrentHashMap<GcsItemId, ConcurrentSkipListSet<Long>> offsetsByItem =
+      new ConcurrentHashMap<>();
   private final int blockSizeBytes;
+
+  /**
+   * Creates a cache storing exact byte ranges.
+   *
+   * @param maxSizeBytes the maximum total size of retained buffers
+   * @param ttlSeconds how long a range is retained after it was last read or written
+   */
+  public PrefetchBufferCache(long maxSizeBytes, long ttlSeconds) {
+    this(maxSizeBytes, ttlSeconds, DEFAULT_BLOCK_SIZE_BYTES);
+  }
 
   /**
    * Creates a cache.
    *
-   * @param maxSizeBytes the maximum total size of retained blocks
-   * @param ttlSeconds how long a block is retained after it was last read or written
-   * @param blockSizeBytes the fixed size of a block
+   * @param maxSizeBytes the maximum total size of retained buffers
+   * @param ttlSeconds how long a range is retained after it was last read or written
+   * @param blockSizeBytes nominal block size preserved for configuration compatibility
    */
   public PrefetchBufferCache(long maxSizeBytes, long ttlSeconds, int blockSizeBytes) {
     checkArgument(maxSizeBytes > 0, "maxSizeBytes must be positive");
     checkArgument(ttlSeconds > 0, "ttlSeconds must be positive");
     checkArgument(blockSizeBytes > 0, "blockSizeBytes must be positive");
     this.blockSizeBytes = blockSizeBytes;
-    this.blocks =
+    this.ranges =
         Caffeine.newBuilder()
             .maximumWeight(maxSizeBytes)
-            .weigher((BlockKey key, ByteBuffer value) -> value.remaining())
+            .weigher((RangeKey key, CachedRange value) -> value.getLength())
             .expireAfterAccess(ttlSeconds, TimeUnit.SECONDS)
+            .removalListener(
+                (RangeKey key, CachedRange value, RemovalCause cause) -> {
+                  if (key != null && cause != RemovalCause.REPLACED) {
+                    ConcurrentSkipListSet<Long> itemOffsets = offsetsByItem.get(key.getItemId());
+                    if (itemOffsets != null) {
+                      itemOffsets.remove(key.getStartOffset());
+                    }
+                  }
+                })
             .build();
   }
 
-  /** Returns the fixed size of a block in bytes. */
+  /** Returns the configured nominal block size in bytes. */
   public int getBlockSizeBytes() {
     return blockSizeBytes;
   }
 
-  /** Returns the position of the first byte of the block containing {@code position}. */
-  public long alignDown(long position) {
-    return toBlockIndex(position) * (long) blockSizeBytes;
+  /**
+   * Registers an in-flight or completed range {@code [startOffset, startOffset + length)} in the
+   * cache if no existing entry already covers it.
+   *
+   * @return {@code true} if the range was newly registered, or {@code false} if an existing entry
+   *     (resident or in-flight) already covers the range
+   */
+  public boolean registerRange(
+      GcsItemId itemId, long startOffset, int length, CompletableFuture<ByteBuffer> future) {
+    checkNotNull(itemId, "itemId cannot be null");
+    checkNotNull(future, "future cannot be null");
+    checkArgument(startOffset >= 0, "startOffset %s must be non-negative", startOffset);
+    checkArgument(length > 0, "length %s must be positive", length);
+    ConcurrentSkipListSet<Long> itemOffsets =
+        offsetsByItem.computeIfAbsent(itemId, unused -> new ConcurrentSkipListSet<>());
+    synchronized (itemOffsets) {
+      if (getRangeCovering(itemId, startOffset, length).isPresent()) {
+        return false;
+      }
+      CachedRange cachedRange = CachedRange.create(startOffset, startOffset + length, future);
+      RangeKey key = RangeKey.create(itemId, startOffset);
+      itemOffsets.add(startOffset);
+      ranges.put(key, cachedRange);
+      CompletableFuture<ByteBuffer> unused =
+          future.whenComplete(
+              (buffer, error) -> {
+                if (error != null || buffer == null) {
+                  removeRange(itemId, startOffset);
+                }
+              });
+      return true;
+    }
+  }
+
+  /** Stores an already-downloaded byte buffer starting at {@code rangeStart}. */
+  public void putRange(GcsItemId itemId, long rangeStart, ByteBuffer data) {
+    checkNotNull(itemId, "itemId cannot be null");
+    checkNotNull(data, "data cannot be null");
+    checkArgument(rangeStart >= 0, "rangeStart %s must be non-negative", rangeStart);
+    if (!data.hasRemaining()) {
+      return;
+    }
+    ByteBuffer readOnly = data.asReadOnlyBuffer();
+    int length = readOnly.remaining();
+    ConcurrentSkipListSet<Long> itemOffsets =
+        offsetsByItem.computeIfAbsent(itemId, unused -> new ConcurrentSkipListSet<>());
+    synchronized (itemOffsets) {
+      CachedRange cachedRange =
+          CachedRange.create(
+              rangeStart, rangeStart + length, CompletableFuture.completedFuture(readOnly));
+      itemOffsets.add(rangeStart);
+      ranges.put(RangeKey.create(itemId, rangeStart), cachedRange);
+    }
   }
 
   /**
-   * Copies bytes from the block containing {@code position} into {@code dst} and returns the number
-   * of bytes copied, or {@code 0} if that block is not resident.
-   *
-   * <p>A single call never crosses a block boundary. Callers reading more than one block invoke
-   * this in a loop, advancing {@code position} by the returned count, so a read is served for as
-   * long as consecutive blocks remain resident.
+   * Returns the {@link CachedRange} (in-flight or resident) that completely covers {@code [offset,
+   * offset + length)}, or {@code Optional.empty()} if none exists.
+   */
+  public Optional<CachedRange> getRangeCovering(GcsItemId itemId, long offset, int length) {
+    checkNotNull(itemId, "itemId cannot be null");
+    if (length < 0) {
+      return Optional.empty();
+    }
+    return findRange(itemId, offset).filter(range -> range.contains(offset, length));
+  }
+
+  /**
+   * Copies bytes covering {@code position} into {@code dst} (waiting if the covering range is
+   * currently in flight) and returns the number of bytes copied, or {@code 0} if no cached range
+   * covers {@code position}.
    */
   public int copyInto(GcsItemId itemId, long position, ByteBuffer dst) {
-    ByteBuffer cached = blocks.getIfPresent(BlockKey.create(itemId, toBlockIndex(position)));
-    if (cached == null) {
-      return 0;
+    checkNotNull(itemId, "itemId cannot be null");
+    checkNotNull(dst, "dst cannot be null");
+    int totalCopied = 0;
+    while (dst.hasRemaining()) {
+      Optional<CachedRange> covering = getRangeCovering(itemId, position + totalCopied, 1);
+      if (!covering.isPresent()) {
+        break;
+      }
+      int copied = covering.get().copyInto(position + totalCopied, dst);
+      if (copied == 0) {
+        break;
+      }
+      totalCopied += copied;
     }
-    int offsetInBlock = (int) (position - alignDown(position));
-    if (offsetInBlock >= cached.remaining()) {
-      return 0;
-    }
-    ByteBuffer view = cached.duplicate();
-    view.position(view.position() + offsetInBlock);
-    int copiedBytes = Math.min(dst.remaining(), view.remaining());
-    view.limit(view.position() + copiedBytes);
-    dst.put(view);
-    return copiedBytes;
+    return totalCopied;
   }
 
-  /**
-   * Stores a block-aligned range, splitting it into one entry per block so that a later read
-   * resolves any part of it.
-   *
-   * <p>The data is retained as read-only views rather than copies, so the caller must not mutate
-   * {@code data} afterwards. Avoiding the copy matters because ranges can be tens of megabytes and
-   * the fetching code allocates a fresh buffer per range anyway.
-   *
-   * @throws IllegalArgumentException if {@code rangeStart} is not on a block boundary
-   */
-  public void putRange(GcsItemId itemId, long rangeStart, ByteBuffer data) {
-    checkNotNull(data, "data cannot be null");
-    checkArgument(
-        rangeStart == alignDown(rangeStart),
-        "rangeStart %s must be aligned to blockSizeBytes %s",
-        rangeStart,
-        blockSizeBytes);
-    ByteBuffer source = data.asReadOnlyBuffer();
-    long blockStart = rangeStart;
-    while (source.hasRemaining()) {
-      int length = Math.min(blockSizeBytes, source.remaining());
-      ByteBuffer block = source.slice();
-      block.limit(length);
-      blocks.put(BlockKey.create(itemId, toBlockIndex(blockStart)), block);
-      source.position(source.position() + length);
-      blockStart += length;
-    }
-  }
-
-  /** Returns whether the block containing {@code position} is resident. */
+  /** Returns whether a completed resident range covers {@code position}. */
   public boolean isCached(GcsItemId itemId, long position) {
-    return blocks.getIfPresent(BlockKey.create(itemId, toBlockIndex(position))) != null;
+    return isRangeCached(itemId, position, 1);
   }
 
-  /**
-   * Attempts to take ownership of fetching the block containing {@code position}.
-   *
-   * <p>Returns {@code true} for exactly one caller per block until {@link #releaseClaim} is
-   * invoked. A residency check cannot serve this purpose on its own, because a block stays absent
-   * for the whole window between issuing its request and the bytes arriving; without a claim every
-   * read in that window would issue a duplicate fetch.
-   *
-   * <p>Claims are held here rather than per stream so that two streams reading the same object do
-   * not both fetch the same block.
-   */
-  public boolean tryClaim(GcsItemId itemId, long position) {
-    return claimedBlocks.add(BlockKey.create(itemId, toBlockIndex(position)));
+  /** Returns whether the entire byte range {@code [offset, offset + length)} is resident. */
+  public boolean isRangeCached(GcsItemId itemId, long offset, int length) {
+    return getRangeCovering(itemId, offset, length).map(CachedRange::isDone).orElse(false);
   }
 
-  /** Releases a claim taken by {@link #tryClaim}. */
-  public void releaseClaim(GcsItemId itemId, long position) {
-    claimedBlocks.remove(BlockKey.create(itemId, toBlockIndex(position)));
-  }
-
-  /** Returns whether a fetch for the block containing {@code position} is currently claimed. */
-  public boolean isClaimed(GcsItemId itemId, long position) {
-    return claimedBlocks.contains(BlockKey.create(itemId, toBlockIndex(position)));
-  }
-
-  /** Discards all cached blocks and claims. */
+  /** Discards all cached ranges. */
   public void invalidateAll() {
-    blocks.invalidateAll();
-    claimedBlocks.clear();
+    ranges.invalidateAll();
+    offsetsByItem.clear();
   }
 
-  private long toBlockIndex(long position) {
-    return position / blockSizeBytes;
+  private Optional<CachedRange> findRange(GcsItemId itemId, long offset) {
+    ConcurrentSkipListSet<Long> itemOffsets = offsetsByItem.get(itemId);
+    if (itemOffsets == null) {
+      return Optional.empty();
+    }
+    Long startOffset = itemOffsets.floor(offset);
+    if (startOffset == null) {
+      return Optional.empty();
+    }
+    CachedRange cached = ranges.getIfPresent(RangeKey.create(itemId, startOffset));
+    if (cached == null) {
+      itemOffsets.remove(startOffset);
+      return Optional.empty();
+    }
+    return Optional.of(cached);
   }
 
-  /** Identifies a cached block by object and block index. */
+  private void removeRange(GcsItemId itemId, long startOffset) {
+    ranges.invalidate(RangeKey.create(itemId, startOffset));
+    ConcurrentSkipListSet<Long> itemOffsets = offsetsByItem.get(itemId);
+    if (itemOffsets != null) {
+      itemOffsets.remove(startOffset);
+    }
+  }
+
+  /** Identifies a cached range by object and start offset. */
   @AutoValue
-  abstract static class BlockKey {
+  abstract static class RangeKey {
 
     abstract GcsItemId getItemId();
 
-    abstract long getBlockIndex();
+    abstract long getStartOffset();
 
-    static BlockKey create(GcsItemId itemId, long blockIndex) {
+    static RangeKey create(GcsItemId itemId, long startOffset) {
       checkNotNull(itemId, "itemId cannot be null");
-      return new AutoValue_PrefetchBufferCache_BlockKey(itemId, blockIndex);
+      return new AutoValue_PrefetchBufferCache_RangeKey(itemId, startOffset);
     }
   }
 }

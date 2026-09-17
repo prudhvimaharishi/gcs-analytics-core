@@ -136,7 +136,25 @@ final class ParquetFooterParser {
     if (hasDictionaryPage) {
       parsedChunk.setDictionaryPageOffset(dictionaryPageOffset);
     }
+    extractStatistics(metaData).ifPresent(parsedChunk::setStatistics);
     return Optional.of(parsedChunk.build());
+  }
+
+  private static Optional<ParquetColumnStatistics> extractStatistics(ColumnMetaData metaData) {
+    if (!metaData.isSetStatistics() || !metaData.isSetType()) {
+      return Optional.empty();
+    }
+    org.apache.parquet.format.Statistics stats = metaData.getStatistics();
+    if (stats.isSetMin_value() && stats.isSetMax_value()) {
+      return Optional.of(
+          ParquetColumnStatistics.of(
+              metaData.getType(), stats.getMin_value(), stats.getMax_value()));
+    }
+    if (stats.isSetMin() && stats.isSetMax()) {
+      return Optional.of(
+          ParquetColumnStatistics.of(metaData.getType(), stats.getMin(), stats.getMax()));
+    }
+    return Optional.empty();
   }
 
   /**

@@ -47,6 +47,9 @@ abstract class ParquetColumnChunk {
   /** Returns the offset of the dictionary page, if this chunk has one. */
   abstract OptionalLong getDictionaryPageOffset();
 
+  /** Returns the decoded min/max statistics for this chunk, if recorded in the footer. */
+  abstract Optional<ParquetColumnStatistics> getStatistics();
+
   static Builder builder() {
     return new AutoValue_ParquetColumnChunk.Builder();
   }
@@ -104,6 +107,8 @@ abstract class ParquetColumnChunk {
     abstract Builder setDataPageOffset(long dataPageOffset);
 
     abstract Builder setDictionaryPageOffset(long dictionaryPageOffset);
+
+    abstract Builder setStatistics(ParquetColumnStatistics statistics);
 
     abstract ParquetColumnChunk build();
   }

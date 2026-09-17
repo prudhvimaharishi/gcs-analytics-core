@@ -43,6 +43,7 @@ public class PredictivePrefetchBenchmark {
     public void projectedColumnsLargeFile(PredictivePrefetchState state) throws IOException {
         GcsFileSystemOptions gcsFileSystemOptions = GcsFileSystemOptions.createFromOptions(
                 Map.of(PREFETCH_MODE_KEY, state.prefetchMode,
+                        "gcs.analytics-core.footer.cache.enabled", "true",
                         "gcs.analytics-core.small-file.footer.prefetch.size-bytes", "102400",
                         "gcs.analytics-core.large-file.footer.prefetch.size-bytes", "1048576"), "gcs.");
         String requestedSchema = "message requested_schema {\n"

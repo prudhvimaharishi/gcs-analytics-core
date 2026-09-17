@@ -52,6 +52,13 @@ public interface FormatOptimizer {
   int read(long position, ByteBuffer dst, VectoredSeekableByteChannel delegate) throws IOException;
 
   /**
+   * Invoked after a read operation completes, whether served by an optimizer or the delegate
+   * channel.
+   */
+  default void afterRead(long position, int bytesRead, VectoredSeekableByteChannel delegate)
+      throws IOException {}
+
+  /**
    * Intercepts vectored read operations.
    *
    * @param ranges The list of ranges requested.

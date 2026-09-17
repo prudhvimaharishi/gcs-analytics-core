@@ -25,6 +25,7 @@ import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConsta
 import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Range;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
@@ -37,9 +38,9 @@ class PrefetchSchedulerTest {
   private static final GcsItemId ITEM_ID =
       GcsItemId.builder().setBucketName("bucket").setObjectName("data.parquet").build();
   private static final int CONTENT_LENGTH = 512;
-  private static final int BLOCK_SIZE_BYTES = 32;
-  private static final int MAX_CONCURRENT_BLOCKS = 4;
-  private static final long BLOCK_OFFSET = 64;
+  private static final int RANGE_LENGTH = 32;
+  private static final int MAX_CONCURRENT_RANGES = 4;
+  private static final long RANGE_OFFSET = 64;
 
   private FakeVectoredSeekableByteChannel channel;
   private PrefetchBufferCache bufferCache;
@@ -50,10 +51,10 @@ class PrefetchSchedulerTest {
   @BeforeEach
   void createScheduler() {
     channel = new FakeVectoredSeekableByteChannel(createContent());
-    bufferCache = new PrefetchBufferCache(CONTENT_LENGTH, 60, BLOCK_SIZE_BYTES);
+    bufferCache = new PrefetchBufferCache(CONTENT_LENGTH, 60, RANGE_LENGTH);
     metricListener = new RecordingOperationListener();
     telemetry = new Telemetry(ImmutableList.of(metricListener));
-    scheduler = new PrefetchScheduler(bufferCache, telemetry, MAX_CONCURRENT_BLOCKS);
+    scheduler = new PrefetchScheduler(bufferCache, telemetry, MAX_CONCURRENT_RANGES);
   }
 
   @AfterEach
@@ -64,175 +65,186 @@ class PrefetchSchedulerTest {
   }
 
   @Test
-  void schedule_uncachedBlock_requestsTheBlockRange() {
-    schedule(BLOCK_OFFSET);
+  void schedule_uncachedRange_requestsTheRange() {
+    schedule(RANGE_OFFSET);
 
-    assertThat(channel.getRequestedOffsets()).containsExactly(BLOCK_OFFSET);
+    assertThat(channel.getRequestedOffsets()).containsExactly(RANGE_OFFSET);
   }
 
   @Test
-  void schedule_uncachedBlock_publishesBlockContentIntoCache() {
-    schedule(BLOCK_OFFSET);
+  void schedule_uncachedRange_publishesContentIntoCache() {
+    schedule(RANGE_OFFSET);
 
-    assertThat(readCachedBlock(BLOCK_OFFSET))
-        .isEqualTo(channel.sliceContent((int) BLOCK_OFFSET, BLOCK_SIZE_BYTES));
+    assertThat(readCachedRange(RANGE_OFFSET, RANGE_LENGTH))
+        .isEqualTo(channel.sliceContent(RANGE_OFFSET, RANGE_LENGTH));
   }
 
   @Test
-  void schedule_uncachedBlock_recordsBytesLoaded() {
-    schedule(BLOCK_OFFSET);
+  void schedule_uncachedRange_recordsBytesLoaded() {
+    schedule(RANGE_OFFSET);
 
-    assertThat(metricListener.getTotal(Metric.PREFETCH_BYTES_LOADED)).isEqualTo(BLOCK_SIZE_BYTES);
+    assertThat(metricListener.getTotal(Metric.PREFETCH_BYTES_LOADED)).isEqualTo(RANGE_LENGTH);
   }
 
   @Test
-  void schedule_completedBlock_releasesTheClaim() {
-    schedule(BLOCK_OFFSET);
+  void schedule_completedRange_isMarkedDoneInCache() {
+    schedule(RANGE_OFFSET);
 
-    assertThat(bufferCache.isClaimed(ITEM_ID, BLOCK_OFFSET)).isFalse();
+    assertThat(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH).get().isDone())
+        .isTrue();
   }
 
   @Test
-  void schedule_consecutiveBlocks_requestsEachBlockAsItsOwnRange() {
-    schedule(0, BLOCK_SIZE_BYTES);
+  void schedule_consecutiveRanges_requestsEachRangeAsItsOwnRange() {
+    schedule(0, RANGE_LENGTH);
 
-    assertThat(channel.getRequestedOffsets())
-        .containsExactly(0L, (long) BLOCK_SIZE_BYTES)
-        .inOrder();
+    assertThat(channel.getRequestedOffsets()).containsExactly(0L, (long) RANGE_LENGTH).inOrder();
   }
 
   @Test
-  void schedule_blockAlreadyCached_doesNotRequestTheRange() {
+  void schedule_rangeAlreadyCached_doesNotRequestTheRange() {
     bufferCache.putRange(
-        ITEM_ID,
-        BLOCK_OFFSET,
-        ByteBuffer.wrap(channel.sliceContent((int) BLOCK_OFFSET, BLOCK_SIZE_BYTES)));
+        ITEM_ID, RANGE_OFFSET, ByteBuffer.wrap(channel.sliceContent(RANGE_OFFSET, RANGE_LENGTH)));
 
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
     assertThat(channel.getRequestedOffsets()).isEmpty();
   }
 
   @Test
-  void schedule_blockAlreadyClaimed_doesNotRequestTheRange() {
-    bufferCache.tryClaim(ITEM_ID, BLOCK_OFFSET);
+  void schedule_rangeAlreadyInFlight_doesNotRequestTheRange() {
+    bufferCache.registerRange(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH, new CompletableFuture<>());
 
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
     assertThat(channel.getRequestedOffsets()).isEmpty();
   }
 
   @Test
-  void schedule_sameBlockTwice_requestsTheRangeOnlyOnce() {
+  void schedule_sameRangeTwice_requestsTheRangeOnlyOnce() {
     channel.deferVectoredCompletion();
 
-    schedule(BLOCK_OFFSET);
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
+    schedule(RANGE_OFFSET);
 
-    assertThat(channel.getRequestedOffsets()).containsExactly(BLOCK_OFFSET);
+    assertThat(channel.getRequestedOffsets()).containsExactly(RANGE_OFFSET);
   }
 
   @Test
-  void schedule_blockStartingBeyondFileSize_doesNotRequestTheRange() {
-    scheduler.schedule(channel, ITEM_ID, ImmutableList.of((long) CONTENT_LENGTH), CONTENT_LENGTH);
+  void schedule_rangeStartingBeyondFileSize_doesNotRequestTheRange() {
+    scheduler.schedule(
+        channel,
+        ITEM_ID,
+        ImmutableList.of(
+            Range.closedOpen((long) CONTENT_LENGTH, (long) CONTENT_LENGTH + RANGE_LENGTH)),
+        CONTENT_LENGTH);
 
     assertThat(channel.getRequestedOffsets()).isEmpty();
   }
 
   @Test
-  void schedule_finalBlockShorterThanBlockSize_requestsOnlyTheRemainingBytes() {
-    scheduler.schedule(channel, ITEM_ID, ImmutableList.of(BLOCK_OFFSET), BLOCK_OFFSET + 8);
+  void schedule_finalRangeExtendingBeyondFileSize_requestsOnlyTheRemainingBytes() {
+    scheduler.schedule(
+        channel,
+        ITEM_ID,
+        ImmutableList.of(Range.closedOpen(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH)),
+        RANGE_OFFSET + 8);
 
-    assertThat(readCachedBlock(BLOCK_OFFSET))
-        .isEqualTo(channel.sliceContent((int) BLOCK_OFFSET, 8));
+    assertThat(readCachedRange(RANGE_OFFSET, 8)).isEqualTo(channel.sliceContent(RANGE_OFFSET, 8));
   }
 
   @Test
-  void schedule_emptyBlockList_doesNotRequestAnyRange() {
+  void schedule_emptyRangeList_doesNotRequestAnyRange() {
     scheduler.schedule(channel, ITEM_ID, ImmutableList.of(), CONTENT_LENGTH);
 
     assertThat(channel.getRequestedOffsets()).isEmpty();
   }
 
   @Test
-  void schedule_moreBlocksThanConcurrencyLimit_requestsOnlyUpToTheLimit() {
+  void schedule_moreRangesThanConcurrencyLimit_requestsOnlyUpToTheLimit() {
     schedule(0, 32, 64, 96, 128, 160);
 
     assertThat(channel.getRequestedOffsets()).containsExactly(0L, 32L, 64L, 96L).inOrder();
   }
 
   @Test
-  void schedule_blockBeyondConcurrencyLimit_isNotClaimed() {
+  void schedule_rangeBeyondConcurrencyLimit_isNotRegisteredInCache() {
     schedule(0, 32, 64, 96, 128);
 
-    assertThat(bufferCache.isClaimed(ITEM_ID, 128)).isFalse();
+    assertThat(bufferCache.getRangeCovering(ITEM_ID, 128, RANGE_LENGTH)).isEmpty();
   }
 
   @Test
-  void schedule_channelFails_releasesTheClaim() {
+  void schedule_channelFails_removesRangeFromCache() {
     channel.failVectoredReadsWith(new IOException("vectored read rejected"));
 
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
-    assertThat(bufferCache.isClaimed(ITEM_ID, BLOCK_OFFSET)).isFalse();
+    assertThat(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH)).isEmpty();
   }
 
   @Test
-  void schedule_channelFails_leavesTheBlockUncached() {
+  void schedule_channelFails_leavesTheRangeUncached() {
     channel.failVectoredReadsWith(new IOException("vectored read rejected"));
 
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
-    assertThat(bufferCache.isCached(ITEM_ID, BLOCK_OFFSET)).isFalse();
+    assertThat(bufferCache.isCached(ITEM_ID, RANGE_OFFSET)).isFalse();
   }
 
   @Test
   void schedule_channelFails_clearsInFlightTracking() {
     channel.failVectoredReadsWith(new IOException("vectored read rejected"));
 
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
     assertThat(scheduler.getInFlightOffsets()).isEmpty();
   }
 
   @Test
-  void schedule_requestNotSettled_tracksTheBlockAsInFlight() {
+  void schedule_requestNotSettled_tracksTheRangeAsInFlight() {
     channel.deferVectoredCompletion();
 
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
-    assertThat(scheduler.getInFlightOffsets()).containsExactly(BLOCK_OFFSET);
+    assertThat(scheduler.getInFlightOffsets()).containsExactly(RANGE_OFFSET);
   }
 
   @Test
-  void getPublishedFuture_requestNotSettled_returnsAPendingStage() {
+  void schedule_requestNotSettled_registersPendingRangeInCache() {
     channel.deferVectoredCompletion();
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
-    assertThat(scheduler.getPublishedFuture(BLOCK_OFFSET).isDone()).isFalse();
+    assertThat(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH).get().isDone())
+        .isFalse();
   }
 
   @Test
-  void getPublishedFuture_settledRequest_hasAlreadyCachedTheBlock() {
+  void schedule_positionInsideInFlightRange_returnsTheSameCachedRange() {
     channel.deferVectoredCompletion();
-    schedule(BLOCK_OFFSET);
-    CompletableFuture<ByteBuffer> published = scheduler.getPublishedFuture(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
+
+    assertThat(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET + 10, 10))
+        .isEqualTo(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH));
+  }
+
+  @Test
+  void schedule_settledRequest_completesTheCachedRangeFuture() {
+    channel.deferVectoredCompletion();
+    schedule(RANGE_OFFSET);
+    CompletableFuture<ByteBuffer> future =
+        bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH).get().getFuture();
 
     channel.completeDeferredRanges();
 
-    assertThat(published.thenApply(data -> bufferCache.isCached(ITEM_ID, BLOCK_OFFSET)).join())
+    assertThat(future.thenApply(data -> bufferCache.isCached(ITEM_ID, RANGE_OFFSET)).join())
         .isTrue();
-  }
-
-  @Test
-  void getPublishedFuture_blockNotRequested_returnsNull() {
-    assertThat(scheduler.getPublishedFuture(BLOCK_OFFSET)).isNull();
   }
 
   @Test
   void cancelAll_withPendingRequest_clearsInFlightTracking() {
     channel.deferVectoredCompletion();
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
     scheduler.cancelAll();
 
@@ -242,7 +254,7 @@ class PrefetchSchedulerTest {
   @Test
   void close_withPendingRequest_clearsInFlightTracking() {
     channel.deferVectoredCompletion();
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
     scheduler.close();
 
@@ -250,13 +262,13 @@ class PrefetchSchedulerTest {
   }
 
   @Test
-  void cancelAll_withPendingRequest_leavesTheBlockUncached() {
+  void cancelAll_withPendingRequest_leavesTheRangeUncached() {
     channel.deferVectoredCompletion();
-    schedule(BLOCK_OFFSET);
+    schedule(RANGE_OFFSET);
 
     scheduler.cancelAll();
 
-    assertThat(bufferCache.isCached(ITEM_ID, BLOCK_OFFSET)).isFalse();
+    assertThat(bufferCache.isCached(ITEM_ID, RANGE_OFFSET)).isFalse();
   }
 
   private static byte[] createContent() {
@@ -267,17 +279,17 @@ class PrefetchSchedulerTest {
     return content;
   }
 
-  private void schedule(long... blockOffsets) {
-    ImmutableList.Builder<Long> offsets = ImmutableList.builder();
-    for (long blockOffset : blockOffsets) {
-      offsets.add(blockOffset);
+  private void schedule(long... rangeOffsets) {
+    ImmutableList.Builder<Range<Long>> ranges = ImmutableList.builder();
+    for (long offset : rangeOffsets) {
+      ranges.add(Range.closedOpen(offset, offset + RANGE_LENGTH));
     }
-    scheduler.schedule(channel, ITEM_ID, offsets.build(), CONTENT_LENGTH);
+    scheduler.schedule(channel, ITEM_ID, ranges.build(), CONTENT_LENGTH);
   }
 
-  private byte[] readCachedBlock(long blockOffset) {
-    ByteBuffer destination = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
-    int copiedBytes = bufferCache.copyInto(ITEM_ID, blockOffset, destination);
+  private byte[] readCachedRange(long offset, int length) {
+    ByteBuffer destination = ByteBuffer.allocate(length);
+    int copiedBytes = bufferCache.copyInto(ITEM_ID, offset, destination);
     byte[] bytes = new byte[copiedBytes];
     destination.flip();
     destination.get(bytes);
