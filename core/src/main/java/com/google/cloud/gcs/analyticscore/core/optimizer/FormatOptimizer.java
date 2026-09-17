@@ -84,6 +84,20 @@ public interface FormatOptimizer {
   }
 
   /**
+   * Invoked once a streaming read has been served, whether it came from the optimizer or from the
+   * channel.
+   *
+   * <p>Speculative work belongs here rather than in {@link #read(long, ByteBuffer,
+   * VectoredSeekableByteChannel)} for the same reason it belongs in {@link #afterReadVectored(List,
+   * VectoredSeekableByteChannel)}: a prefetch queued ahead of the caller's own read competes with
+   * it for the same thread pool and delays the bytes the engine is blocked on.
+   *
+   * @param position the position the served read started at
+   * @param delegate the channel serving reads this optimizer does not satisfy
+   */
+  default void afterRead(long position, VectoredSeekableByteChannel delegate) throws IOException {}
+
+  /**
    * Invoked once the ranges of a vectored request have been dispatched, whether they were served
    * from the optimizer or handed to the channel.
    *

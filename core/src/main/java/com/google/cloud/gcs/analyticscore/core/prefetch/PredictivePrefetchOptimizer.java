@@ -100,7 +100,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private long[] rowGroupEndOffsets = new long[0];
   private int currentRowGroupOrdinal = -1;
   private int pendingSpeculationRowGroupOrdinal = -1;
-  private final Set<Long> accessedBlockOffsets = new HashSet<>();
+  private final Set<Long> speculatedBlockOffsets = new HashSet<>();
 
   public PredictivePrefetchOptimizer(GcsPrefetchOptions prefetchOptions, Telemetry telemetry) {
     this.prefetchOptions = checkNotNull(prefetchOptions, "prefetchOptions cannot be null");
@@ -143,9 +143,37 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
     ensureLayoutLoaded(source);
     if (layout != null) {
-      observeAccess(source, position, requestedLength);
+      recordColumnsForRead(position, requestedLength);
     }
     return servedBytes;
+  }
+
+  /**
+   * Fetches what the read that just completed implies about the bytes after it.
+   *
+   * <p>This runs once the read has been served rather than while serving it, because a speculative
+   * request issued first would sit ahead of the caller's own read in the same thread pool.
+   */
+  @Override
+  public void afterRead(long position, VectoredSeekableByteChannel source) {
+    if (layout == null) {
+      return;
+    }
+    int rowGroupOrdinal = findRowGroupOrdinal(position);
+    if (rowGroupOrdinal < 0) {
+      prefetchFirstRowGroupOnce(source);
+      return;
+    }
+    firstRowGroupPrefetched = true;
+    if (rowGroupOrdinal != currentRowGroupOrdinal) {
+      currentRowGroupOrdinal = rowGroupOrdinal;
+      speculatedBlockOffsets.clear();
+    }
+    long currentBlockOffset = bufferCache.alignDown(position);
+    if (!speculatedBlockOffsets.add(currentBlockOffset)) {
+      return;
+    }
+    speculateRowGroups(source, rowGroupOrdinal, currentBlockOffset);
   }
 
   @Override
@@ -365,31 +393,17 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   }
 
   /**
-   * Records the columns this read touched and, the first time a block is entered, speculates ahead
-   * of it.
+   * Records the columns this read touched.
    *
-   * <p>Recording uses the requested range so that a column sharing a block with columns the query
-   * ignores does not drag them along, while speculation stays keyed to blocks because that is the
-   * unit the cache stores.
+   * <p>Recording uses the requested range rather than the block the read lands in, so that a column
+   * sharing a block with columns the query ignores does not drag them along.
    */
-  private void observeAccess(
-      VectoredSeekableByteChannel source, long position, int requestedLength) {
+  private void recordColumnsForRead(long position, int requestedLength) {
     int rowGroupOrdinal = findRowGroupOrdinal(position);
     if (rowGroupOrdinal < 0) {
-      prefetchFirstRowGroupOnce(source);
       return;
-    }
-    firstRowGroupPrefetched = true;
-    if (rowGroupOrdinal != currentRowGroupOrdinal) {
-      currentRowGroupOrdinal = rowGroupOrdinal;
-      accessedBlockOffsets.clear();
     }
     recordColumnsInRange(rowGroupOrdinal, position, position + requestedLength);
-    long currentBlockOffset = bufferCache.alignDown(position);
-    if (!accessedBlockOffsets.add(currentBlockOffset)) {
-      return;
-    }
-    speculateRowGroups(source, rowGroupOrdinal, currentBlockOffset);
   }
 
   /** Records the columns covered by {@code ranges} and notes the row group to speculate next. */

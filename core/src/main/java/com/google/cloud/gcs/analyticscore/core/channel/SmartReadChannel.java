@@ -95,20 +95,42 @@ public class SmartReadChannel implements VectoredSeekableByteChannel {
   @Override
   public int read(ByteBuffer dst) throws IOException {
     long position = delegate.position();
+    int bytesRead = readFromOptimizers(position, dst);
+    if (bytesRead > 0) {
+      delegate.advanceAfterExternalRead(position + bytesRead);
+    } else if (bytesRead == 0) {
+      bytesRead = delegate.read(dst);
+    }
+    if (bytesRead > 0) {
+      notifyAfterRead(position);
+    }
+    return bytesRead;
+  }
+
+  /**
+   * Returns the result of the first optimizer that served the read, or {@code 0} when none of them
+   * did.
+   *
+   * <p>An optimizer that declines the read may still have moved the channel while looking, so the
+   * position is restored before the next one is offered it.
+   */
+  private int readFromOptimizers(long position, ByteBuffer dst) throws IOException {
     for (FormatOptimizer optimizer : optimizers) {
       int bytesRead = optimizer.read(position, dst, delegate);
-      if (bytesRead > 0) {
-        delegate.advanceAfterExternalRead(position + bytesRead);
-        return bytesRead;
-      }
-      if (bytesRead < 0) {
+      if (bytesRead != 0) {
         return bytesRead;
       }
       if (delegate.position() != position) {
         delegate.position(position);
       }
     }
-    return delegate.read(dst);
+    return 0;
+  }
+
+  private void notifyAfterRead(long position) throws IOException {
+    for (FormatOptimizer optimizer : optimizers) {
+      optimizer.afterRead(position, delegate);
+    }
   }
 
   @Override
