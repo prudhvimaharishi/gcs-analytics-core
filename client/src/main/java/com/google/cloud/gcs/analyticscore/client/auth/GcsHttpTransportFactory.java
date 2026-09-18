@@ -17,6 +17,7 @@
 package com.google.cloud.gcs.analyticscore.client.auth;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.api.client.googleapis.GoogleUtils;
 import com.google.api.client.http.HttpTransport;
@@ -60,6 +61,10 @@ final class GcsHttpTransportFactory {
   /**
    * Creates an {@link HttpTransport} configured according to the provided {@link GcsAuthOptions}.
    *
+   * <p><b>Side effects:</b> supplying proxy credentials mutates process-wide JDK state that
+   * outlives the returned transport; see {@link #installProxyAuthentication} for the blast radius
+   * in a shared JVM.
+   *
    * @param options The authentication options containing proxy and timeout configurations.
    * @param trustStoreSource The certificate trust store to validate TLS certificates against.
    * @return A configured {@link HttpTransport} instance.
@@ -81,24 +86,24 @@ final class GcsHttpTransportFactory {
    * <p>The proxy is always contacted as an HTTP proxy: a scheme in {@code proxyAddress} is
    * validated but otherwise ignored, so {@code https://} does not imply TLS to the proxy itself.
    *
-   * <p><b>Side effects:</b> supplying proxy credentials mutates process wide JDK state, as
-   * described on {@link #createNetHttpTransport}.
+   * <p><b>Side effects:</b> supplying proxy credentials mutates process-wide JDK state that
+   * outlives the returned transport; see {@link #installProxyAuthentication} for the blast radius
+   * in a shared JVM.
    *
    * @param proxyAddress The HTTP proxy address of the form {@code [https?://]hostname:port}.
    * @param proxyUsername The HTTP proxy username.
    * @param proxyPassword The HTTP proxy password.
-   * @param readTimeout The socket read timeout to apply to HTTP requests, which must be positive if
-   *     set.
+   * @param readTimeout The socket read timeout to apply to HTTP requests, which must be positive.
    * @param trustStoreSource The certificate trust store to validate TLS certificates against.
    * @return The resulting {@link HttpTransport}.
-   * @throws IllegalArgumentException If proxy configuration parameters are invalid.
+   * @throws IllegalArgumentException If proxy or timeout configuration parameters are invalid.
    * @throws IOException If an error occurs initializing the certificate trust store or transport.
    */
   static HttpTransport createHttpTransport(
       @Nullable String proxyAddress,
       @Nullable RedactedString proxyUsername,
       @Nullable RedactedString proxyPassword,
-      @Nullable Duration readTimeout,
+      Duration readTimeout,
       TrustStoreSource trustStoreSource)
       throws IOException {
     LOG.debug(
@@ -108,14 +113,14 @@ final class GcsHttpTransportFactory {
         proxyUsername != null,
         readTimeout,
         trustStoreSource);
+    URI proxyUri = GcsAuthOptions.parseProxyAddress(proxyAddress);
     checkArgument(
-        proxyAddress != null || (proxyUsername == null && proxyPassword == null),
-        "if proxyAddress is null then proxyUsername and proxyPassword should be null too");
+        proxyUri != null || (proxyUsername == null && proxyPassword == null),
+        "if proxyAddress is null or empty then proxyUsername and proxyPassword should be null too");
     checkArgument(
         (proxyUsername == null) == (proxyPassword == null),
         "both proxyUsername and proxyPassword should be null or not null together");
 
-    URI proxyUri = GcsAuthOptions.parseProxyAddress(proxyAddress);
     try {
       PasswordAuthentication proxyAuth =
           proxyUsername == null
@@ -131,12 +136,18 @@ final class GcsHttpTransportFactory {
   /**
    * Creates a {@link NetHttpTransport} routed through the given proxy.
    *
+   * <p><b>Side effects:</b> when {@code proxyAuth} is non-null, this method calls {@link
+   * #installProxyAuthentication}, which overwrites the JVM default {@link Authenticator} (last
+   * writer wins across the JVM) and permanently clears {@code
+   * jdk.http.auth.tunneling.disabledSchemes} for the life of the process.
+   *
    * @param proxyUri The parsed proxy address, or {@code null} to connect directly.
    * @param proxyAuth The proxy credentials, or {@code null} if the proxy needs no authentication.
-   * @param readTimeout The socket read timeout, which must be positive if set.
+   * @param readTimeout The socket read timeout, which must be positive.
    * @param trustStoreSource The certificate trust store to validate TLS certificates against.
    * @return The resulting {@link NetHttpTransport}.
-   * @throws IllegalArgumentException If proxyAuth is set without a proxyUri.
+   * @throws IllegalArgumentException If proxyAuth is set without a proxyUri, or if readTimeout is
+   *     not positive.
    * @throws IOException If an error occurs initializing the certificate trust store.
    * @throws GeneralSecurityException If the certificate trust store cannot be loaded.
    */
@@ -144,7 +155,7 @@ final class GcsHttpTransportFactory {
   static NetHttpTransport createNetHttpTransport(
       @Nullable URI proxyUri,
       @Nullable PasswordAuthentication proxyAuth,
-      @Nullable Duration readTimeout,
+      Duration readTimeout,
       TrustStoreSource trustStoreSource)
       throws IOException, GeneralSecurityException {
     checkArgument(
@@ -160,11 +171,23 @@ final class GcsHttpTransportFactory {
   }
 
   /**
-   * Installs the JVM wide state that lets the JDK answer a proxy authentication challenge.
+   * Installs the JVM-wide state that lets the JDK answer a proxy authentication challenge.
    *
    * <p>The JDK exposes no per-connection hook for proxy credentials when tunneling HTTPS through a
-   * {@code CONNECT} proxy, so the credentials have to be published through the process wide default
-   * {@link Authenticator}.
+   * {@code CONNECT} proxy, so the credentials must be published through process-wide state with two
+   * consequences that outlive the transport:
+   *
+   * <ol>
+   *   <li><b>Last writer wins:</b> {@link Authenticator#setDefault} replaces any existing default
+   *       authenticator without delegation. If two {@code GcsFileSystem} instances (for example,
+   *       two Spark catalogs in the same executor JVM) configure different authenticated proxies,
+   *       the second installation silently overwrites the first, causing the first proxy to fail
+   *       with HTTP 407.
+   *   <li><b>Process-wide tunneling policy change:</b> {@code
+   *       jdk.http.auth.tunneling.disabledSchemes} is cleared process-wide and never restored,
+   *       re-enabling HTTP {@code Basic} authentication over {@code CONNECT} for every HTTPS tunnel
+   *       in the JVM for the life of the process.
+   * </ol>
    *
    * @param proxyUri The parsed proxy address the credentials belong to.
    * @param proxyAuth The proxy credentials to serve for that address.
@@ -190,10 +213,9 @@ final class GcsHttpTransportFactory {
   }
 
   /**
-   * Creates the {@link NetHttpTransport.Builder} that backs every transport this factory returns.
+   * Creates the {@link NetHttpTransport.Builder} configured from {@link GcsAuthOptions}.
    *
-   * @param proxyUri The parsed proxy address, or {@code null} to connect directly.
-   * @param readTimeout The socket read timeout, which must be positive if set.
+   * @param options The authentication options containing proxy and timeout configurations.
    * @param trustStoreSource The certificate trust store to validate TLS certificates against.
    * @return The configured builder.
    * @throws IOException If an error occurs initializing the certificate trust store.
@@ -201,7 +223,25 @@ final class GcsHttpTransportFactory {
    */
   @VisibleForTesting
   static NetHttpTransport.Builder createNetHttpTransportBuilder(
-      @Nullable URI proxyUri, @Nullable Duration readTimeout, TrustStoreSource trustStoreSource)
+      GcsAuthOptions options, TrustStoreSource trustStoreSource)
+      throws IOException, GeneralSecurityException {
+    URI proxyUri = GcsAuthOptions.parseProxyAddress(options.getProxyAddress().orElse(null));
+    return createNetHttpTransportBuilder(proxyUri, options.getHttpReadTimeout(), trustStoreSource);
+  }
+
+  /**
+   * Creates the {@link NetHttpTransport.Builder} that backs every transport this factory returns.
+   *
+   * @param proxyUri The parsed proxy address, or {@code null} to connect directly.
+   * @param readTimeout The socket read timeout, which must be positive.
+   * @param trustStoreSource The certificate trust store to validate TLS certificates against.
+   * @return The configured builder.
+   * @throws IOException If an error occurs initializing the certificate trust store.
+   * @throws GeneralSecurityException If the certificate trust store cannot be loaded.
+   */
+  @VisibleForTesting
+  static NetHttpTransport.Builder createNetHttpTransportBuilder(
+      @Nullable URI proxyUri, Duration readTimeout, TrustStoreSource trustStoreSource)
       throws IOException, GeneralSecurityException {
     NetHttpTransport.Builder builder = new NetHttpTransport.Builder();
     if (!trustStoreSource.isSystemDefault()) {
@@ -233,32 +273,38 @@ final class GcsHttpTransportFactory {
   }
 
   /**
-   * Converts a socket read timeout into the milliseconds accepted by {@link Socket#setSoTimeout}.
+   * Converts a socket read timeout into the positive milliseconds accepted by {@link
+   * Socket#setSoTimeout}.
    *
-   * @param readTimeout The socket read timeout, which must not be negative.
-   * @return The timeout in milliseconds, or {@code 0} to leave the read timeout unbounded.
-   * @throws IllegalArgumentException If the timeout is negative, shorter than a millisecond, or
-   *     overflows an int.
+   * @param readTimeout The socket read timeout, which must be positive.
+   * @return The positive timeout in milliseconds.
+   * @throws IllegalArgumentException If the timeout is zero, negative, shorter than a millisecond,
+   *     or overflows an int.
    */
-  static int toReadTimeoutMillis(@Nullable Duration readTimeout) {
+  static int toReadTimeoutMillis(Duration readTimeout) {
     return toTimeoutMillis(readTimeout, "readTimeout");
   }
 
   /**
-   * Converts a timeout duration into milliseconds.
+   * Converts a timeout duration into positive milliseconds.
    *
-   * @param timeout The timeout duration, which must not be negative.
+   * <p>Consistent with {@link GcsAuthOptions}, timeouts must be strictly positive (at least 1
+   * millisecond and at most {@link Integer#MAX_VALUE} milliseconds). Zero and sub-millisecond
+   * durations are rejected rather than rounded down to zero.
+   *
+   * @param timeout The timeout duration, which must be positive.
    * @param timeoutName The name of the timeout parameter for error reporting.
-   * @return The timeout in milliseconds, or {@code 0} to leave the timeout unbounded.
-   * @throws IllegalArgumentException If the timeout is negative, shorter than a millisecond, or
-   *     overflows an int.
+   * @return The positive timeout in milliseconds.
+   * @throws IllegalArgumentException If the timeout is zero, negative, shorter than a millisecond,
+   *     or overflows an int.
    */
-  static int toTimeoutMillis(@Nullable Duration timeout, String timeoutName) {
-    if (timeout == null || timeout.isZero()) {
-      return 0;
-    }
+  static int toTimeoutMillis(Duration timeout, String timeoutName) {
+    checkNotNull(timeout, "%s cannot be null", timeoutName);
     checkArgument(
-        !timeout.isNegative(), "%s must not be negative, but was %s", timeoutName, timeout);
+        !timeout.isNegative() && !timeout.isZero(),
+        "%s must be positive, but was %s",
+        timeoutName,
+        timeout);
     long timeoutMillis = timeout.toMillis();
     checkArgument(
         timeoutMillis > 0, "%s must be at least 1 millisecond, but was %s", timeoutName, timeout);
@@ -280,10 +326,13 @@ final class GcsHttpTransportFactory {
 
     /**
      * @param wrappedSocketFactory The socket factory to delegate socket creation to.
-     * @param readTimeoutMillis The socket read timeout in milliseconds, or {@code 0} to leave
-     *     existing socket timeouts unmodified.
+     * @param readTimeoutMillis The positive socket read timeout in milliseconds.
      */
     KeepAliveSslSocketFactory(SSLSocketFactory wrappedSocketFactory, int readTimeoutMillis) {
+      checkArgument(
+          readTimeoutMillis > 0,
+          "readTimeoutMillis must be positive, but was %s",
+          readTimeoutMillis);
       this.wrappedSocketFactory = wrappedSocketFactory;
       this.readTimeoutMillis = readTimeoutMillis;
     }
@@ -294,7 +343,7 @@ final class GcsHttpTransportFactory {
       return wrappedSocketFactory;
     }
 
-    /** Returns the read timeout applied to created sockets, where {@code 0} means unmodified. */
+    /** Returns the positive read timeout in milliseconds applied to created sockets. */
     @VisibleForTesting
     int getReadTimeoutMillis() {
       return readTimeoutMillis;
@@ -312,36 +361,43 @@ final class GcsHttpTransportFactory {
 
     @Override
     public Socket createSocket() throws IOException {
-      return customizeSocket(wrappedSocketFactory.createSocket());
+      return customizeSocket(wrappedSocketFactory.createSocket(), /* closeOnFailure= */ true);
     }
 
     @Override
     public Socket createSocket(Socket s, InputStream consumed, boolean autoClose)
         throws IOException {
-      return customizeSocket(wrappedSocketFactory.createSocket(s, consumed, autoClose));
+      return customizeSocket(
+          wrappedSocketFactory.createSocket(s, consumed, autoClose),
+          /* closeOnFailure= */ autoClose);
     }
 
     @Override
     public Socket createSocket(Socket s, String host, int port, boolean autoClose)
         throws IOException {
-      return customizeSocket(wrappedSocketFactory.createSocket(s, host, port, autoClose));
+      return customizeSocket(
+          wrappedSocketFactory.createSocket(s, host, port, autoClose),
+          /* closeOnFailure= */ autoClose);
     }
 
     @Override
     public Socket createSocket(String host, int port) throws IOException {
-      return customizeSocket(wrappedSocketFactory.createSocket(host, port));
+      return customizeSocket(
+          wrappedSocketFactory.createSocket(host, port), /* closeOnFailure= */ true);
     }
 
     @Override
     public Socket createSocket(InetAddress address, int port) throws IOException {
-      return customizeSocket(wrappedSocketFactory.createSocket(address, port));
+      return customizeSocket(
+          wrappedSocketFactory.createSocket(address, port), /* closeOnFailure= */ true);
     }
 
     @Override
     public Socket createSocket(String host, int port, InetAddress clientAddress, int clientPort)
         throws IOException {
       return customizeSocket(
-          wrappedSocketFactory.createSocket(host, port, clientAddress, clientPort));
+          wrappedSocketFactory.createSocket(host, port, clientAddress, clientPort),
+          /* closeOnFailure= */ true);
     }
 
     @Override
@@ -349,11 +405,13 @@ final class GcsHttpTransportFactory {
         InetAddress address, int port, InetAddress clientAddress, int clientPort)
         throws IOException {
       return customizeSocket(
-          wrappedSocketFactory.createSocket(address, port, clientAddress, clientPort));
+          wrappedSocketFactory.createSocket(address, port, clientAddress, clientPort),
+          /* closeOnFailure= */ true);
     }
 
     @Nullable
-    private Socket customizeSocket(@Nullable Socket socket) throws IOException {
+    private Socket customizeSocket(@Nullable Socket socket, boolean closeOnFailure)
+        throws IOException {
       if (socket == null) {
         return null;
       }
@@ -366,18 +424,17 @@ final class GcsHttpTransportFactory {
         // com.google.api.client.http.HttpRequest#setReadTimeout(int). However, setting it here
         // guarantees that the timeout is enforced during TLS handshake when using Conscrypt as the
         // security provider. (See discussion in https://github.com/google/conscrypt/issues/864 .)
-        // Only apply when positive so that wrapping an existing socket (e.g. proxy tunnel) does not
-        // clear a timeout already configured by a lower layer.
-        if (readTimeoutMillis > 0) {
-          socket.setSoTimeout(readTimeoutMillis);
-        }
+        socket.setSoTimeout(readTimeoutMillis);
       } catch (IOException | RuntimeException e) {
-        // The socket is owned by this method until it is returned, so a half configured socket must
-        // not outlive the failure that abandoned it.
-        try {
-          socket.close();
-        } catch (IOException closeFailure) {
-          e.addSuppressed(closeFailure);
+        // When this factory owns the socket (newly created sockets, or layered sockets with
+        // autoClose=true), a half-configured socket must not outlive the failure that abandoned it.
+        // When autoClose=false, the caller explicitly retains ownership of the underlying socket.
+        if (closeOnFailure) {
+          try {
+            socket.close();
+          } catch (IOException closeFailure) {
+            e.addSuppressed(closeFailure);
+          }
         }
         throw e;
       }

@@ -21,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mockStatic;
 
 import com.google.api.client.googleapis.GoogleUtils;
-import com.google.api.client.http.HttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.cloud.gcs.analyticscore.client.auth.GcsHttpTransportFactory.KeepAliveSslSocketFactory;
 import com.google.cloud.gcs.analyticscore.common.RedactedString;
@@ -60,6 +59,7 @@ class GcsHttpTransportFactoryTest {
   private static final String PROXY_ADDRESS = PROXY_HOST + ":" + PROXY_PORT;
   private static final RedactedString PROXY_USERNAME = RedactedString.create("user");
   private static final RedactedString PROXY_PASSWORD = RedactedString.create("pass");
+  private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);
 
   private Authenticator originalAuthenticator;
   private String originalTunnelingDisabledSchemes;
@@ -110,7 +110,7 @@ class GcsHttpTransportFactoryTest {
       throws IOException, GeneralSecurityException {
     NetHttpTransport.Builder builder =
         GcsHttpTransportFactory.createNetHttpTransportBuilder(
-            null, Duration.ofSeconds(5), TrustStoreSource.GOOGLE_BUNDLED);
+            null, READ_TIMEOUT, TrustStoreSource.GOOGLE_BUNDLED);
 
     assertThat(builder.getSslSocketFactory()).isInstanceOf(KeepAliveSslSocketFactory.class);
   }
@@ -120,7 +120,7 @@ class GcsHttpTransportFactoryTest {
       throws IOException, GeneralSecurityException {
     NetHttpTransport.Builder builder =
         GcsHttpTransportFactory.createNetHttpTransportBuilder(
-            null, Duration.ofSeconds(5), TrustStoreSource.GOOGLE_BUNDLED);
+            null, READ_TIMEOUT, TrustStoreSource.GOOGLE_BUNDLED);
 
     // Google's bundled trust store yields a dedicated SSLSocketFactory, not the JVM default.
     assertThat(
@@ -133,43 +133,12 @@ class GcsHttpTransportFactoryTest {
       throws IOException, GeneralSecurityException {
     NetHttpTransport.Builder builder =
         GcsHttpTransportFactory.createNetHttpTransportBuilder(
-            null, Duration.ofSeconds(5), TrustStoreSource.SYSTEM_DEFAULT);
+            null, READ_TIMEOUT, TrustStoreSource.SYSTEM_DEFAULT);
 
     // Custom endpoints, such as Trusted Partner Cloud, validate against the JVM's trust store.
     assertThat(
             ((KeepAliveSslSocketFactory) builder.getSslSocketFactory()).getWrappedSocketFactory())
         .isSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory());
-  }
-
-  @Test
-  void createHttpTransport_noProxy_createsNetHttpTransport() throws IOException {
-    HttpTransport transport =
-        GcsHttpTransportFactory.createHttpTransport(
-            null, null, null, Duration.ofSeconds(5), TrustStoreSource.GOOGLE_BUNDLED);
-
-    assertThat(transport).isInstanceOf(NetHttpTransport.class);
-  }
-
-  @Test
-  void createHttpTransport_systemDefaultTrustStore_createsNetHttpTransport() throws IOException {
-    HttpTransport transport =
-        GcsHttpTransportFactory.createHttpTransport(
-            null, null, null, Duration.ofSeconds(5), TrustStoreSource.SYSTEM_DEFAULT);
-
-    assertThat(transport).isInstanceOf(NetHttpTransport.class);
-  }
-
-  @Test
-  void createHttpTransport_withProxy_createsNetHttpTransport() throws IOException {
-    HttpTransport transport =
-        GcsHttpTransportFactory.createHttpTransport(
-            "proxy.example.com:8080",
-            PROXY_USERNAME,
-            PROXY_PASSWORD,
-            Duration.ofSeconds(10),
-            TrustStoreSource.GOOGLE_BUNDLED);
-
-    assertThat(transport).isInstanceOf(NetHttpTransport.class);
   }
 
   @Test
@@ -274,31 +243,65 @@ class GcsHttpTransportFactoryTest {
   }
 
   @Test
-  void createHttpTransport_fromGcsAuthOptionsWithProxy_createsNetHttpTransport()
-      throws IOException {
+  void createNetHttpTransportBuilder_fromGcsAuthOptionsWithProxy_appliesConfiguredReadTimeout()
+      throws IOException, GeneralSecurityException {
     GcsAuthOptions options =
         GcsAuthOptions.builder()
-            .setProxyAddress("proxy.example.com:8080")
+            .setProxyAddress(PROXY_ADDRESS)
             .setProxyUsername(PROXY_USERNAME)
             .setProxyPassword(PROXY_PASSWORD)
             .setHttpReadTimeout(Duration.ofSeconds(10))
             .build();
 
-    HttpTransport transport =
-        GcsHttpTransportFactory.createHttpTransport(options, TrustStoreSource.GOOGLE_BUNDLED);
+    NetHttpTransport.Builder builder =
+        GcsHttpTransportFactory.createNetHttpTransportBuilder(
+            options, TrustStoreSource.GOOGLE_BUNDLED);
 
-    assertThat(transport).isInstanceOf(NetHttpTransport.class);
+    assertThat(((KeepAliveSslSocketFactory) builder.getSslSocketFactory()).getReadTimeoutMillis())
+        .isEqualTo(10_000);
   }
 
   @Test
-  void createHttpTransport_fromGcsAuthOptionsWithoutProxy_createsNetHttpTransport()
-      throws IOException {
+  void createNetHttpTransportBuilder_fromGcsAuthOptionsWithoutProxy_appliesDefaultReadTimeout()
+      throws IOException, GeneralSecurityException {
     GcsAuthOptions options = GcsAuthOptions.builder().build();
 
-    HttpTransport transport =
-        GcsHttpTransportFactory.createHttpTransport(options, TrustStoreSource.GOOGLE_BUNDLED);
+    NetHttpTransport.Builder builder =
+        GcsHttpTransportFactory.createNetHttpTransportBuilder(
+            options, TrustStoreSource.GOOGLE_BUNDLED);
 
-    assertThat(transport).isInstanceOf(NetHttpTransport.class);
+    assertThat(((KeepAliveSslSocketFactory) builder.getSslSocketFactory()).getReadTimeoutMillis())
+        .isEqualTo(5_000);
+  }
+
+  @Test
+  void createHttpTransport_fromGcsAuthOptionsWithProxy_installsConfiguredProxyCredentials()
+      throws IOException {
+    GcsAuthOptions options =
+        GcsAuthOptions.builder()
+            .setProxyAddress(PROXY_ADDRESS)
+            .setProxyUsername(PROXY_USERNAME)
+            .setProxyPassword(PROXY_PASSWORD)
+            .setHttpReadTimeout(Duration.ofSeconds(10))
+            .build();
+
+    GcsHttpTransportFactory.createHttpTransport(options, TrustStoreSource.GOOGLE_BUNDLED);
+    PasswordAuthentication credentials =
+        requestProxyCredentials(PROXY_HOST, PROXY_PORT, RequestorType.PROXY);
+
+    assertThat(credentials.getUserName()).isEqualTo(PROXY_USERNAME.value());
+  }
+
+  @Test
+  void createHttpTransport_fromGcsAuthOptionsWithoutProxy_leavesDefaultAuthenticatorUnchanged()
+      throws IOException {
+    Authenticator sentinelAuthenticator = new Authenticator() {};
+    Authenticator.setDefault(sentinelAuthenticator);
+    GcsAuthOptions options = GcsAuthOptions.builder().build();
+
+    GcsHttpTransportFactory.createHttpTransport(options, TrustStoreSource.GOOGLE_BUNDLED);
+
+    assertThat(Authenticator.getDefault()).isSameInstanceAs(sentinelAuthenticator);
   }
 
   @Test
@@ -307,7 +310,20 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                null, PROXY_USERNAME, PROXY_PASSWORD, null, TrustStoreSource.GOOGLE_BUNDLED));
+                null,
+                PROXY_USERNAME,
+                PROXY_PASSWORD,
+                READ_TIMEOUT,
+                TrustStoreSource.GOOGLE_BUNDLED));
+  }
+
+  @Test
+  void createHttpTransport_proxyAuthWithEmptyProxyAddress_throwsIllegalArgumentException() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            GcsHttpTransportFactory.createHttpTransport(
+                "", PROXY_USERNAME, PROXY_PASSWORD, READ_TIMEOUT, TrustStoreSource.GOOGLE_BUNDLED));
   }
 
   @Test
@@ -316,10 +332,10 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                "proxy.example.com:8080",
+                PROXY_ADDRESS,
                 PROXY_USERNAME,
                 null,
-                null,
+                READ_TIMEOUT,
                 TrustStoreSource.GOOGLE_BUNDLED));
   }
 
@@ -329,10 +345,10 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                "proxy.example.com:8080",
+                PROXY_ADDRESS,
                 null,
                 PROXY_PASSWORD,
-                null,
+                READ_TIMEOUT,
                 TrustStoreSource.GOOGLE_BUNDLED));
   }
 
@@ -342,7 +358,7 @@ class GcsHttpTransportFactoryTest {
         IllegalArgumentException.class,
         () ->
             GcsHttpTransportFactory.createHttpTransport(
-                null, null, PROXY_PASSWORD, null, TrustStoreSource.GOOGLE_BUNDLED));
+                null, null, PROXY_PASSWORD, READ_TIMEOUT, TrustStoreSource.GOOGLE_BUNDLED));
   }
 
   @Test
@@ -358,7 +374,7 @@ class GcsHttpTransportFactoryTest {
               IOException.class,
               () ->
                   GcsHttpTransportFactory.createHttpTransport(
-                      null, null, null, null, TrustStoreSource.GOOGLE_BUNDLED));
+                      null, null, null, READ_TIMEOUT, TrustStoreSource.GOOGLE_BUNDLED));
 
       assertThat(thrown).hasCauseThat().isSameInstanceAs(trustStoreFailure);
     }
@@ -399,6 +415,24 @@ class GcsHttpTransportFactoryTest {
   }
 
   @Test
+  void createHttpTransport_nullReadTimeout_throwsNullPointerException() {
+    assertThrows(
+        NullPointerException.class,
+        () ->
+            GcsHttpTransportFactory.createHttpTransport(
+                null, null, null, null, TrustStoreSource.GOOGLE_BUNDLED));
+  }
+
+  @Test
+  void createHttpTransport_zeroReadTimeout_throwsIllegalArgumentException() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            GcsHttpTransportFactory.createHttpTransport(
+                null, null, null, Duration.ZERO, TrustStoreSource.GOOGLE_BUNDLED));
+  }
+
+  @Test
   void createHttpTransport_negativeReadTimeout_throwsIllegalArgumentException() {
     assertThrows(
         IllegalArgumentException.class,
@@ -415,28 +449,6 @@ class GcsHttpTransportFactoryTest {
         () ->
             GcsHttpTransportFactory.createHttpTransport(
                 null, null, null, Duration.ofNanos(500), TrustStoreSource.GOOGLE_BUNDLED));
-  }
-
-  @Test
-  void createNetHttpTransportBuilder_zeroReadTimeout_leavesReadTimeoutUnbounded()
-      throws IOException, GeneralSecurityException {
-    NetHttpTransport.Builder builder =
-        GcsHttpTransportFactory.createNetHttpTransportBuilder(
-            null, Duration.ZERO, TrustStoreSource.GOOGLE_BUNDLED);
-
-    assertThat(((KeepAliveSslSocketFactory) builder.getSslSocketFactory()).getReadTimeoutMillis())
-        .isEqualTo(0);
-  }
-
-  @Test
-  void createNetHttpTransportBuilder_noReadTimeout_leavesReadTimeoutUnbounded()
-      throws IOException, GeneralSecurityException {
-    NetHttpTransport.Builder builder =
-        GcsHttpTransportFactory.createNetHttpTransportBuilder(
-            null, null, TrustStoreSource.GOOGLE_BUNDLED);
-
-    assertThat(((KeepAliveSslSocketFactory) builder.getSslSocketFactory()).getReadTimeoutMillis())
-        .isEqualTo(0);
   }
 
   @Test
@@ -469,8 +481,15 @@ class GcsHttpTransportFactoryTest {
             GcsHttpTransportFactory.createNetHttpTransport(
                 null,
                 new PasswordAuthentication("u", "p".toCharArray()),
-                null,
+                READ_TIMEOUT,
                 TrustStoreSource.GOOGLE_BUNDLED));
+  }
+
+  @Test
+  void keepAliveSslSocketFactory_nonPositiveTimeout_throwsIllegalArgumentException() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new KeepAliveSslSocketFactory(new FakeSslSocketFactory(), 0));
   }
 
   @ParameterizedTest(name = "createSocket overload: {0}")
@@ -478,7 +497,7 @@ class GcsHttpTransportFactoryTest {
   void customSslSocketFactory_anyCreateSocketOverload_enablesKeepAlive(
       String overload, CreateSocket createSocket) throws IOException {
     KeepAliveSslSocketFactory socketFactory =
-        new KeepAliveSslSocketFactory(new FakeSslSocketFactory(), 0);
+        new KeepAliveSslSocketFactory(new FakeSslSocketFactory(), 1234);
 
     try (Socket socket = createSocket.apply(socketFactory)) {
       assertThat(socket.getKeepAlive()).isTrue();
@@ -494,33 +513,6 @@ class GcsHttpTransportFactoryTest {
 
     try (Socket socket = createSocket.apply(socketFactory)) {
       assertThat(socket.getSoTimeout()).isEqualTo(1234);
-    }
-  }
-
-  @ParameterizedTest(name = "createSocket overload: {0}")
-  @MethodSource("createSocketOverloads")
-  void customSslSocketFactory_anyCreateSocketOverload_zeroTimeoutLeavesReadTimeoutUnbounded(
-      String overload, CreateSocket createSocket) throws IOException {
-    KeepAliveSslSocketFactory socketFactory =
-        new KeepAliveSslSocketFactory(new FakeSslSocketFactory(), 0);
-
-    try (Socket socket = createSocket.apply(socketFactory)) {
-      assertThat(socket.getSoTimeout()).isEqualTo(0);
-    }
-  }
-
-  @Test
-  void customSslSocketFactory_zeroTimeoutWrappingExistingSocket_preservesExistingTimeout()
-      throws IOException {
-    KeepAliveSslSocketFactory socketFactory =
-        new KeepAliveSslSocketFactory(new FakeSslSocketFactory(), 0);
-    try (Socket existingSocket = new Socket()) {
-      existingSocket.setSoTimeout(5000);
-
-      Socket wrappedSocket =
-          socketFactory.createSocket(existingSocket, "host.example.com", 443, false);
-
-      assertThat(wrappedSocket.getSoTimeout()).isEqualTo(5000);
     }
   }
 
@@ -585,13 +577,58 @@ class GcsHttpTransportFactoryTest {
   }
 
   @Test
-  void customSslSocketFactory_customizationFails_closesSocket() {
+  void customSslSocketFactory_customizationFails_closesCreatedSocket() {
     FailingSslSocketFactory wrapped = new FailingSslSocketFactory();
     KeepAliveSslSocketFactory socketFactory = new KeepAliveSslSocketFactory(wrapped, 1234);
 
     assertThrows(SocketException.class, socketFactory::createSocket);
 
     assertThat(wrapped.lastCreatedSocket.isClosed()).isTrue();
+  }
+
+  @Test
+  void
+      customSslSocketFactory_wrappingSocketWithAutoCloseFalseAndCustomizationFails_keepsSocketOpen()
+          throws IOException {
+    KeepAliveSslSocketFactory socketFactory =
+        new KeepAliveSslSocketFactory(new FakeSslSocketFactory(), 1234);
+    try (Socket callerOwnedSocket =
+        new Socket() {
+          @Override
+          public synchronized void setSoTimeout(int timeout) throws SocketException {
+            throw new SocketException("Socket is no longer usable");
+          }
+        }) {
+      assertThrows(
+          SocketException.class,
+          () ->
+              socketFactory.createSocket(
+                  callerOwnedSocket, "host.example.com", 443, /* autoClose= */ false));
+
+      assertThat(callerOwnedSocket.isClosed()).isFalse();
+    }
+  }
+
+  @Test
+  void customSslSocketFactory_wrappingSocketWithAutoCloseTrueAndCustomizationFails_closesSocket()
+      throws IOException {
+    KeepAliveSslSocketFactory socketFactory =
+        new KeepAliveSslSocketFactory(new FakeSslSocketFactory(), 1234);
+    try (Socket wrappedSocket =
+        new Socket() {
+          @Override
+          public synchronized void setSoTimeout(int timeout) throws SocketException {
+            throw new SocketException("Socket is no longer usable");
+          }
+        }) {
+      assertThrows(
+          SocketException.class,
+          () ->
+              socketFactory.createSocket(
+                  wrappedSocket, "host.example.com", 443, /* autoClose= */ true));
+
+      assertThat(wrappedSocket.isClosed()).isTrue();
+    }
   }
 
   @Test
@@ -624,7 +661,7 @@ class GcsHttpTransportFactoryTest {
   @Test
   void customSslSocketFactory_getDefaultCipherSuites_delegatesToWrappedFactory() {
     FakeSslSocketFactory wrapped = new FakeSslSocketFactory();
-    KeepAliveSslSocketFactory socketFactory = new KeepAliveSslSocketFactory(wrapped, 0);
+    KeepAliveSslSocketFactory socketFactory = new KeepAliveSslSocketFactory(wrapped, 1234);
 
     assertThat(socketFactory.getDefaultCipherSuites()).isEqualTo(wrapped.getDefaultCipherSuites());
   }
@@ -632,7 +669,7 @@ class GcsHttpTransportFactoryTest {
   @Test
   void customSslSocketFactory_getSupportedCipherSuites_delegatesToWrappedFactory() {
     FakeSslSocketFactory wrapped = new FakeSslSocketFactory();
-    KeepAliveSslSocketFactory socketFactory = new KeepAliveSslSocketFactory(wrapped, 0);
+    KeepAliveSslSocketFactory socketFactory = new KeepAliveSslSocketFactory(wrapped, 1234);
 
     assertThat(socketFactory.getSupportedCipherSuites())
         .isEqualTo(wrapped.getSupportedCipherSuites());
