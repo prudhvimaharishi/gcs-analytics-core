@@ -34,6 +34,18 @@ These settings control how aggressively the library prefetches and caches metada
 | `analytics-core.small-file.cache.enabled` | Controls whether the small object cache is enabled. | `false` |
 | `analytics-core.small-file.cache.max-size-bytes` | The maximum capacity (in bytes) to hold in the small object cache. | `209715200` (200 MB) |
 
+### Predictive Prefetching
+
+These settings control the predictive prefetcher, which learns the column access pattern of a query and speculatively fetches the bytes the engine is about to request. Blocks are held in an in-memory buffer cache that is bounded by total size and expires after a period of inactivity.
+
+| Property | Type | Description | Default Value |
+| :--- | :--- | :--- | :--- |
+| `analytics-core.prefetch.mode` | Enum | Predictive prefetching strategy. Supported values: `PREDICTIVE_ROW_GROUP`, `DISABLED`. Values are case-insensitive and hyphens are accepted (e.g. `predictive-row-group`). | `DISABLED` |
+| `analytics-core.prefetch.buffer.cache.max-size-bytes` | Long | The maximum total capacity (in bytes) of the prefetch buffer cache. | `2147483648` (2 GB) |
+| `analytics-core.prefetch.buffer.cache.ttl-seconds` | Long | How long (in seconds) a prefetched block is retained in the buffer cache after it was last read or written. | `60` |
+| `analytics-core.prefetch.block.size-bytes` | Integer | The granularity (in bytes) at which the prefetcher requests and caches data. Every speculative request is aligned to this size, and cached bytes are resolved by block index. | `4194304` (4 MB) |
+| `analytics-core.prefetch.history.max-columns` | Integer | The maximum number of columns tracked per Parquet schema in the access history. | `15` |
+
 ### Read Performance and I/O Tuning
 
 These parameters fine-tune the low-level data streaming behavior. They allow you to optimize thread concurrency, heuristic file access patterns, and vectored I/O merging to maximize data throughput against GCS.
