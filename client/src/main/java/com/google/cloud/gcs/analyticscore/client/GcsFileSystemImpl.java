@@ -73,7 +73,10 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
     this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
-    this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
+    this.cacheManager =
+        new AnalyticsCacheManager(
+            fileSystemOptions.getGcsCacheOptions(),
+            fileSystemOptions.getGcsClientOptions().getGcsPrefetchOptions());
     this.gcsClient =
         telemetry.measure(
             GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),
@@ -93,7 +96,10 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
     this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
-    this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
+    this.cacheManager =
+        new AnalyticsCacheManager(
+            fileSystemOptions.getGcsCacheOptions(),
+            fileSystemOptions.getGcsClientOptions().getGcsPrefetchOptions());
     this.gcsClient =
         telemetry.measure(
             GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),
@@ -115,7 +121,9 @@ public class GcsFileSystemImpl implements GcsFileSystem {
         gcsClient,
         fileSystemOptions,
         createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions()),
-        new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions()));
+        new AnalyticsCacheManager(
+            fileSystemOptions.getGcsCacheOptions(),
+            fileSystemOptions.getGcsClientOptions().getGcsPrefetchOptions()));
   }
 
   @VisibleForTesting
@@ -243,6 +251,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
       statusExecutorService.shutdownNow();
       Thread.currentThread().interrupt();
     }
+    cacheManager.invalidateAll();
     gcsClient.close();
     telemetry.close();
   }
@@ -276,17 +285,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
   @VisibleForTesting
   Supplier<ExecutorService> initializeReadExecutionServiceSupplier() {
     return Suppliers.memoize(
-        () ->
-            new ThreadPoolExecutor(
-                fileSystemOptions.getReadThreadCount(),
-                fileSystemOptions.getReadThreadCount(),
-                0L,
-                TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<Runnable>(),
-                new ThreadFactoryBuilder()
-                    .setNameFormat("gcs-filesystem-range-pool-%d")
-                    .setDaemon(true)
-                    .build()));
+        () -> new PrioritizedReadExecutorService(fileSystemOptions.getReadThreadCount()));
   }
 
   @VisibleForTesting

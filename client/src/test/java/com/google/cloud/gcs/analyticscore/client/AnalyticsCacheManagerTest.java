@@ -233,4 +233,13 @@ class AnalyticsCacheManagerTest {
 
     assertThat(callCount.get()).isEqualTo(1);
   }
+
+  @Test
+  void getSchemaAccessHistory_twoManagers_haveIsolatedHistories() {
+    AnalyticsCacheManager otherManager =
+        new AnalyticsCacheManager(GcsCacheOptions.builder().build());
+
+    assertThat(otherManager.getSchemaAccessHistory())
+        .isNotSameInstanceAs(manager.getSchemaAccessHistory());
+  }
 }
