@@ -90,6 +90,32 @@ class AdaptiveReadStrategyTest {
   }
 
   @Test
+  void getReadChannel_afterExternalReadAdvance_staysInSequentialMode() throws IOException {
+    createBlobInStorage("a".repeat(1000));
+    AdaptiveReadStrategy strategy = new AdaptiveReadStrategy(storage, itemId, options, itemInfo);
+    strategy.getReadChannel(0, 10);
+    strategy.position(10);
+    strategy.recordExternalReadAdvance(500);
+
+    strategy.getReadChannel(500, 10);
+
+    assertThat(strategy.getLimit()).isEqualTo(Long.MAX_VALUE);
+  }
+
+  @Test
+  void getReadChannel_externalReadAdvanceThenLargeSeek_switchesToRandomMode() throws IOException {
+    createBlobInStorage("a".repeat(1000));
+    AdaptiveReadStrategy strategy = new AdaptiveReadStrategy(storage, itemId, options, itemInfo);
+    strategy.getReadChannel(0, 10);
+    strategy.position(10);
+    strategy.recordExternalReadAdvance(500);
+
+    strategy.getReadChannel(900, 10);
+
+    assertThat(strategy.getLimit()).isEqualTo(128 * KB + 900);
+  }
+
+  @Test
   void constructor_withRandomPattern_startsInRandomMode() throws IOException {
     createBlobInStorage("a".repeat(1000));
     GcsReadOptions randomOptions =

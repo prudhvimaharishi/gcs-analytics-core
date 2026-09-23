@@ -42,6 +42,18 @@ interface ReadStrategy {
   void position(long newPosition);
 
   /**
+   * Records that the stream has moved forward to {@code newPosition} because the bytes in between
+   * were served from somewhere else, such as a prefetch cache.
+   *
+   * <p>Unlike {@link #position(long)} this does not claim the underlying channel sits at {@code
+   * newPosition}; it only tells the strategy that the reader is still moving forward, so that bytes
+   * served from a cache are not mistaken for a random seek.
+   *
+   * @param newPosition the position the reader has reached
+   */
+  default void recordExternalReadAdvance(long newPosition) {}
+
+  /**
    * Returns the limit up to which data can be read by this strategy.
    *
    * @return the read limit
