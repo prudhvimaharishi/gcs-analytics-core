@@ -131,6 +131,13 @@ class SmartReadChannelTest {
             })
         .when(mockDelegate)
         .position(anyLong());
+    doAnswer(
+            inv -> {
+              delegatePosition[0] = inv.getArgument(0);
+              return null;
+            })
+        .when(mockDelegate)
+        .advanceAfterExternalRead(anyLong());
 
     when(mockOptimizer.read(eq(0L), any(ByteBuffer.class), eq(mockDelegate)))
         .thenReturn(bytesToRead);
@@ -225,19 +232,39 @@ class SmartReadChannelTest {
   }
 
   @Test
-  void readVectored_delegatesToDelegate() throws IOException {
+  void readVectored_withoutOptimizers_delegatesToDelegate() throws IOException {
     SmartReadChannel smartChannel =
         SmartReadChannel.builder()
             .setDelegate(mockDelegate)
             .setItemId(ITEM_ID)
             .setCacheManager(mockCacheManager)
             .build();
-    List<GcsObjectRange> ranges = ImmutableList.of();
+    List<GcsObjectRange> ranges =
+        ImmutableList.of(
+            GcsObjectRange.builder()
+                .setOffset(0)
+                .setLength(10)
+                .setByteBufferFuture(new CompletableFuture<>())
+                .build());
     IntFunction<ByteBuffer> allocate = (i) -> ByteBuffer.allocate(i);
 
     smartChannel.readVectored(ranges, allocate);
 
     verify(mockDelegate).readVectored(ranges, allocate);
+  }
+
+  @Test
+  void readVectored_noRanges_doesNotCallDelegate() throws IOException {
+    SmartReadChannel smartChannel =
+        SmartReadChannel.builder()
+            .setDelegate(mockDelegate)
+            .setItemId(ITEM_ID)
+            .setCacheManager(mockCacheManager)
+            .build();
+
+    smartChannel.readVectored(ImmutableList.of(), ByteBuffer::allocate);
+
+    verify(mockDelegate, never()).readVectored(any(), any());
   }
 
   @Test
@@ -543,10 +570,11 @@ class SmartReadChannelTest {
     List<GcsObjectRange> ranges = List.of(range);
     FormatOptimizer mockOptimizer1 = mock(FormatOptimizer.class);
     when(mockOptimizer1.isApplicable(any(GcsItemId.class))).thenReturn(true);
-    when(mockOptimizer1.readVectored(any(), any())).thenReturn(ranges);
+    when(mockOptimizer1.readVectored(any(), any(), any())).thenReturn(ranges);
     FormatOptimizer mockOptimizer2 = mock(FormatOptimizer.class);
     when(mockOptimizer2.isApplicable(any(GcsItemId.class))).thenReturn(true);
-    when(mockOptimizer2.readVectored(any(), any())).thenReturn(java.util.Collections.emptyList());
+    when(mockOptimizer2.readVectored(any(), any(), any()))
+        .thenReturn(java.util.Collections.emptyList());
     SmartReadChannel smartChannel =
         SmartReadChannel.builder()
             .setDelegate(mockDelegate)
@@ -558,8 +586,8 @@ class SmartReadChannelTest {
 
     smartChannel.readVectored(ranges, ByteBuffer::allocate);
 
-    verify(mockOptimizer1).readVectored(eq(ranges), any());
-    verify(mockOptimizer2).readVectored(eq(ranges), any());
+    verify(mockOptimizer1).readVectored(eq(ranges), any(), eq(mockDelegate));
+    verify(mockOptimizer2).readVectored(eq(ranges), any(), eq(mockDelegate));
     verify(mockDelegate, org.mockito.Mockito.never()).readVectored(any(), any());
   }
 
@@ -574,7 +602,7 @@ class SmartReadChannelTest {
     List<GcsObjectRange> ranges = List.of(range);
     FormatOptimizer mockOptimizer = mock(FormatOptimizer.class);
     when(mockOptimizer.isApplicable(any(GcsItemId.class))).thenReturn(true);
-    when(mockOptimizer.readVectored(any(), any())).thenReturn(ranges);
+    when(mockOptimizer.readVectored(any(), any(), any())).thenReturn(ranges);
     SmartReadChannel smartChannel =
         SmartReadChannel.builder()
             .setDelegate(mockDelegate)
@@ -585,7 +613,7 @@ class SmartReadChannelTest {
 
     smartChannel.readVectored(ranges, ByteBuffer::allocate);
 
-    verify(mockOptimizer).readVectored(eq(ranges), any());
+    verify(mockOptimizer).readVectored(eq(ranges), any(), eq(mockDelegate));
     verify(mockDelegate).readVectored(eq(ranges), any());
   }
 
