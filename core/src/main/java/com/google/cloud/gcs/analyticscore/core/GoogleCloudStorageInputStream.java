@@ -24,6 +24,7 @@ import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConsta
 import com.google.cloud.gcs.analyticscore.core.channel.SmartReadChannel;
 import com.google.cloud.gcs.analyticscore.core.optimizer.GcsFooterOptimizer;
 import com.google.cloud.gcs.analyticscore.core.optimizer.SmallObjectOptimizer;
+import com.google.cloud.gcs.analyticscore.core.prefetch.PredictivePrefetchOptimizer;
 import com.google.cloud.storage.BlobId;
 import com.google.common.collect.ImmutableMap;
 import java.io.EOFException;
@@ -189,6 +190,13 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
     }
   }
 
+  /**
+   * Reads {@code length} bytes at {@code position} without disturbing the stream position.
+   *
+   * <p>The read is served by the channel this stream already holds rather than a channel of its
+   * own, because opening one per call throws away everything the stream has learned and cancels the
+   * prefetches in flight for it.
+   */
   @Override
   public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
     gcsFileSystem
@@ -198,10 +206,11 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
             Metric.READ_DURATION,
             commonAttributes,
             recorder -> {
-              try (VectoredSeekableByteChannel byteChannel =
-                  openReadChannel(gcsFileSystem, gcsItemId, gcsFileInfo)) {
-                byteChannel.position(position);
-                int numberOfBytesRead = byteChannel.read(ByteBuffer.wrap(buffer, offset, length));
+              checkNotClosed("Cannot read: already closed");
+              long originalPosition = channel.position();
+              try {
+                channel.position(position);
+                int numberOfBytesRead = readFullyFromChannel(buffer, offset, length);
                 if (numberOfBytesRead < length) {
                   throw new EOFException(
                       "Reached the end of stream with "
@@ -209,9 +218,25 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
                           + " bytes left to read");
                 }
                 recorder.record(Metric.READ_BYTES, numberOfBytesRead, Collections.emptyMap());
+              } finally {
+                channel.position(originalPosition);
               }
               return null;
             });
+  }
+
+  /** Reads until the requested length is filled or the object ends, returning the bytes read. */
+  private int readFullyFromChannel(byte[] buffer, int offset, int length) throws IOException {
+    ByteBuffer destination = ByteBuffer.wrap(buffer, offset, length);
+    int totalBytesRead = 0;
+    while (destination.hasRemaining()) {
+      int bytesRead = channel.read(destination);
+      if (bytesRead <= 0) {
+        break;
+      }
+      totalBytesRead += bytesRead;
+    }
+    return totalBytesRead;
   }
 
   @Override
@@ -274,6 +299,13 @@ public class GoogleCloudStorageInputStream extends SeekableInputStream {
                           readOptions,
                           gcsFileSystem.getTelemetry()))
                   .addOptimizer(new GcsFooterOptimizer(readOptions, gcsFileSystem.getTelemetry()))
+                  .addOptimizer(
+                      new PredictivePrefetchOptimizer(
+                          gcsFileSystem
+                              .getFileSystemOptions()
+                              .getGcsClientOptions()
+                              .getGcsPrefetchOptions(),
+                          gcsFileSystem.getTelemetry()))
                   .build();
             });
   }

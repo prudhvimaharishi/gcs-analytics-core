@@ -203,6 +203,12 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   }
 
   @Override
+  public void advanceAfterExternalRead(long newPosition) throws IOException {
+    position(newPosition);
+    strategy.recordExternalReadAdvance(newPosition);
+  }
+
+  @Override
   public long size() throws IOException {
     if (itemInfo != null || extractMetadataAfterRead(this.strategy)) {
       return itemInfo.getSize();
@@ -246,37 +252,148 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   @Override
   public void readVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
       throws IOException {
+    submitVectoredRanges(ranges, allocate, /* lowPriority= */ false);
+  }
+
+  @Override
+  public void prefetchVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
+      throws IOException {
+    submitVectoredRanges(ranges, allocate, /* lowPriority= */ true);
+  }
+
+  private void submitVectoredRanges(
+      List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate, boolean lowPriority) {
+    ExecutorService executorService = executorServiceSupplier.get();
+    checkNotNull(executorService, "Thread pool must not be null");
     Operation operation =
         Operation.builder()
             .setName(GcsAnalyticsCoreTelemetryConstants.Operation.VECTORED_READ.name())
             .setDurationMetric(Metric.READ_DURATION)
             .setAttributes(COMMON_ATTRIBUTES)
             .build();
-    ExecutorService executorService = executorServiceSupplier.get();
-    checkNotNull(executorService, "Thread pool must not be null");
     GcsVectoredReadOptions vectoredReadOptions = readOptions.getGcsVectoredReadOptions();
+    int maxMergeSize = vectoredReadOptions.getMaxMergeSize();
+    int largeRangeSliceBytes = Math.max(maxMergeSize, 8 * 1024 * 1024);
+
+    List<GcsObjectRange> smallRanges = new java.util.ArrayList<>(ranges.size());
+    for (GcsObjectRange range : ranges) {
+      if (!lowPriority && range.getLength() > largeRangeSliceBytes) {
+        submitSlicedLargeRange(range, largeRangeSliceBytes, allocate, executorService, operation);
+      } else {
+        smallRanges.add(range);
+      }
+    }
+    if (smallRanges.isEmpty()) {
+      return;
+    }
+
+    int effectiveMaxMergeGap = lowPriority ? 0 : vectoredReadOptions.getMaxMergeGap();
     ImmutableList<GcsObjectCombinedRange> combinedRanges =
         VectoredIoUtil.mergeGcsObjectRanges(
-            ImmutableList.copyOf(ranges),
-            vectoredReadOptions.getMaxMergeGap(),
-            vectoredReadOptions.getMaxMergeSize());
+            ImmutableList.copyOf(smallRanges), effectiveMaxMergeGap, maxMergeSize);
 
     for (GcsObjectCombinedRange combinedRange : combinedRanges) {
+      Runnable readTask = () -> readCombinedRange(combinedRange, allocate, operation);
+      if (lowPriority && executorService instanceof PrioritizedReadExecutorService) {
+        ((PrioritizedReadExecutorService) executorService)
+            .submitLowPriority(
+                readTask, combinedRange.getUnderlyingRanges(), () -> allRangesDone(combinedRange));
+      } else {
+        var unused = executorService.submit(readTask);
+      }
+    }
+  }
+
+  private void submitSlicedLargeRange(
+      GcsObjectRange parentRange,
+      int sliceSizeBytes,
+      IntFunction<ByteBuffer> allocate,
+      ExecutorService executorService,
+      Operation operation) {
+    int totalLength = parentRange.getLength();
+    ByteBuffer parentBuffer;
+    try {
+      parentBuffer = allocate.apply(totalLength);
+      if (parentBuffer == null) {
+        throw new IllegalArgumentException(
+            String.format("Buffer allocation returned null for range: %s", parentRange));
+      }
+    } catch (RuntimeException e) {
+      parentRange.getByteBufferFuture().completeExceptionally(e);
+      return;
+    }
+
+    int basePosition = parentBuffer.position();
+    int sliceCount = (totalLength + sliceSizeBytes - 1) / sliceSizeBytes;
+    java.util.concurrent.CompletableFuture<?>[] sliceFutures =
+        new java.util.concurrent.CompletableFuture<?>[sliceCount];
+    int cursor = 0;
+    for (int i = 0; i < sliceCount; i++) {
+      int currentSliceLength = Math.min(sliceSizeBytes, totalLength - cursor);
+      long sliceOffset = parentRange.getOffset() + cursor;
+      ByteBuffer view = parentBuffer.duplicate();
+      view.position(basePosition + cursor);
+      view.limit(basePosition + cursor + currentSliceLength);
+      ByteBuffer sliceBuffer = view.slice();
+
+      java.util.concurrent.CompletableFuture<ByteBuffer> sliceFuture =
+          new java.util.concurrent.CompletableFuture<>();
+      sliceFutures[i] = sliceFuture;
+      GcsObjectRange sliceRange =
+          GcsObjectRange.builder()
+              .setOffset(sliceOffset)
+              .setLength(currentSliceLength)
+              .setByteBufferFuture(sliceFuture)
+              .build();
+      GcsObjectCombinedRange sliceCombined =
+          GcsObjectCombinedRange.builder()
+              .setOffset(sliceOffset)
+              .setLength(currentSliceLength)
+              .setUnderlyingRanges(ImmutableList.of(sliceRange))
+              .build();
       var unused =
           executorService.submit(
-              () -> {
-                readCombinedRange(combinedRange, allocate, operation);
-              });
+              () -> readCombinedRange(sliceCombined, ignored -> sliceBuffer, operation));
+      cursor += currentSliceLength;
     }
+
+    java.util.concurrent.CompletableFuture<Void> unused =
+        java.util.concurrent.CompletableFuture.allOf(sliceFutures)
+            .whenComplete(
+                (result, error) -> {
+                  if (error != null) {
+                    parentRange.getByteBufferFuture().completeExceptionally(error);
+                  } else {
+                    ByteBuffer completed = parentBuffer.duplicate();
+                    completed.position(basePosition);
+                    completed.limit(basePosition + totalLength);
+                    parentRange.getByteBufferFuture().complete(completed);
+                  }
+                });
+  }
+
+  private static boolean allRangesDone(GcsObjectCombinedRange combinedObjectRange) {
+    for (GcsObjectRange child : combinedObjectRange.getUnderlyingRanges()) {
+      if (!child.getByteBufferFuture().isDone()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   void readCombinedRange(
       GcsObjectCombinedRange combinedObjectRange,
       IntFunction<ByteBuffer> allocate,
       Operation operation) {
+    if (allRangesDone(combinedObjectRange)) {
+      return;
+    }
     telemetry.measure(
         operation,
         recorder -> {
+          if (allRangesDone(combinedObjectRange)) {
+            return null;
+          }
           ReadStrategy readStrategy =
               new RandomReadStrategy(storage, itemId, readOptions, itemInfo);
           try (ReadChannel channel =
@@ -291,8 +408,22 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
                       combinedObjectRange));
             }
             int numOfBytesRead = 0;
+            int maxReadSliceBytes = 256 * 1024;
             while (dataBuffer.hasRemaining()) {
-              int bytesRead = channel.read(dataBuffer);
+              if (allRangesDone(combinedObjectRange)) {
+                Thread.currentThread().interrupt();
+                return null;
+              }
+              int originalLimit = dataBuffer.limit();
+              if (dataBuffer.remaining() > maxReadSliceBytes) {
+                dataBuffer.limit(dataBuffer.position() + maxReadSliceBytes);
+              }
+              int bytesRead;
+              try {
+                bytesRead = channel.read(dataBuffer);
+              } finally {
+                dataBuffer.limit(originalLimit);
+              }
               extractMetadataAfterRead(readStrategy);
               if (bytesRead < 0) {
                 // EOF reached.
