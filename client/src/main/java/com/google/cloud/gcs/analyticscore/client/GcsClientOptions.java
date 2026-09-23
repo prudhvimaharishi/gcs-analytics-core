@@ -82,6 +82,8 @@ public abstract class GcsClientOptions {
 
   public abstract GcsWriteOptions getGcsWriteOptions();
 
+  public abstract GcsPrefetchOptions getGcsPrefetchOptions();
+
   // Upload Session configurations
   public abstract int getUploadChunkSize();
 
@@ -104,6 +106,7 @@ public abstract class GcsClientOptions {
     return new AutoValue_GcsClientOptions.Builder()
         .setGcsReadOptions(GcsReadOptions.builder().build())
         .setGcsWriteOptions(GcsWriteOptions.builder().build())
+        .setGcsPrefetchOptions(GcsPrefetchOptions.builder().build())
         .setUploadChunkSize(24 * MB)
         .setUploadType(UploadType.CHUNK_UPLOAD)
         .setPcuBufferCount(1)
@@ -160,6 +163,8 @@ public abstract class GcsClientOptions {
         GcsReadOptions.createFromOptions(analyticsCoreOptions, prefix));
     optionsBuilder.setGcsWriteOptions(
         GcsWriteOptions.createFromOptions(analyticsCoreOptions, prefix));
+    optionsBuilder.setGcsPrefetchOptions(
+        GcsPrefetchOptions.createFromOptions(analyticsCoreOptions, prefix));
 
     return optionsBuilder.build();
   }
@@ -179,6 +184,8 @@ public abstract class GcsClientOptions {
     public abstract Builder setGcsReadOptions(GcsReadOptions readOptions);
 
     public abstract Builder setGcsWriteOptions(GcsWriteOptions writeOptions);
+
+    public abstract Builder setGcsPrefetchOptions(GcsPrefetchOptions prefetchOptions);
 
     public abstract Builder setUploadChunkSize(int size);
 

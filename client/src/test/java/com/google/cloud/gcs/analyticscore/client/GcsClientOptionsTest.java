@@ -171,4 +171,19 @@ class GcsClientOptionsTest {
     GcsClientOptions options = GcsClientOptions.createFromOptions(rawOptions, "gcs.");
     assertThat(options.getTemporaryPaths()).isEmpty();
   }
+
+  @Test
+  void builder_withDefaultValues_returnsNonNullPrefetchOptions() {
+    GcsClientOptions options = GcsClientOptions.builder().build();
+    assertThat(options.getGcsPrefetchOptions()).isNotNull();
+  }
+
+  @Test
+  void createFromOptions_withPrefetchMode_propagatesToPrefetchOptions() {
+    Map<String, String> rawOptions =
+        ImmutableMap.of("gcs.analytics-core.prefetch.mode", "PREDICTIVE_ROW_GROUP");
+    GcsClientOptions options = GcsClientOptions.createFromOptions(rawOptions, "gcs.");
+    assertThat(options.getGcsPrefetchOptions().getPrefetchMode())
+        .isEqualTo(GcsPrefetchOptions.PrefetchMode.PREDICTIVE_ROW_GROUP);
+  }
 }
