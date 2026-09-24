@@ -82,15 +82,15 @@ Without prefetching, the query engine stalls on GCS network round-trips (`5–25
 
 ### Components and Scope
 
-Predictive prefetching runs inside the storage input stream, between the query engine and GCS. It has one part per open file and four parts shared by every file of the same table scan on an executor.
+Predictive prefetching runs inside the storage input stream, between the query engine and GCS. It has two kinds of parts: a **per-file** part, created when the engine opens a file and dropped when it closes it, and **per-scan** parts, created once on each executor for a table scan and shared by every file that scan opens.
 
 ```mermaid
 flowchart LR
     Engine["Query Engine"]
-    subgraph PerFile["Per Open File"]
+    subgraph PerFile["Per File (one for each open file)"]
         Opt["Stream Optimizer"]
     end
-    subgraph Shared["Shared by All Streams of the Scan on an Executor"]
+    subgraph Shared["Per Scan (one set per executor, shared by all files)"]
         Footer["Footer Cache"]
         Hist["Schema History"]
         Cache["Prefetch Cache"]
@@ -107,13 +107,13 @@ flowchart LR
     Pool -- "prefetched bytes" --> Cache
 ```
 
-| Component | Lifetime | Job |
+| Component | Kind | Job |
 | :--- | :--- | :--- |
-| **Stream Optimizer** | One open file | Watches the engine's byte reads, decides what to prefetch next, and cancels unused prefetches when the file closes. |
-| **Footer Cache** | One table scan on one executor | Holds the tail of each file, filled when the engine first reads the footer. The Stream Optimizer only parses this copy and never fetches a footer itself. |
-| **Schema History** | One table scan on one executor | Remembers which columns the query reads and how often files are skipped, keyed by the table schema. |
-| **Prefetch Cache** | One table scan on one executor | Holds prefetched bytes until a foreground read uses them. |
-| **Read Pool** | One table scan on one executor | Runs all GCS downloads for the scan, both foreground and background. |
+| **Stream Optimizer** | Per file | Watches the engine's byte reads, decides what to prefetch next, and cancels unused prefetches when the file closes. |
+| **Footer Cache** | Per scan | Holds the tail of each file, filled when the engine first reads the footer. The Stream Optimizer only parses this copy and never fetches a footer itself. |
+| **Schema History** | Per scan | Remembers which columns the query reads and how often files are skipped, keyed by the table schema. |
+| **Prefetch Cache** | Per scan | Holds prefetched bytes until a foreground read uses them. |
+| **Read Pool** | Per scan | Runs all GCS downloads for the scan, both foreground and background. |
 
 **Scope.** The shared parts live as long as the storage filesystem instance that opens the files. Apache Iceberg creates one such instance per table scan on each executor, which is what makes the shared state scan-scoped. Engines that share one filesystem instance across the whole JVM would share history across scans.
 
