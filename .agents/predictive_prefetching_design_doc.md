@@ -152,14 +152,21 @@ Engines divide each large file into byte ranges called **task splits**, and each
 * **Small row groups**: The file has one row group, or several row groups much smaller than a split. One task reads several row groups in a row.
 * **Split-sized row groups**: Each row group is about as big as a split, so each row group goes to a different task, often on a different executor.
 
-The table shows what the stream does at each engine read:
+**Cold (first file).** The stream is still learning columns, so it prefetches very little:
 
-| Engine Read | Cold (First File) | Warm: Small Row Groups | Warm: Split-Sized Row Groups |
-| :--- | :--- | :--- | :--- |
-| **Footer (query has a `WHERE` condition)** | Nothing, since no columns are learned yet. | Prefetches the dictionary pages of all row groups. On a single-row-group file, also prefetches its data pages. | Prefetches the dictionary pages of all row groups. |
-| **Footer (query has no `WHERE` condition)** | Nothing. | Prefetches the data pages of the first row group. | Nothing. |
-| **Dictionary pages of row group `k`** | Learns the filter columns and prefetches the dictionary pages of later row groups. | Served from the cache. | Served from the cache. Once the dictionary pages of all filter columns in row group `k` are read, prefetches the data pages of row group `k`. This happens once per stream. |
-| **Data pages of row group `k`** | Learns the data columns, then prefetches the next row group as in the Warm columns. | Served from the cache when prefetched. Prefetches the next row group's data pages, so that download overlaps with decoding row group `k`. | Served from the cache. Prefetches the next row group's data pages only after the same stream has read data pages from two row groups. |
+| Engine Read | What the Stream Does |
+| :--- | :--- |
+| **Footer Read** | Nothing, since no columns are learned yet. |
+| **Dictionary Pages Read** *(only with `WHERE`)* | Learns the filter columns and prefetches the dictionary pages of later row groups. |
+| **Data Pages Read** | Learns the data columns. Small row groups: prefetches the next row group's data pages, using the columns learned so far. Split-sized row groups: waits until the stream has read data pages from two row groups. |
+
+**Warm (later files).** The stream knows the columns, so it can prefetch before the engine asks:
+
+| Engine Read | Small Row Groups | Split-Sized Row Groups |
+| :--- | :--- | :--- |
+| **Footer Read** | With `WHERE`: prefetches the dictionary pages of all row groups, plus the data pages if the file has one row group. Without `WHERE`: prefetches the data pages of the first row group. | With `WHERE`: prefetches the dictionary pages of all row groups. Without `WHERE`: nothing. |
+| **Dictionary Pages Read** *(only with `WHERE`)* | Served from the cache. No data page prefetch. | Served from the cache. Once the dictionary pages of all filter columns in row group `k` are read, prefetches the data pages of row group `k`. This happens once per stream. |
+| **Data Pages Read** | Served from the cache when prefetched. Prefetches the next row group's data pages, so that download overlaps with decoding row group `k`. | Served from the cache. Prefetches the next row group's data pages only after the stream has read data pages from two row groups. |
 
 **Why split-sized row groups are handled differently.** Every task reads the footer first, even the task that owns only the last row group. Prefetching data pages on the footer read would download another task's bytes. Prefetching the next row group after a task's own row group would do the same, because the task closes right after. So the stream waits for signals that show which row groups this task owns: reading the dictionary pages of row group `k` shows the task owns `k`, and reading data pages from two row groups shows the task covers more than one.
 
