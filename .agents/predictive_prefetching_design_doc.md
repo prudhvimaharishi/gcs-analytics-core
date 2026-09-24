@@ -129,11 +129,21 @@ The stream never sees the SQL query. It only sees raw byte-range reads. Column b
 
 | Step | What the Stream Does |
 | :--- | :--- |
-| **1. Read the footer** | Builds a map from byte ranges to columns, and computes a **Schema ID** by hashing the list of column names and types. |
+| **1. Read the footer** | Builds a map from byte ranges to columns, and computes the file's **Schema ID** (see below). |
 | **2. Classify each engine read** | A read inside a column's dictionary pages marks it as a **Dictionary Column** (used by the `WHERE` filter). A read inside its data pages marks it as a **Data Column** (returned by the query). |
-| **3. Save column names** | Stores the names, not the byte positions, in Schema History under the Schema ID. Columns are only added, never removed, for the rest of the scan. |
+| **3. Save column names** | Adds the column names, not the byte positions, to the Schema History entry for this Schema ID. |
 
-Once Schema History holds columns for a Schema ID, that schema is **Warm**. Every later file with the same schema can now be prefetched.
+**Schema ID.** The footer lists every column of the file with its name and type, in order. The stream joins them into one text signature and hashes it to a 32-bit number. Example: a file with columns `order_id` (integer), `status` (string), and `amount` (double) has a signature like `order_id:INT64; status:BYTE_ARRAY; amount:DOUBLE;`, which hashes to a number such as `#A1B2`. Two files get the same Schema ID only when they have the same column names and types in the same order. Files of the same table therefore share one ID, while a file written after a schema change (for example, an added column) gets a new ID and starts Cold.
+
+**Schema History.** Schema History is a small in-memory table shared by all files of the scan. It has one entry per Schema ID, and each entry holds two lists of column names:
+
+| Schema ID | Dictionary Columns | Data Columns |
+| :--- | :--- | :--- |
+| `#A1B2` | `[status]` | `[order_id, status]` |
+
+Every stream reading a file with that Schema ID adds to the same entry. Columns are only added, never removed, for the rest of the scan. The table is bounded in both the number of schemas and the number of columns per schema, so it stays small.
+
+Once an entry holds columns, that schema is **Warm**. Every later file with the same Schema ID can now be considered for prefetching. Whether a given file is actually prefetched, and which bytes, depends on its row-group layout and on how often recent files were skipped.
 
 > **Example** (`SELECT order_id, status FROM orders WHERE status = 'PENDING'`)
 > 1. File 1's footer is read. The stream builds its byte-to-column map. Nothing is known yet (**Cold**).
