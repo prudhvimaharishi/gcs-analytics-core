@@ -73,7 +73,8 @@ A table scan is divided into **task splits**: byte ranges of files, each read by
 
 A task reads only the row groups that start inside its split. So what decides which row groups a task reads is how big the row groups are compared to a split:
 
-* **Small row groups**: The file has one row group, or several row groups much smaller than a split. One task reads several row groups in a row.
+* **Single row group**: The file has exactly one row group, so one task reads the whole file.
+* **Small row groups**: The file has several row groups, each much smaller than a split. One task reads several row groups in a row.
 * **Large row groups**: Each row group is about as big as a split, so each row group goes to a different task.
 
 ## Goals and Non-Goals
@@ -162,23 +163,23 @@ Once the entry holds columns, the schema is **Warm**, and every later file with 
 
 ### 2. Base Design: Prefetching Only the Row Groups a Task Reads
 
-What the stream can safely prefetch depends on whether the file has small or large row groups (defined in Background).
+What the stream can safely prefetch depends on whether the file has a single row group, small row groups, or large row groups (defined in Background).
 
 **Cold (first file).** The stream is still learning columns, so it prefetches very little:
 
-| Engine Read | Small Row Groups | Large Row Groups |
-| :--- | :--- | :--- |
-| **Footer Read** | Nothing, since no columns are learned yet. | Nothing, since no columns are learned yet. |
-| **Dictionary Pages Read** | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. |
-| **Data Pages Read** | • Adds the columns to Data Columns.<br/>• Prefetches the next row group's data pages, using the columns learned so far. | • Adds the columns to Data Columns.<br/>• Does not prefetch the next row group yet, because this task may own only one row group.<br/>• Starts prefetching the next row group once the task has read data pages from two row groups. |
+| Engine Read | Single Row Group | Small Row Groups | Large Row Groups |
+| :--- | :--- | :--- | :--- |
+| **Footer Read** | Nothing, since no columns are learned yet. | Nothing, since no columns are learned yet. | Nothing, since no columns are learned yet. |
+| **Dictionary Pages Read** | • Adds the column to Dictionary Columns.<br/>• Nothing to prefetch, since there are no later row groups. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. |
+| **Data Pages Read** | • Adds the columns to Data Columns.<br/>• Nothing to prefetch, since there is no next row group. | • Adds the columns to Data Columns.<br/>• Prefetches the next row group's data pages, using the columns learned so far. | • Adds the columns to Data Columns.<br/>• Does not prefetch the next row group yet, because this task may own only one row group.<br/>• Starts prefetching the next row group once the task has read data pages from two row groups. |
 
 **Warm (later files).** The stream knows the columns, so it can prefetch before the engine asks:
 
-| Engine Read | Small Row Groups | Large Row Groups |
-| :--- | :--- | :--- |
-| **Footer Read** | • Dictionary Columns non-empty: prefetches the dictionary pages of all row groups, plus the data pages if the file has one row group.<br/>• Dictionary Columns empty: prefetches the data pages of the first row group. | • Dictionary Columns non-empty: prefetches the dictionary pages of all row groups.<br/>• Dictionary Columns empty: nothing. |
-| **Dictionary Pages Read** *(only when Dictionary Columns is non-empty)* | • Served from the cache.<br/>• No data page prefetch. | • Served from the cache.<br/>• Once the dictionary pages of all Dictionary Columns in row group `k` are read, prefetches the data pages of row group `k` (once per stream). |
-| **Data Pages Read** | • Served from the cache when prefetched.<br/>• Prefetches the next row group's data pages, so that download overlaps with decoding row group `k`. | • Served from the cache.<br/>• Does not prefetch the next row group yet, because this task may own only one row group.<br/>• Starts prefetching the next row group once the task has read data pages from two row groups. |
+| Engine Read | Single Row Group | Small Row Groups | Large Row Groups |
+| :--- | :--- | :--- | :--- |
+| **Footer Read** | • Dictionary Columns non-empty: prefetches the dictionary pages and data pages of the row group.<br/>• Dictionary Columns empty: prefetches the data pages of the row group. | • Dictionary Columns non-empty: prefetches the dictionary pages of all row groups.<br/>• Dictionary Columns empty: prefetches the data pages of the first row group. | • Dictionary Columns non-empty: prefetches the dictionary pages of all row groups.<br/>• Dictionary Columns empty: nothing. |
+| **Dictionary Pages Read** *(only when Dictionary Columns is non-empty)* | Served from the cache. | • Served from the cache.<br/>• No data page prefetch. | • Served from the cache.<br/>• Once the dictionary pages of all Dictionary Columns in row group `k` are read, prefetches the data pages of row group `k` (once per stream). |
+| **Data Pages Read** | Served from the cache. | • Served from the cache when prefetched.<br/>• Prefetches the next row group's data pages, so that download overlaps with decoding row group `k`. | • Served from the cache.<br/>• Does not prefetch the next row group yet, because this task may own only one row group.<br/>• Starts prefetching the next row group once the task has read data pages from two row groups. |
 
 **Why large row groups are handled differently.** Every task reads the footer first, even the task that owns only the last row group. Prefetching data pages on the footer read would download another task's bytes. Prefetching the next row group after a task's own row group would do the same, because the task closes right after. So the stream waits for signals that show which row groups this task owns: reading the dictionary pages of row group `k` shows the task owns `k`, and reading data pages from two row groups shows the task covers more than one.
 
