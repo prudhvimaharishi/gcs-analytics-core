@@ -43,6 +43,11 @@ flowchart LR
     end
 ```
 
+Engines divide each large file into byte ranges called **task splits**, and each split is read by one task. A task reads only the row groups that start inside its split. How big the row groups are compared to a split decides which row groups a task reads:
+
+* **Small row groups**: The file has one row group, or several row groups much smaller than a split. One task reads several row groups in a row.
+* **Split-sized row groups**: Each row group is about as big as a split, so each row group goes to a different task, often on a different executor.
+
 When executing a filtered query such as `SELECT order_id FROM orders WHERE status = 'PENDING'`, the query engine evaluates a three-stage filter funnel before reading multi-MiB data pages:
 
 ```mermaid
@@ -147,10 +152,7 @@ Once the entry holds columns, the schema is **Warm**, and every later file with 
 
 ### 2. Base Design: Prefetching Only the Row Groups a Task Reads
 
-Engines divide each large file into byte ranges called **task splits**, and each split is read by one task. A task reads only the row groups that start inside its split. How big the row groups are compared to a split decides what the stream can safely prefetch:
-
-* **Small row groups**: The file has one row group, or several row groups much smaller than a split. One task reads several row groups in a row.
-* **Split-sized row groups**: Each row group is about as big as a split, so each row group goes to a different task, often on a different executor.
+What the stream can safely prefetch depends on whether the file has small or split-sized row groups (defined in Background).
 
 **Cold (first file).** The stream is still learning columns, so it prefetches very little:
 
