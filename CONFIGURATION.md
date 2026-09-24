@@ -41,6 +41,7 @@ These settings control the predictive prefetcher, which learns the column access
 | Property | Type | Description | Default Value |
 | :--- | :--- | :--- | :--- |
 | `analytics-core.prefetch.mode` | Enum | Predictive prefetching strategy. Supported values: `PREDICTIVE_ROW_GROUP`, `DISABLED`. Values are case-insensitive and hyphens are accepted (e.g. `predictive-row-group`). | `DISABLED` |
+| `analytics-core.prefetch.dictionary-trigger` | Enum | Dictionary page read that triggers prefetching a row group's data pages. `FIRST_DICT_READ` prefetches once any learned filter column's dictionary in the row group is read; `LAST_DICT_READ` waits until all of them are read. Values are case-insensitive and hyphens are accepted. | `LAST_DICT_READ` |
 | `analytics-core.prefetch.buffer.cache.max-size-bytes` | Long | The maximum total capacity (in bytes) of the prefetch buffer cache. | `2147483648` (2 GB) |
 | `analytics-core.prefetch.buffer.cache.ttl-seconds` | Long | How long (in seconds) a prefetched block is retained in the buffer cache after it was last read or written. | `60` |
 | `analytics-core.prefetch.block.size-bytes` | Integer | The granularity (in bytes) at which the prefetcher requests and caches data. Every speculative request is aligned to this size, and cached bytes are resolved by block index. | `4194304` (4 MB) |

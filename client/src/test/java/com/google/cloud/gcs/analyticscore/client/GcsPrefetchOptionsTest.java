@@ -19,6 +19,7 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.DictionaryTrigger;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.PrefetchMode;
 import com.google.common.collect.ImmutableMap;
 import java.util.Map;
@@ -33,6 +34,32 @@ class GcsPrefetchOptionsTest {
     GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
 
     assertThat(options.getPrefetchMode()).isEqualTo(PrefetchMode.DISABLED);
+  }
+
+  @Test
+  void build_defaultValues_returnsLastDictReadTrigger() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getDictionaryTrigger()).isEqualTo(DictionaryTrigger.LAST_DICT_READ);
+  }
+
+  @Test
+  void createFromOptions_hyphenatedLowerCaseDictionaryTrigger_parsesTrigger() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.DICTIONARY_TRIGGER_KEY, "first-dict-read");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getDictionaryTrigger()).isEqualTo(DictionaryTrigger.FIRST_DICT_READ);
+  }
+
+  @Test
+  void createFromOptions_unrecognisedDictionaryTrigger_throwsIllegalArgumentException() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.DICTIONARY_TRIGGER_KEY, "middle-dict-read");
+
+    assertThrows(
+        IllegalArgumentException.class, () -> GcsPrefetchOptions.createFromOptions(map, PREFIX));
   }
 
   @Test

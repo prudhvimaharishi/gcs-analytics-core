@@ -19,6 +19,7 @@ package com.google.cloud.gcs.analyticscore.core.prefetch;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -74,6 +75,14 @@ final class RowGroupFilterTracker {
     }
     Set<String> readColumns = dictionaryColumnsByRowGroup.get(rowGroupOrdinal);
     return readColumns != null && readColumns.containsAll(knownDictionaryColumns);
+  }
+
+  /**
+   * Returns whether any of {@code knownDictionaryColumns} has been read in {@code rowGroupOrdinal}.
+   */
+  boolean hasReadAnyDictionary(int rowGroupOrdinal, Set<String> knownDictionaryColumns) {
+    Set<String> readColumns = dictionaryColumnsByRowGroup.get(rowGroupOrdinal);
+    return readColumns != null && !Collections.disjoint(readColumns, knownDictionaryColumns);
   }
 
   /** Returns whether any data page in {@code rowGroupOrdinal} has been read. */

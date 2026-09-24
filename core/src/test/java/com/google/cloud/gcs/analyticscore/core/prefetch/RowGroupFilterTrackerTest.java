@@ -29,6 +29,38 @@ import org.junit.jupiter.api.Test;
 class RowGroupFilterTrackerTest {
 
   private static final String FILTER_COLUMN = "status";
+  private static final String SECOND_FILTER_COLUMN = "region";
+
+  @Test
+  void hasReadAnyDictionary_oneOfTwoKnownColumnsRead_returnsTrue() {
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(0, FILTER_COLUMN);
+
+    boolean anyRead =
+        tracker.hasReadAnyDictionary(0, ImmutableSet.of(FILTER_COLUMN, SECOND_FILTER_COLUMN));
+
+    assertThat(anyRead).isTrue();
+  }
+
+  @Test
+  void hasReadAnyDictionary_onlyOtherRowGroupRead_returnsFalse() {
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(1, FILTER_COLUMN);
+
+    boolean anyRead = tracker.hasReadAnyDictionary(0, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(anyRead).isFalse();
+  }
+
+  @Test
+  void hasReadAnyDictionary_onlyUnknownColumnRead_returnsFalse() {
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(0, SECOND_FILTER_COLUMN);
+
+    boolean anyRead = tracker.hasReadAnyDictionary(0, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(anyRead).isFalse();
+  }
 
   @Test
   void findNextSurvivingRowGroup_skipsRowGroupNotInUpfrontDictionarySweep() {

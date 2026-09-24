@@ -24,6 +24,7 @@ import com.google.cloud.gcs.analyticscore.client.GcsCacheOptions;
 import com.google.cloud.gcs.analyticscore.client.GcsItemId;
 import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions;
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.DictionaryTrigger;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.PrefetchMode;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
@@ -628,6 +629,61 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
+  void read_firstOfTwoKnownDictionariesWithFirstDictReadTrigger_prefetchesRowGroupDataPages()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout =
+        openFileWithTwoLearnedDictionaryColumns(DictionaryTrigger.FIRST_DICT_READ);
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+
+    optimizer.read(
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(), ByteBuffer.allocate(8), channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(rg0DataChunk.getStartOffset());
+  }
+
+  @Test
+  void read_firstOfTwoKnownDictionariesWithLastDictReadTrigger_doesNotPrefetchRowGroupDataPages()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout =
+        openFileWithTwoLearnedDictionaryColumns(DictionaryTrigger.LAST_DICT_READ);
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+
+    optimizer.read(
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(), ByteBuffer.allocate(8), channel);
+
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg0DataChunk.getStartOffset());
+  }
+
+  /**
+   * Opens a small-row-group file whose schema history knows {@code id} as a data column and both
+   * {@code category} and {@code value} as dictionary columns, and returns its layout.
+   */
+  private ParquetFileLayout openFileWithTwoLearnedDictionaryColumns(DictionaryTrigger trigger)
+      throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent(FEW_ROW_GROUPS_RECORD_COUNT);
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP, BLOCK_SIZE_BYTES, trigger);
+    int fingerprint = multiRowGroupLayout.getSchemaFingerprint();
+    cacheManager.getSchemaAccessHistory().recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.VALUE_COLUMN);
+    return multiRowGroupLayout;
+  }
+
+  @Test
   void afterRead_outsideRowGroupsWithLearnedDictionaryColumn_prefetchesDictionaryPagesOnly()
       throws IOException {
     byte[] multiRowGroupContent = createMultiRowGroupContent();
@@ -846,10 +902,16 @@ class PredictivePrefetchOptimizerTest {
 
   private PredictivePrefetchOptimizer createOptimizer(
       PrefetchMode prefetchMode, int blockSizeBytes) {
+    return createOptimizer(prefetchMode, blockSizeBytes, DictionaryTrigger.LAST_DICT_READ);
+  }
+
+  private PredictivePrefetchOptimizer createOptimizer(
+      PrefetchMode prefetchMode, int blockSizeBytes, DictionaryTrigger dictionaryTrigger) {
     GcsPrefetchOptions prefetchOptions =
         GcsPrefetchOptions.builder()
             .setPrefetchMode(prefetchMode)
             .setBlockSizeBytes(blockSizeBytes)
+            .setDictionaryTrigger(dictionaryTrigger)
             .build();
     if (cacheManager == null) {
       cacheManager =

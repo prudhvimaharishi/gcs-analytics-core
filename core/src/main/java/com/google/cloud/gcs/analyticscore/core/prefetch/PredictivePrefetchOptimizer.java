@@ -215,7 +215,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     if (targetOrdinal < 0 || targetOrdinal >= rowGroupStartOffsets.length) {
       return false;
     }
-    return !isSplitMultiRowGroupFile() || filterTracker.getDataTouchedCount() >= 2;
+    return !isSplitMultiRowGroupFile();
   }
 
   @Override
@@ -330,8 +330,8 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   }
 
   /**
-   * Prefetches dictionary pages the footer did not already cover and, once every known dictionary
-   * column of {@code rowGroupOrdinal} has been read, prefetches that row group's data pages.
+   * Prefetches dictionary pages the footer did not already cover and, once the configured
+   * dictionary trigger is met for {@code rowGroupOrdinal}, prefetches that row group's data pages.
    */
   private void onDictionaryPageRead(VectoredSeekableByteChannel source, int rowGroupOrdinal) {
     int fingerprint = layout.getSchemaFingerprint();
@@ -343,10 +343,21 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     }
     if (!rowGroupsWithDataPrefetch.contains(rowGroupOrdinal)
         && accessHistory.shouldSpeculateOnDictionary(fingerprint)
-        && filterTracker.hasReadAllDictionaries(rowGroupOrdinal, dictionaryColumns)) {
+        && isDictionaryTriggerMet(rowGroupOrdinal, dictionaryColumns)) {
       rowGroupsWithDataPrefetch.add(rowGroupOrdinal);
       long ignored = speculateRowGroupDataPages(source, rowGroupOrdinal);
     }
+  }
+
+  private boolean isDictionaryTriggerMet(int rowGroupOrdinal, Set<String> dictionaryColumns) {
+    switch (prefetchOptions.getDictionaryTrigger()) {
+      case FIRST_DICT_READ:
+        return filterTracker.hasReadAnyDictionary(rowGroupOrdinal, dictionaryColumns);
+      case LAST_DICT_READ:
+        return filterTracker.hasReadAllDictionaries(rowGroupOrdinal, dictionaryColumns);
+    }
+    throw new IllegalStateException(
+        "Unknown dictionary trigger: " + prefetchOptions.getDictionaryTrigger());
   }
 
   private boolean isSplitMultiRowGroupFile() {
