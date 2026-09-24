@@ -125,15 +125,18 @@ flowchart LR
 
 ### 1. Learning Columns: Cold to Warm
 
-The stream never sees the SQL query. It only sees raw byte-range reads. Column byte positions change from file to file, but every file in the scan runs the same query and reads the same columns. So the stream learns column **names** on the first file, then looks up their **positions** in each later file's footer.
+The stream never sees the SQL query. It only sees raw byte-range reads. Column byte positions change from file to file, but every file in the scan runs the same query and reads the same columns. So the stream learns column **names** on the first file, then looks up their **positions** in each later file's footer. It uses two things to do this:
+
+* **Schema ID**: a hash of the column names and types listed in the footer. All files of the same table get the same ID.
+* **Schema History**: a map, shared by all files of the scan, from each Schema ID to the column names the query reads.
 
 | Step | What the Stream Does |
 | :--- | :--- |
-| **1. Read the footer** | Builds a map from byte ranges to columns, and computes a **Schema ID** by hashing the list of column names and types. |
+| **1. Read the footer** | Builds a map from byte ranges to columns, and computes the Schema ID. |
 | **2. Classify each engine read** | A read inside a column's dictionary pages marks it as a **Dictionary Column** (used by the `WHERE` filter). A read inside its data pages marks it as a **Data Column** (returned by the query). |
-| **3. Save column names** | Stores the names, not the byte positions, in Schema History under the Schema ID. Columns are only added, never removed, for the rest of the scan. |
+| **3. Save column names** | Adds the names, not the byte positions, to the Schema ID's entry in Schema History. Columns are only added, never removed. |
 
-Once Schema History holds columns for a Schema ID, that schema is **Warm**. Every later file with the same schema can now be prefetched.
+Once the entry holds columns, the schema is **Warm**, and every later file with the same Schema ID becomes a candidate for prefetching.
 
 > **Example** (`SELECT order_id, status FROM orders WHERE status = 'PENDING'`)
 > 1. File 1's footer is read. The stream builds its byte-to-column map. Nothing is known yet (**Cold**).
