@@ -144,7 +144,7 @@ flowchart LR
 The stream never sees the SQL query. It only sees raw byte-range reads. Column byte positions change from file to file, but every file in the scan runs the same query and reads the same columns. So the stream learns column **names** on the first file, then looks up their **positions** in each later file's footer. It uses two things to do this:
 
 * **Schema ID**: a hash of the column names and types listed in the footer. All files of the same table get the same ID.
-* **Schema History**: a map, shared by all files of the scan, that stores two lists for each Schema ID: **Dictionary Columns** (columns whose dictionary pages the engine read on their own, to check a filter) and **Data Columns** (columns whose data pages it read), collected so far in the scan.
+* **Schema History**: a map that stores two lists for each Schema ID: **Dictionary Columns** (columns whose dictionary pages the engine read without their data pages, to check a filter) and **Data Columns** (columns whose data pages it read). A column can be in both. It is shared by all files opened through the same file system instance (see Scope), so if an engine reuses that instance across scans, it also keeps columns from earlier queries that the current query may not use.
 
 | Step | What the Stream Does |
 | :--- | :--- |
@@ -170,7 +170,7 @@ What the stream can safely prefetch depends on whether it is a single-row-group 
 | Engine Read | Single-Row-Group Files | Small-Row-Group Files | Large-Row-Group Files |
 | :--- | :--- | :--- | :--- |
 | **Footer Read** | Nothing, since no columns are learned yet. | Nothing, since no columns are learned yet. | Nothing, since no columns are learned yet. |
-| **Dictionary Pages Read** | Adds the column to Dictionary Columns. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. |
+| **Dictionary Pages Read** | Adds the column to Dictionary Columns. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups.<br/>• No data page prefetch, because no Data Columns are known yet. |
 | **Data Pages Read** | Adds the columns to Data Columns. | • Adds the columns to Data Columns.<br/>• Prefetches the next row group's data pages, using the columns learned so far. | • Adds the columns to Data Columns.<br/>• Does not prefetch later data pages until the task has read at least two row groups. |
 
 **Warm (later files).** The stream knows the columns, so it can prefetch before the engine asks:
@@ -178,7 +178,7 @@ What the stream can safely prefetch depends on whether it is a single-row-group 
 | Engine Read | Single-Row-Group Files | Small-Row-Group Files | Large-Row-Group Files |
 | :--- | :--- | :--- | :--- |
 | **Footer Read** | Prefetches dictionary and data pages of the row group. | • If Dictionary Columns: dictionary pages of all row groups.<br/>• Otherwise: data pages of the first row group. | • If Dictionary Columns: dictionary pages of all row groups.<br/>• Otherwise: nothing. |
-| **Dictionary Pages Read** | Served from the cache. | • Served from the cache.<br/>• No data page prefetch. | • Served from the cache.<br/>• Once all Dictionary Columns of row group `k` are read, prefetches its data pages (once per stream). |
+| **Dictionary Pages Read** | Served from the cache. | • Served from the cache.<br/>• No data page prefetch. | • Served from the cache (prefetched on the footer read).<br/>• Once the task has read the dictionary pages of every Dictionary Column in row group `k`, prefetches the data pages of the Data Columns in `k`.<br/>• Only once per stream, so a peek at the next row group, which another task owns, does not download its data pages. |
 | **Data Pages Read** | Served from the cache. | • Served from the cache when prefetched.<br/>• Prefetches the next row group's data pages, so that download overlaps with decoding row group `k`. | • Served from the cache.<br/>• Does not prefetch later data pages until the task has read at least two row groups. |
 
 **Why large-row-group files wait for signals.** In a large-row-group file, each row group belongs to a different task. But every task reads the footer first. So the footer read does not tell the stream which row group this task owns. Example: a file has 4 row groups, and Task 2 owns only row group 2. If Task 2 prefetched data pages on the footer read, it could download row group 0, which is Task 0's. Prefetching row group 3 after row group 2 is also a waste, because Task 2 closes when it finishes row group 2. So the stream waits for signals:
@@ -186,7 +186,7 @@ What the stream can safely prefetch depends on whether it is a single-row-group 
 * Reading data pages from two row groups shows the task covers more than one.
 
 **Why the data prefetch waits for all Dictionary Columns and fires once.** When the task reads the dictionary pages of row group `k`, the stream prefetches the data pages of `k`. Two rules keep this prefetch safe:
-* **Wait for all Dictionary Columns.** With a filter like `WHERE a = 1 AND b = 2`, the engine checks `a`'s dictionary, then `b`'s. It can skip the row group after either check. Once every dictionary is read, the row group passed all checks, so its data pages will very likely be read.
+* **Wait for all Dictionary Columns.** With a filter like `WHERE a = 1 AND b = 2`, the engine typically checks `a`'s dictionary, then `b`'s, and can skip the row group after either check. Reaching `b`'s dictionary means the check on `a` passed. Only the check on `b` is still unknown. So once every dictionary is read, the row group has passed every check except maybe the last, and its data pages will very likely be read.
 * **Fire once per stream.** After row group 2, Task 2 sometimes peeks at the dictionary pages of row group 3. Firing once stops that peek from downloading Task 3's data pages.
 
 **Example (Warm schema, large-row-group file, Dictionary Columns non-empty).** A file has four large row groups, and Task 2 owns only row group 2:
@@ -212,6 +212,9 @@ sequenceDiagram
 > * On large-row-group files with empty Dictionary Columns, no dictionary page read shows which row group the task owns, so each task's own row group is never prefetched.
 > * On a small-row-group file that is split across several tasks, a task that starts partway through the file still prefetches the first row group's data pages on the footer read when Dictionary Columns is empty. Example: Task 2 starts at row group 8 but prefetches row group 0, which belongs to Task 0.
 > * On a small-row-group file with non-empty Dictionary Columns, neither the footer nor the dictionary pages trigger a data page prefetch, so the first row group each task reads is always a cache miss.
+> * On large-row-group files, Dictionary Columns can hold a column the current query does not filter on, when the file system instance is reused across scans. Example: an earlier query filtered on `c`, so Dictionary Columns = `[a, b, c]`. A new query with `WHERE a = 1 AND b = 2` never reads `c`'s dictionary, so the data page prefetch never fires. Reads are slower, but results stay correct. This lasts as long as the instance, because columns are never removed.
+> * On large-row-group files, the stream prefetches the dictionary pages of all row groups, including those owned by other tasks, while it carefully avoids downloading other tasks' data pages.
+> * On large-row-group files, if a task owns two row groups (for example, a small last row group), only the first one gets a data page prefetch from its dictionary pages.
 
 ---
 
