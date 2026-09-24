@@ -27,7 +27,6 @@ class PrefetchBufferCacheTest {
 
   private static final long MAX_SIZE_BYTES = 1024;
   private static final long TTL_SECONDS = 60;
-  private static final int BLOCK_SIZE_BYTES = 4;
   private static final long FIRST_RANGE_OFFSET = 0;
   private static final long SECOND_RANGE_OFFSET = 4;
   private static final byte[] FIRST_RANGE = {1, 2, 3, 4};
@@ -37,9 +36,7 @@ class PrefetchBufferCacheTest {
   @Test
   void constructor_zeroMaxSizeBytes_throwsIllegalArgumentException() {
     IllegalArgumentException exception =
-        assertThrows(
-            IllegalArgumentException.class,
-            () -> new PrefetchBufferCache(0, TTL_SECONDS, BLOCK_SIZE_BYTES));
+        assertThrows(IllegalArgumentException.class, () -> new PrefetchBufferCache(0, TTL_SECONDS));
 
     assertThat(exception).hasMessageThat().isEqualTo("maxSizeBytes must be positive");
   }
@@ -48,20 +45,9 @@ class PrefetchBufferCacheTest {
   void constructor_zeroTtlSeconds_throwsIllegalArgumentException() {
     IllegalArgumentException exception =
         assertThrows(
-            IllegalArgumentException.class,
-            () -> new PrefetchBufferCache(MAX_SIZE_BYTES, 0, BLOCK_SIZE_BYTES));
+            IllegalArgumentException.class, () -> new PrefetchBufferCache(MAX_SIZE_BYTES, 0));
 
     assertThat(exception).hasMessageThat().isEqualTo("ttlSeconds must be positive");
-  }
-
-  @Test
-  void constructor_zeroBlockSizeBytes_throwsIllegalArgumentException() {
-    IllegalArgumentException exception =
-        assertThrows(
-            IllegalArgumentException.class,
-            () -> new PrefetchBufferCache(MAX_SIZE_BYTES, TTL_SECONDS, 0));
-
-    assertThat(exception).hasMessageThat().isEqualTo("blockSizeBytes must be positive");
   }
 
   @Test
@@ -342,7 +328,7 @@ class PrefetchBufferCacheTest {
   }
 
   private static PrefetchBufferCache newCache() {
-    return new PrefetchBufferCache(MAX_SIZE_BYTES, TTL_SECONDS, BLOCK_SIZE_BYTES);
+    return new PrefetchBufferCache(MAX_SIZE_BYTES, TTL_SECONDS);
   }
 
   private static GcsItemId itemId(String objectName) {

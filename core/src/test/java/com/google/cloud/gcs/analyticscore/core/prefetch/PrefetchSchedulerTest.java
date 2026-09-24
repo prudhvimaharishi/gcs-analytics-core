@@ -51,7 +51,7 @@ class PrefetchSchedulerTest {
   @BeforeEach
   void createScheduler() {
     channel = new FakeVectoredSeekableByteChannel(createContent());
-    bufferCache = new PrefetchBufferCache(CONTENT_LENGTH, 60, RANGE_LENGTH);
+    bufferCache = new PrefetchBufferCache(CONTENT_LENGTH, 60);
     metricListener = new RecordingOperationListener();
     telemetry = new Telemetry(ImmutableList.of(metricListener));
     scheduler = new PrefetchScheduler(bufferCache, telemetry, MAX_CONCURRENT_RANGES);

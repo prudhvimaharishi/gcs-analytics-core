@@ -47,12 +47,9 @@ import java.util.function.IntFunction;
  */
 public final class PrefetchBufferCache {
 
-  private static final int DEFAULT_BLOCK_SIZE_BYTES = 4 * 1024 * 1024;
-
   private final Cache<RangeKey, CachedRange> ranges;
   private final ConcurrentHashMap<GcsItemId, ConcurrentSkipListSet<Long>> offsetsByItem =
       new ConcurrentHashMap<>();
-  private final int blockSizeBytes;
 
   /**
    * Creates a cache storing exact byte ranges.
@@ -61,21 +58,8 @@ public final class PrefetchBufferCache {
    * @param ttlSeconds how long a range is retained after it was last read or written
    */
   public PrefetchBufferCache(long maxSizeBytes, long ttlSeconds) {
-    this(maxSizeBytes, ttlSeconds, DEFAULT_BLOCK_SIZE_BYTES);
-  }
-
-  /**
-   * Creates a cache.
-   *
-   * @param maxSizeBytes the maximum total size of retained buffers
-   * @param ttlSeconds how long a range is retained after it was last read or written
-   * @param blockSizeBytes nominal block size preserved for configuration compatibility
-   */
-  public PrefetchBufferCache(long maxSizeBytes, long ttlSeconds, int blockSizeBytes) {
     checkArgument(maxSizeBytes > 0, "maxSizeBytes must be positive");
     checkArgument(ttlSeconds > 0, "ttlSeconds must be positive");
-    checkArgument(blockSizeBytes > 0, "blockSizeBytes must be positive");
-    this.blockSizeBytes = blockSizeBytes;
     this.ranges =
         Caffeine.newBuilder()
             .maximumWeight(maxSizeBytes)
@@ -91,11 +75,6 @@ public final class PrefetchBufferCache {
                   }
                 })
             .build();
-  }
-
-  /** Returns the configured nominal block size in bytes. */
-  public int getBlockSizeBytes() {
-    return blockSizeBytes;
   }
 
   /**

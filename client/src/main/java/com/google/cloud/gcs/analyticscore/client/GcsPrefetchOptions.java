@@ -50,7 +50,7 @@ public abstract class GcsPrefetchOptions {
   private static final PrefetchMode DEFAULT_PREFETCH_MODE = PrefetchMode.DISABLED;
   private static final long DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES = 2L * 1024 * 1024 * 1024; // 2 GB
   private static final long DEFAULT_BUFFER_CACHE_TTL_SECONDS = 60;
-  private static final int DEFAULT_BLOCK_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB
+  private static final int DEFAULT_BLOCK_SIZE_BYTES = 8 * 1024 * 1024; // 8 MB
   private static final int DEFAULT_HISTORY_MAX_COLUMNS = 256;
 
   /** Returns the prefetching strategy to apply. Defaults to {@code DISABLED}. */
@@ -69,11 +69,8 @@ public abstract class GcsPrefetchOptions {
   public abstract long getBufferCacheTtlSeconds();
 
   /**
-   * Returns the fixed size (in bytes) of a prefetch block, which is the smallest unit that is
-   * fetched from GCS and cached. Defaults to {@code 4194304} (4 MB).
-   *
-   * <p>Larger blocks mean fewer, bigger GCS requests and more sharing between columns that sit
-   * close together, at the cost of fetching bytes no column needed.
+   * Returns the maximum size (in bytes) of a single prefetched byte range slice. Defaults to {@code
+   * 8388608} (8 MB).
    */
   public abstract int getBlockSizeBytes();
 

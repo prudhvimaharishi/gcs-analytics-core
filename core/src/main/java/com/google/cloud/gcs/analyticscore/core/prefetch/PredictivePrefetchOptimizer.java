@@ -64,7 +64,6 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   private static final String PARQUET_EXTENSION = ".parquet";
   private static final int MAX_CONCURRENT_PREFETCH_RANGES = 32;
-  private static final long MAX_PREFETCH_RANGE_BYTES = 8L * 1024 * 1024;
   private static final long SPLIT_BOUNDARY_ROW_GROUP_BYTES = 64L * 1024 * 1024;
 
   private final GcsPrefetchOptions prefetchOptions;
@@ -545,12 +544,14 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   /**
    * Merges touching or overlapping sorted ranges and splits any span exceeding {@link
-   * #MAX_PREFETCH_RANGE_BYTES} so adjacent columns download in parallel without humongous buffers.
+   * GcsPrefetchOptions#getBlockSizeBytes()} so adjacent columns download in parallel without
+   * humongous buffers.
    */
-  private static List<Range<Long>> coalesceConnectedRanges(List<Range<Long>> sortedRanges) {
+  private List<Range<Long>> coalesceConnectedRanges(List<Range<Long>> sortedRanges) {
     if (sortedRanges.isEmpty()) {
       return sortedRanges;
     }
+    long maxRangeBytes = prefetchOptions.getBlockSizeBytes();
     List<Range<Long>> coalesced = new ArrayList<>(sortedRanges.size());
     Range<Long> current = sortedRanges.get(0);
     for (int i = 1; i < sortedRanges.size(); i++) {
@@ -558,19 +559,20 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       if (current.isConnected(next)) {
         current = current.span(next);
       } else {
-        appendBoundedSlices(coalesced, current);
+        appendBoundedSlices(coalesced, current, maxRangeBytes);
         current = next;
       }
     }
-    appendBoundedSlices(coalesced, current);
+    appendBoundedSlices(coalesced, current, maxRangeBytes);
     return coalesced;
   }
 
-  private static void appendBoundedSlices(List<Range<Long>> target, Range<Long> span) {
+  private static void appendBoundedSlices(
+      List<Range<Long>> target, Range<Long> span, long maxRangeBytes) {
     long start = span.lowerEndpoint();
     long end = span.upperEndpoint();
-    while (end - start > MAX_PREFETCH_RANGE_BYTES) {
-      long chunkEnd = start + MAX_PREFETCH_RANGE_BYTES;
+    while (end - start > maxRangeBytes) {
+      long chunkEnd = start + maxRangeBytes;
       target.add(Range.closedOpen(start, chunkEnd));
       start = chunkEnd;
     }

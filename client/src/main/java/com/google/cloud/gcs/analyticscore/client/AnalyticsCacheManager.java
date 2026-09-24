@@ -78,8 +78,7 @@ public class AnalyticsCacheManager {
     this.prefetchBufferCache =
         new PrefetchBufferCache(
             prefetchOptions.getBufferCacheMaxSizeBytes(),
-            prefetchOptions.getBufferCacheTtlSeconds(),
-            prefetchOptions.getBlockSizeBytes());
+            prefetchOptions.getBufferCacheTtlSeconds());
     this.schemaAccessHistory = new SchemaAccessHistory(prefetchOptions.getHistoryMaxColumns());
   }
 

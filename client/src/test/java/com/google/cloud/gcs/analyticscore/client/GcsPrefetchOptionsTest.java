@@ -210,7 +210,7 @@ class GcsPrefetchOptionsTest {
   void build_defaultValues_returnsDefaultBlockSizeBytes() {
     GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
 
-    assertThat(options.getBlockSizeBytes()).isEqualTo(4 * 1024 * 1024);
+    assertThat(options.getBlockSizeBytes()).isEqualTo(8 * 1024 * 1024);
   }
 
   @Test
