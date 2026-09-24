@@ -43,11 +43,6 @@ flowchart LR
     end
 ```
 
-Engines divide each large file into byte ranges called **task splits**, and each split is read by one task. A task reads only the row groups that start inside its split. How big the row groups are compared to a split decides which row groups a task reads:
-
-* **Small row groups**: The file has one row group, or several row groups much smaller than a split. One task reads several row groups in a row.
-* **Split-sized row groups**: Each row group is about as big as a split, so each row group goes to a different task, often on a different executor.
-
 When executing a filtered query such as `SELECT order_id FROM orders WHERE status = 'PENDING'`, the query engine evaluates a three-stage filter funnel before reading multi-MiB data pages:
 
 ```mermaid
@@ -65,6 +60,21 @@ Without prefetching, the query engine stalls on GCS network round-trips (`5–25
 1. **Columnar Sparsity**: Selecting 2 columns (`40 MiB`) out of a `128 MiB` row group leaves `88 MiB` of unprojected columns (`amount`) in between; fixed-window read-ahead downloads those unused bytes.
 2. **Non-Sequential Seeks**: The reader seeks backward from the footer at the end of the file to small `4 KiB` dictionary pages before issuing coalesced vectored reads for projected data pages.
 3. **High Filter Rejection**: Query engines frequently skip row groups or close files immediately after checking the footer or a `4 KiB` dictionary page; eagerly prefetching multi-MiB data pages wastes network bandwidth and memory.
+
+### How Engines Split Files Across Tasks
+
+A table scan is divided into **task splits**: byte ranges of files, each read by one task. Apache Iceberg aims for `128 MiB` per split by default (`read.split.target-size`) and cuts Parquet files only at row group boundaries. Depending on file and row group sizes, this gives three cases:
+
+| Case | Example (`128 MiB` splits) | Who Reads the File |
+| :--- | :--- | :--- |
+| **One file, one task** | A `100 MiB` file with one row group. | One task reads the whole file. |
+| **One file, many tasks** | A `512 MiB` file with four `128 MiB` row groups. | Four tasks, each reading one row group, often on different executors. |
+| **Many files, one task** | Ten `10 MiB` files. | Iceberg packs them into one split, so one task reads all ten files one after another. |
+
+A task reads only the row groups that start inside its split. So what decides which row groups a task reads is how big the row groups are compared to a split:
+
+* **Small row groups**: The file has one row group, or several row groups much smaller than a split. One task reads several row groups in a row.
+* **Split-sized row groups**: Each row group is about as big as a split, so each row group goes to a different task.
 
 ## Goals and Non-Goals
 
@@ -156,11 +166,11 @@ What the stream can safely prefetch depends on whether the file has small or spl
 
 **Cold (first file).** The stream is still learning columns, so it prefetches very little:
 
-| Engine Read | What the Stream Does |
-| :--- | :--- |
-| **Footer Read** | Nothing, since no columns are learned yet. |
-| **Dictionary Pages Read** *(only with `WHERE`)* | Learns the filter columns and prefetches the dictionary pages of later row groups. |
-| **Data Pages Read** | Learns the data columns. Small row groups: prefetches the next row group's data pages, using the columns learned so far. Split-sized row groups: waits until the stream has read data pages from two row groups. |
+| Engine Read | Small Row Groups | Split-Sized Row Groups |
+| :--- | :--- | :--- |
+| **Footer Read** | Nothing, since no columns are learned yet. | Nothing, since no columns are learned yet. |
+| **Dictionary Pages Read** *(only with `WHERE`)* | Learns the filter columns and prefetches the dictionary pages of later row groups. | Learns the filter columns and prefetches the dictionary pages of later row groups. |
+| **Data Pages Read** | Learns the data columns and prefetches the next row group's data pages, using the columns learned so far. | Learns the data columns. Prefetches the next row group's data pages only after the stream has read data pages from two row groups. |
 
 **Warm (later files).** The stream knows the columns, so it can prefetch before the engine asks:
 
