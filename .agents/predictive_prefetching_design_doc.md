@@ -38,7 +38,7 @@ flowchart LR
             PA --> DB
         end
         RG1["Row Group 1 (128 MiB)<br/>[Column A -> Column B]"]
-        Footer["File Footer (Last 64 KiB)<br/>[Schema, Offsets & Min/Max Stats]"]
+        Footer["File Footer (End of File)<br/>[Schema, Offsets & Min/Max Stats]"]
         PB --> RG1 --> Footer
     end
 ```
@@ -47,7 +47,7 @@ When executing a filtered query such as `SELECT order_id FROM orders WHERE statu
 
 ```mermaid
 flowchart LR
-    Step1["1. Read Footer<br/>(Last 64 KiB)"] --> Check1{"Pass In-Memory<br/>Min/Max Stats?"}
+    Step1["1. Read Footer<br/>(End of File)"] --> Check1{"Pass In-Memory<br/>Min/Max Stats?"}
     Check1 -- "Yes" --> Step2["2. Read Filter Column Dictionary<br/>(4 KiB at Dictionary Offset)"]
     Step2 --> Check2{"Value Present in<br/>Dictionary?"}
     Check2 -- "Yes" --> Step3["3. Vectored Read of Projected Data Pages<br/>(order_id & status Data Pages)"]
@@ -64,7 +64,7 @@ Without prefetching, the query engine stalls on GCS network round-trips (`5–25
 ## Goals and Non-Goals
 
 ### Goals
-* **Zero Unprojected Read Amplification**: Prefetch only the exact column byte ranges required by the active query.
+* **Minimal Read Amplification**: Prefetch only the column byte ranges the active query reads, adding at most `XX%` extra GCS egress over the same scan without prefetching.
 * **Query-Agnostic Column Learning**: Infer **Dictionary Columns** (columns whose dictionary pages are read) and **Data Columns** (columns whose data pages are read) directly from byte-range read requests on the first file, reusing that knowledge across subsequent files of the same schema.
 * **Filter-Aware Speculation**: Adapt dynamically to file and row-group filter pass rates so selective scans never download data pages for rejected files or pruned row groups.
 * **Foreground Priority Isolation**: Guarantee that background prefetching never starves urgent foreground reads or delays stream and filesystem close operations.
@@ -72,7 +72,7 @@ Without prefetching, the query engine stalls on GCS network round-trips (`5–25
 ### Non-Goals
 * **Cross-Query State Sharing**: Learned column history and cached buffers are scoped strictly to a single table scan instance on an executor; sharing state across unrelated queries or across separate scans in a self-join is a non-goal.
 * **Non-Parquet Formats**: Layout-aware prefetching targets Apache Parquet; other formats (CSV, JSON, ORC, Avro) use standard read paths.
-* **Parquet Modular Encryption with Encrypted Footers**: Standard GCS encryption (GMEK, CMEK, CSEK) and Parquet Modular Encryption with plaintext footers (`PAR1` mode) are fully supported. Only Parquet files with client-side encrypted footers (`PARE` magic bytes) cannot have their column offsets parsed at the storage layer and gracefully fall back to standard reads.
+* **Parquet Modular Encryption with Encrypted Footers**: Standard GCS encryption (GMEK, CMEK, CSEK) and Parquet Modular Encryption with plaintext footers (`PAR1` mode) are fully supported. Only Parquet files with client-side encrypted footers (`PARE` magic bytes) cannot have their column offsets parsed at the storage layer and gracefully fall back to standard reads. The same fallback applies when a footer is larger than the cached file tail.
 
 ---
 
@@ -80,203 +80,220 @@ Without prefetching, the query engine stalls on GCS network round-trips (`5–25
 
 ## High-Level Design
 
-*Note: This section presents the conceptual architecture, base prefetching behavior, and runtime guardrails in progressive order. Concrete Java class names, method contracts, and configuration properties are covered in the Low-Level Design.*
+### Components and Scope
 
-### Core Idea — Bridging Raw Byte Reads and Columnar Layouts
+Predictive prefetching runs inside the storage input stream. It has one short-lived part per open file and three parts that are shared by every file of the same table scan on an executor.
 
-A storage input stream never sees the SQL query (`SELECT order_id, status FROM orders WHERE status = 'PENDING'`)—it only receives raw byte-range requests (`read(offset, length)`). Predictive prefetching bridges this gap using three properties of analytical Parquet scans:
+```mermaid
+flowchart LR
+    subgraph PerFile["Per Open File (one per stream)"]
+        Opt["Stream Optimizer"]
+    end
+    subgraph Shared["Shared by All Streams of the Scan on an Executor"]
+        Hist["Schema History"]
+        Cache["Prefetch Cache"]
+        Pool["Read Pool"]
+    end
+    Opt -- "learned columns & read rates" --> Hist
+    Opt -- "schedules background reads" --> Pool
+    Pool -- "stores downloaded bytes" --> Cache
+    Opt -- "serves foreground reads" --> Cache
+```
 
-1. **Every File Begins with a Self-Describing Footer**: Before reading any columns, the query engine always reads the last bytes of the Parquet file (the footer), which contains the table's schema and the exact start and end byte offsets for every column's dictionary and data pages.
-2. **Byte Offsets Change Per File, But Column Names Stay Constant Across the Scan**: Column `status` might sit at `10 MiB` in `orders_001.parquet` and `18 MiB` in `orders_002.parquet`, so raw byte offsets cannot be reused across files. However, every file in the table scan executes the exact same SQL query and therefore reads the **exact same column names** (`Dictionary Columns = [status]` and `Data Columns = [order_id, status]`).
-3. **Translate Byte Reads $\to$ Column Names on File 1, Then Column Names $\to$ Byte Offsets on File 2+**: By intersecting `File 1`'s foreground byte reads with `File 1`'s footer map, the stream learns the query's required **column names**. When `File 2`'s footer is read, the stream looks up those learned column names in `File 2`'s footer map to find their exact byte offsets in `File 2`—and downloads them in the background while the CPU is busy parsing footers or decoding earlier data.
+| Component | Lifetime | Job |
+| :--- | :--- | :--- |
+| **Stream Optimizer** | One open file | Watches the engine's byte reads, decides what to prefetch next, and cancels unused prefetches when the file closes. |
+| **Schema History** | One table scan on one executor | Remembers which columns the query reads and how often files are skipped, keyed by the table schema. |
+| **Prefetch Cache** | One table scan on one executor | Holds prefetched bytes until a foreground read uses them, then drops them. |
+| **Read Pool** | One table scan on one executor | Runs foreground and background downloads, always putting foreground reads first. |
+
+The shared parts live as long as the storage filesystem instance that opens the files. Apache Iceberg creates one such instance per table scan on each executor, which is what makes the shared state scan-scoped. Engines that share one filesystem instance across the whole JVM would share history across scans.
 
 ---
 
-### 1. How the Storage Stream Learns Columns Without SQL Hints (Cold Start $\to$ Warm Schema)
+### 1. Learning Columns: Cold to Warm
 
-The storage stream never sees the SQL query—it only sees raw byte reads like `read(offset = 10 MiB, length = 100 KiB)`. It learns which columns the query needs in **3 steps**:
+The stream never sees the SQL query. It only sees raw byte-range reads. It learns which columns the query needs from three facts about Parquet scans:
 
-1. **Build a Byte-to-Column Map & Schema ID from the Footer**: Every Parquet footer lists the table's column names/types and the start/end byte of every column's **Dictionary** and **Data** inside that file. When a stream reads the footer, it hashes the `"<columnName>:<type>;"` list into a 32-bit **Schema ID** (`#A1B2`) and saves the file's byte-to-column lookup map in memory.
-2. **Match Incoming Reads to the Map**: Whenever the query engine reads a byte range, the stream checks which column owns those bytes in the map:
-   * Read lands in a column's **Dictionary bytes** $\to$ tag that column as a **Dictionary Column** (used for `WHERE` filtering).
-   * Read lands in a column's **Data bytes** $\to$ tag that column as a **Data Column** (returned by `SELECT`).
-3. **Save Column Names (Not Byte Offsets) in `Schema History`**: Because `status` might sit at `10 MiB` in File 1 and `18 MiB` in File 2, the stream saves the **column names** in shared `Schema History` under Schema ID `#A1B2`. Schema `#A1B2` is now **Warm** for all subsequent files.
+1. **The footer maps bytes to columns.** The engine always reads the footer first. The footer lists every column and where its dictionary pages and data pages sit inside the file.
+2. **Byte positions change per file, column names do not.** Column `status` sits at a different place in every file, but every file in the scan runs the same query and reads the same columns.
+3. **So learn names once, then look up positions per file.** On the first file, the stream matches the engine's reads against the footer to learn column names. On every later file, it looks those names up in that file's footer to find the bytes to prefetch.
 
-> **Small Example (`SELECT order_id, status FROM orders WHERE status = 'PENDING'`)**:  
-> 1. **Footer Read (`orders_001.parquet`)**: Builds File 1's map under Schema `#A1B2`: `order_id` Data (`0–10 MiB`), `status` Dict (`10.0–10.1 MiB`), `status` Data (`10.1–15 MiB`), `amount` Data (`15–40 MiB`).  
-> 2. **Engine Reads `10.0–10.1 MiB`**: Matches `status` Dict $\to$ records `Dictionary Columns = [status]`.  
-> 3. **Engine Reads `0–10 MiB` & `10.1–15 MiB`**: Matches `order_id` and `status` Data (skips `amount`) $\to$ records `Data Columns = [order_id, status]`.
+The stream learns in three steps:
+
+| Step | What the Stream Does |
+| :--- | :--- |
+| **1. Read the footer** | Builds a map from byte ranges to columns, and computes a **Schema ID** by hashing the list of column names and types. |
+| **2. Classify each engine read** | A read inside a column's dictionary pages marks it as a **Dictionary Column** (used by the `WHERE` filter). A read inside its data pages marks it as a **Data Column** (returned by the query). |
+| **3. Save column names** | Stores the names, not the byte positions, in Schema History under the Schema ID. Columns are only added, never removed, for the rest of the scan. |
+
+Once Schema History holds columns for a Schema ID, that schema is **Warm**, and every later file with the same schema can be prefetched.
+
+> **Example** (`SELECT order_id, status FROM orders WHERE status = 'PENDING'`)
+> 1. File 1's footer is read. The stream builds its byte-to-column map. Nothing is known yet (**Cold**).
+> 2. The engine reads the dictionary of `status`. Dictionary Columns = `[status]`.
+> 3. The engine reads the data pages of `order_id` and `status`, and skips `amount`. Data Columns = `[order_id, status]`. The schema is now **Warm**.
+> 4. File 2's footer is read. The stream finds where the `status` dictionary and the `order_id` and `status` data pages sit in File 2, and starts downloading them.
+
+If a file's footer cannot be parsed (it was not cached, it is larger than the cached tail, or it is encrypted), the stream does not prefetch for that file.
 
 ---
 
-### 2. The Base Design — Single-Row-Group vs. Multi-Row-Group Files
+### 2. Base Design: Files With Small Row Groups vs. Split-Sized Row Groups
 
-Once Schema Fingerprint `#A1B2` is **Warm** in `Schema History`, when the next file (`orders_002.parquet`) reads its footer, the Per-Stream Optimizer looks up `#A1B2`'s learned `Dictionary Columns` (`[status]`) and `Data Columns` (`[order_id, status]`) inside `orders_002.parquet`'s own parsed footer layout to resolve their exact byte offsets in `orders_002.parquet`. How the optimizer schedules background prefetches for those byte offsets depends on whether the file contains a **Single Row Group** or **Multiple Row Groups**:
+What the stream prefetches on a Warm schema depends on how the engine hands the file to tasks:
 
-| File Layout | 1. Cold Start (First Stream) | 2. Warm Schema — On Footer Read | 3. Warm Schema — On `Row Group k` Dictionary Read | 4. Warm Schema — On `Row Group k` Data Read |
-| :--- | :--- | :--- | :--- | :--- |
-| **Single-Row-Group File (`1 Row Group`)** | **Prefetches nothing** on footer or dictionary reads; updates `Dictionary Columns` on dictionary reads and `Data Columns` on data reads. | **Immediately prefetches `Row Group 0` dictionary pages AND `Row Group 0` data pages** while the CPU parses the footer. | **100% Cache Hit** (dictionary pages were already prefetched on Footer Read). | **100% Cache Hit** (data pages were already prefetched on Footer Read). |
-| **Multi-Row-Group File (`Row Groups 0 .. N-1`)** | **Footer Read**: Prefetches nothing.<br/>**`RG k` Dict Read**: Updates `Dictionary Columns` & **immediately prefetches remaining dictionary pages (`RG k+1 .. N-1`)**.<br/>**`RG k` Data Read**: Updates `Data Columns` & prefetches **`RG k + 1` data pages**. | **Prefetches only the dictionary pages (`RG 0 .. N-1`)** across the file; **holds back data pages** until the task reveals which row group `k` it owns. | **100% Cache Hit** on `RG k` dictionary + **immediately prefetches `RG k` data pages** while the CPU evaluates the dictionary filter. | **100% Cache Hit** on `RG k` data + **prefetches `RG k + 1` data pages** once `RG k` finishes (when the stream scans multiple row groups). |
+* **Small row groups**: The file has one row group, or several row groups that are much smaller than a task split. One task reads several row groups in a row, often the whole file.
+* **Split-sized row groups**: Each row group is about the size of a task split. The engine gives each row group to a different task, often on different executors.
 
-#### Why Single-Row-Group and Multi-Row-Group Files Behave Differently
+The table shows what happens at each read the engine makes on a Warm schema:
 
-* **How Single-Row-Group Files Work**:
-  * In a single-row-group file (`<= 128 MiB`), a single task owns the entire file.
-  * As soon as a warm stream reads the footer, the optimizer immediately launches background downloads for both the **dictionary pages** and the **data pages** of `Row Group 0`, overlapping network I/O with CPU footer parsing and reader initialization.
-* **How Multi-Row-Group Files Work (With Concrete 4-Task Split Example)**:
-  * Suppose `orders_large.parquet` (`512 MiB`) contains four `128 MiB` row groups (`RG 0` at `0–128 MiB`, `RG 1` at `128–256 MiB`, `RG 2` at `256–384 MiB`, and `RG 3` at `384–512 MiB`). Distributed engines (Spark, Iceberg, Trino) typically split this file along `128 MiB` boundaries and assign each row group to a separate task (`Task 0` through `Task 3`) across different executors.
-  * **Why Footer Read Cannot Prefetch `RG 0` Data Pages**: When `Task 2` (assigned only `RG 2` at `256–384 MiB`) opens the file and reads the footer, prefetching `RG 0` data pages would download `Task 0`'s data into `Task 2`'s cache and discard it when `Task 2` closes. Therefore, on split-sized multi-row-group files, Footer Read prefetches **only the small dictionary pages** across all row groups and holds back data pages.
-  * **How `Task 2` Triggers Its Own `RG 2` Data Pages**: Next, `Task 2` seeks to `256 MiB` and reads `RG 2`'s dictionary page. That read acts as a targeted beacon telling the optimizer *"This stream owns `RG 2`"*, immediately launching the background download for **`RG 2`'s data pages** while the CPU checks the dictionary.
-  * **How Multi-Row-Group Streams Pipeline `RG k -> RG k + 1`**: When a single stream scans multiple row groups sequentially, finishing the foreground read of `RG k`'s data pages triggers a background prefetch of **`RG k + 1`'s data pages**, overlapping `RG k + 1`'s network download with the CPU decoding of `RG k`.
+| Engine Read | Small Row Groups | Split-Sized Row Groups |
+| :--- | :--- | :--- |
+| **Footer** | With a filter: prefetches the dictionary pages of all row groups. On a single-row-group file, also prefetches its data pages.<br/>Without a filter: prefetches the data pages of the first row group. | With a filter: prefetches the dictionary pages of all row groups.<br/>Without a filter: prefetches nothing. |
+| **Dictionary of row group `k`** | Served from the cache. | Served from the cache. Once all filter columns of row group `k` are read, prefetches the data pages of row group `k`. This happens once per stream. |
+| **Data of row group `k`** | Served from the cache when prefetched. Prefetches the rest of row group `k` and the data pages of the next row group, so the next download overlaps with decoding row group `k`. | Served from the cache. Prefetches the next row group only after the same stream has read data from two row groups. |
+
+**Why split-sized row groups are handled differently.** Take a large file with four split-sized row groups, read by four tasks. Task 2 owns only row group 2, but it still reads the footer first. If Task 2 prefetched row group 0's data on the footer read, it would download Task 0's bytes and throw them away when it closes. So on the footer read the stream prefetches only the small dictionary pages. Task 2 then reads the dictionary of row group 2, which tells the stream "this stream owns row group 2", and the stream starts downloading row group 2's data while the engine checks the dictionary. For the same reason, the stream does not prefetch row group 3 after row group 2, because Task 2 closes right after. The stream only starts prefetching the next row group once it has seen the same stream read two row groups, which proves the task covers more than one.
+
+**Why the trigger waits for all filter columns.** Readers sometimes read the dictionary of the *next* row group right after their own. Waiting until every filter column of row group `k` is read, and firing only once per stream, stops a peek at the next row group's dictionary from starting a large data download.
+
+**Cold start (first file).** The first file prefetches nothing on the footer read. Each dictionary read prefetches the dictionaries of later row groups. Data reads follow the table above, using the columns learned so far.
+
+> **Known gap**: A query without a filter on split-sized row groups has no dictionary read to signal which row group the task owns, so each task's own row group is never prefetched.
 
 ```mermaid
 sequenceDiagram
-    participant Engine as Query Engine
-    participant Stream as Per-Stream Optimizer
-    participant Shared as Shared Schema History & Buffer Cache
-    participant GCS as GCS Network (Priority Pool)
+    participant Engine as Query Engine (Task 2)
+    participant Opt as Stream Optimizer
+    participant Cache as Prefetch Cache
+    participant GCS as GCS
 
-    rect rgb(240, 248, 255)
-    Note over Engine,GCS: File 1 (Cold Start, Multi-RG): Learn Dictionary & Data Columns, Overlap RG 1 with RG 0 Decode
-    Engine->>Stream: 1. Read Footer -> Parse layout (Schema #A1B2 is Cold)
-    Engine->>Stream: 2. Read 'status' Dictionary Page in RG 0
-    Stream->>Shared: Add to Dictionary Columns = [status]; prefetch RG 1..N-1 'status' Dictionary Pages
-    Engine->>Stream: 3. Read {order_id, status} Data Pages in RG 0
-    Stream->>Shared: Add to Data Columns = [order_id, status]; mark File 1 Data Read
-    Stream->>GCS: Background prefetch RG 1 {order_id, status} Data Pages (overlaps CPU decode of RG 0)
-    Engine->>Stream: 4. Read RG 1 Data Pages -> 100% Buffer Cache Hit!
-    end
-
-    rect rgb(235, 255, 235)
-    Note over Engine,GCS: File 2 (Warm Schema): Overlap Prefetch with CPU Footer & Dictionary Setup
-    Engine->>Stream: 5. Open File 2 & Read Footer (Schema #A1B2 is Warm)
-    Stream->>GCS: Immediately prefetch File 2 Dictionary Pages (+ RG 0 Data Pages on 1-RG file)
-    Engine->>Stream: 6. Read File 2 Dictionary & Data Pages -> 100% Buffer Cache Hit!
-    end
+    Engine->>Opt: Read footer (schema is Warm)
+    Opt->>GCS: Prefetch dictionary pages of all row groups
+    Engine->>Cache: Read row group 2 dictionary (cache hit)
+    Opt->>GCS: Prefetch row group 2 data pages
+    Note over Engine: Checks dictionary while data downloads
+    Engine->>Cache: Read row group 2 data pages (cache hit)
+    Engine->>Opt: Close stream
+    Opt->>Cache: Drop unused dictionary pages
 ```
 
 ---
 
-### 3. Guardrail 1 — Selective Queries & Read-Rate Gating (Cross-File Pruning)
+### 3. Guardrail 1: Selective Queries and Read-Rate Gates
 
-#### Which Queries Need This & Why the Base Design Alone Fails
+#### What Breaks
 
-On **highly selective filter queries** (such as `WHERE order_date = '2026-09-23'` or `WHERE customer_id = 'CUST_999'`), a table scan may open thousands of files where **`90%+` of files contain zero matching rows**. Unconditionally prefetching on Footer Read breaks selective queries due to two race conditions:
+Highly selective queries, such as `WHERE order_date = '2026-09-23'` on date-partitioned data, open many files that contain no matching rows. The Base Design prefetches on the footer read, which wastes downloads in two ways:
 
-1. **The Footer Min/Max Race (`~3 µs` In-Memory CPU Check vs. Background Download)**:
-   * **What the Optimizer Knows on Footer Read**: Once the schema is warm after File 1, the optimizer immediately knows which columns the query needs as soon as File 2's footer is read.
-   * **What the Query Engine Does Next (`~3 µs` CPU Check)**: Before reading any column bytes from File 2, the query engine parses the footer in memory and checks whether the filter value (`'2026-09-23'`) falls inside File 2's `[min, max]` statistics (`['2026-01-01', '2026-01-31']`). This CPU check takes `~3 µs` and requires **zero** column reads.
-   * **Why Eager Prefetching Loses the Race**: When `90%` of files fail the `[min, max]` check, the engine closes `900` out of `1,000` streams just `3 µs` after reading each footer.
-   * **Network & Shuffle Impact**: Launching background prefetches on Footer Read across those `900` skipped files fires hundreds of wasted HTTP GET requests microseconds before each stream closes—saturating network bandwidth and starving downstream shuffle stages.
-2. **The Dictionary Filter Race (Dictionary Read vs. Data Page Download)**:
-   * **When Footer Stats Cannot Reject the File**: A column with wide `[min, max]` bounds (such as `WHERE customer_id = 'CUST_999'` inside an alphabetical range `['CUST_000', 'CUST_ZZZ']`) passes the footer `[min, max]` check even when `'CUST_999'` is absent from the file.
-   * **What the Query Engine Does Next**: The engine next reads only the small **dictionary page** at the start of the column chunk to check if `'CUST_999'` is present. If absent, the engine skips the row group or closes the file with **zero** data page reads.
-   * **Why Data Prefetching Must Be Gated Separately**: If `95%` of files pass the wide `[min, max]` bounds but fail the dictionary check, prefetching the small dictionary page is inexpensive, whereas prefetching the multi-megabyte data pages wastes massive network bandwidth.
+1. **Skipped after the footer.** After reading the footer, the engine checks the filter value against the file's min/max statistics in memory, in a few microseconds. If the value is outside the range, the engine closes the file without reading any column. Prefetches started on the footer read are wasted HTTP requests.
+2. **Skipped after the dictionary.** When min/max ranges are wide (for example, `customer_id` from `CUST_000` to `CUST_ZZZ`), the file passes the min/max check. The engine then reads the column's dictionary, finds the value missing, and closes the file without reading any data pages. Prefetching the small dictionary is cheap, but prefetching the much larger data pages is wasted.
 
-#### How the Two Read Rates Are Calculated (8-File Sliding Window)
+#### How the Stream Measures It
 
-To adapt automatically to any query's selectivity without knowing the SQL predicate, `Schema History` records how far the engine read in each of the **last 8 closed files** and computes two rates whose names directly state what they gate:
+When a file closes, Schema History records how far the engine got:
 
-| File Outcome When Stream Closes | What the Engine Actually Read | Read-Rate Formulas (Over Last 8 Closed Files) |
+| File Outcome | What the Engine Read |
+| :--- | :--- |
+| **Skipped after Footer** | Only the footer. |
+| **Skipped after Dictionary** | At least one dictionary page, but no data pages. |
+| **Data Read** | At least one data page. Recorded as soon as the first data page is read. |
+
+From these, it computes two rates:
+
+$$\text{Dictionary Read Rate} = \frac{\text{Skipped after Dictionary} + \text{Data Read}}{\text{last 8 files}}$$
+
+$$\text{Data Read Rate} = \frac{\text{Data Read}}{\text{last 8 files that read a dictionary or data page}}$$
+
+Each gate stays open while its rate is at least 50%, or while fewer than 2 files have been recorded.
+
+#### How the Gates Change the Base Design
+
+| | **Data Read Rate ≥ 50%** | **Data Read Rate < 50%** |
 | :--- | :--- | :--- |
-| **`Skipped after Footer`** | Read **only the footer**, then closed (`0` dictionary reads, `0` data reads). | $$\text{Dictionary Read Rate} = \frac{\text{Skipped after Dictionary} + \text{Data Read}}{\text{Total Closed Files (up to 8)}}$$ <br/>*(How often a file reads at least the Dictionary)* |
-| **`Skipped after Dictionary`** | Read **$\ge 1$ dictionary page**, then closed (`0` data reads). | $$\text{Data Read Rate} = \frac{\text{Data Read}}{\text{Skipped after Dictionary} + \text{Data Read}}$$ <br/>*(How often a dictionary-checked file goes on to read Data)* |
-| **`Data Read`** | Read **$\ge 1$ data page** (file matched all filters). | Raises both **`Dictionary Read Rate`** and **`Data Read Rate`**. |
+| **Dictionary Read Rate ≥ 50%** | **Footer**: Base Design.<br/>**Dictionary**: Base Design. | **Footer**: dictionary pages only, never data pages.<br/>**Dictionary**: no data prefetch. Data waits until the engine reads a data page. |
+| **Dictionary Read Rate < 50%** | **Footer**: nothing.<br/>**Dictionary of row group `k`**: the read proves the file passed min/max, so the stream prefetches the dictionaries from row group `k` onward and, once all filter columns of row group `k` are read, the data pages of row group `k`. This applies to both file types. | **Footer**: nothing.<br/>**Dictionary**: remaining dictionaries only. Data waits until the engine reads a data page. |
 
-#### How Read Rates Modify the Base Design
-
-Both gates default to open during warm-up ($< 2$ closed files) and stay open whenever their read rate is **$\ge 50\%$**:
-
-| Read-Rate State | What Happens on Footer Read | What Happens on `Row Group k` Dictionary Read | Why This Works |
-| :--- | :--- | :--- | :--- |
-| **Normal Scan (`Dictionary Read Rate >= 50%` & `Data Read Rate >= 50%`)** | **Base Design Active**: Prefetches dictionary pages + `RG 0` data pages (1-RG file) or all dictionary pages (multi-RG file). | **Base Design Active**: Serves dictionary from cache; prefetches `RG k` data pages on multi-RG files. | Overlaps network downloads with CPU footer setup and dictionary evaluation when most files read data. |
-| **Most Files Skipped after Footer (`Dictionary Read Rate < 50%`)** | **Pauses ALL Footer-Read Prefetching** (`0` dictionary and `0` data requests issued on Footer Read). | **Uses Dictionary Read as Proof File Passed Footer Stats**: If a file passes the `~3 µs` footer `[min, max]` check, the engine's foreground read of `RG k`'s dictionary page immediately triggers background prefetching of **remaining dictionary pages (`RG k .. N-1`) AND `RG k` data pages** (if `Data Read Rate >= 50%`). | Files skipped after the footer close in `~3 µs` with **zero** wasted HTTP requests, while matching files still overlap data-page downloads with CPU dictionary evaluation. |
-| **Most Files Skipped after Dictionary (`Data Read Rate < 50%`)** | Prefetches **only dictionary pages** (if `Dictionary Read Rate >= 50%`); **never data pages**. | Prefetches **only remaining dictionary pages**; **holds back `RG k` data pages** until the engine actually reads a data page. | Prevents downloading data pages when almost all files are skipped after checking the dictionary. |
-
-* **Self-Healing Sliding Window**: Because the rates only look at the last 8 closed files, if a selective scan moves from non-matching partitions into a cluster of matching partitions, 4 **`Data Read`** files in a row automatically raise both rates back to $\ge 50\%$ and re-enable Footer-Read prefetching.
+The rates only look at the last 8 files, so they recover by themselves. Example: if a scan moves from non-matching partitions into matching ones, 4 Data Read files in a row bring the Dictionary Read Rate back to 50% and turn footer-read prefetching back on.
 
 ```mermaid
 flowchart TD
-    Open["1. Open Parquet Stream & Read Cached Footer"] --> IsWarm{"2. Is Schema Warm in<br/>Scan-Scoped History?"}
-
-    %% Cold Start
-    IsWarm -- "NO (Cold Start: File 1)" --> ColdFlow["Footer Read: Do Nothing<br/>RG k Dict Read: Learn Filter Column &<br/>Prefetch Remaining File Dicts (RG k+1..N-1)"]
-    ColdFlow --> ToPhase2["Handoff -> Phase 2:<br/>Engine Reads RG k Data Pages"]
-
-    %% Warm Schema
-    IsWarm -- "YES (Warm Schema: File 2+)" --> FooterGate{"3. Dictionary Read Rate >= 50%?"}
-
-    FooterGate -- "NO (< 50%: Most Files Skipped after Footer)" --> Suppress["Footer Read: Do Nothing<br/>(If Skipped by ~3 µs Stats -> Close & Record Skipped after Footer)"]
-    Suppress -- "File Passes Stats:<br/>Engine Reads RG k Dict" --> LowDict["Prefetch Remaining File Dicts (RG k..N-1)"]
-    LowDict --> DictGate{"4. Data Read Rate >= 50%?"}
-
-    FooterGate -- "YES (>= 50%: Normal Scan)" --> Shape{"Single-RG or Multi-RG File?"}
-    Shape -- "Single-RG File" --> SingleFooter["Footer Read: Prefetch RG 0 Dict Pages<br/>+ RG 0 Data Pages (if Data Read Rate >= 50%)"]
-    SingleFooter --> ToPhase2
-    Shape -- "Multi-RG File" --> MultiFooter["Footer Read: Prefetch All File Dict Pages (RG 0..N-1)<br/>(Hold Back Data Until Task Reads Assigned RG k Dict)"]
-    MultiFooter --> DictGate
-
-    DictGate -- "YES (>= 50%)" --> PrefetchData["Immediately Prefetch RG k Data Pages"] --> ToPhase2
-    DictGate -- "NO (< 50%)" --> HoldData["Hold Back Data Pages Until Engine Data Read"] --> ToPhase2
+    Footer["Engine reads footer"] --> G1{"Dictionary Read Rate >= 50%?"}
+    G1 -- "Yes" --> BaseFooter["Prefetch as in Base Design<br/>(data pages only if Data Read Rate >= 50%)"]
+    G1 -- "No" --> Wait["Prefetch nothing"]
+    Wait --> Closed["File skipped by min/max:<br/>closes with no wasted requests"]
+    Wait --> Dict["Engine reads dictionary of row group k"]
+    Dict --> Dicts["Prefetch dictionaries from row group k onward"]
+    Dicts --> G2{"Data Read Rate >= 50% and<br/>all filter columns of k read?"}
+    G2 -- "Yes" --> Data["Prefetch data pages of row group k"]
+    G2 -- "No" --> Hold["Wait for the engine's data read"]
 ```
 
 ---
 
-### 4. Guardrail 2 — When `Row Group k + 1` Is Rejected or Deferred (Intra-File Pruning)
+### 4. Guardrail 2: Skipping Rejected Row Groups Inside a File
 
-When a stream is reading data pages in `Row Group k` of a multi-row-group file, the Base Design normally prefetches `Row Group k + 1` so its download overlaps with `Row Group k`'s CPU decoding. However, the optimizer **rejects (skips) or defers `Row Group k + 1`** under four specific conditions:
+#### What Breaks
 
-| Condition | Why It Happens in Distributed Engines | How the Optimizer Rejects or Defers `Row Group k + 1` |
+When one stream reads several row groups (small row groups, or split-sized row groups after two data reads), the Base Design prefetches "the next row group". But the engine often skips row groups whose statistics or dictionaries fail the filter. Prefetching a skipped row group wastes a full row group of downloads.
+
+#### How the Stream Picks the Next Row Group
+
+After a data read in row group `k`, the stream walks forward from `k + 1` and picks the first row group that no signal rules out:
+
+| Signal | What the Engine Does | How the Stream Uses It |
 | :--- | :--- | :--- |
-| **1. Single-Row-Group Task Split (`>= 64 MiB` Row Groups)** | On a `512 MiB` file with four `128 MiB` row groups, engines typically assign 1 row group per task (`Task 2` reads only `RG 2`, while `Task 3` reads `RG 3`). When `Task 2` finishes `RG 2`, it immediately closes its stream. Prefetching `RG 3` inside `Task 2` would download `Task 3`'s data right before `Task 2` closes. | When a file's row groups are split-sized (`>= 64 MiB`), the optimizer **rejects `RG k -> RG k + 1` speculation until the same stream has read data from at least 2 row groups** (which proves the stream is scanning multiple row groups rather than a single-row-group task split). For smaller row groups (`< 64 MiB`), `RG k + 1` is prefetched immediately after the first row group. |
-| **2. Skipped During Upfront Dictionary Sweep** | Vectorized readers (such as Iceberg) often evaluate footer `[min, max]` stats across all row groups at file open and immediately sweep the dictionary pages of every surviving candidate row group before reading any data pages. | If the stream already read dictionary pages up to a higher row group `m > k` (for example, it read dictionaries in `Row Groups 0, 2, 3` while skipping `Row Group 1`), `Row Group 1` is known to have failed the filter. The optimizer **rejects `Row Group 1`** and jumps straight to prefetching **`Row Group 2`**. |
-| **3. Rejected `[min, max]` Interval Containment** | Even without an upfront sweep across all row groups, whenever the engine skips the data pages of an earlier row group (for example, `Row Group 0` where filter column `price` has `[min, max] = [10, 50]`), no values inside `[10, 50]` satisfy the query predicate. | If a candidate row group's filter-column `[min, max]` interval falls completely inside any already-rejected row group's `[min, max]` interval (for example, `Row Group 1` has `price` `[20, 40]`, which lies inside `[10, 50]`), `Row Group 1` is guaranteed to fail the same filter and is **rejected**. |
-| **4. Active Foreground Read In Progress (Timing Deferral)** | Submitting `Row Group k + 1` background requests at the exact microsecond `Row Group k` foreground requests are queued would allow background tasks to compete with `Row Group k`'s urgent network download. | Even when `Row Group k + 1` passes Conditions 1–3, scheduling is **deferred until `Row Group k`'s foreground read futures complete**, ensuring `Row Group k + 1` downloads strictly while the CPU is decoding `Row Group k`. |
+| **Skipped in the dictionary sweep** | Some readers (such as Iceberg) check min/max for all row groups when the file opens, then read the dictionaries of every row group that passed, before reading any data. | If the stream has seen dictionary reads for row groups 0, 2, and 3 but not 1, then row group 1 failed the filter. The stream skips it and prefetches row group 2. |
+| **Min/max inside a rejected range** | The engine skipped an earlier row group, for example one where `price` ranges from 10 to 50. | If a later row group's `price` range (for example, 20 to 40) sits entirely inside the skipped range, the stream predicts it will be skipped too. |
+
+Both signals are predictions. A wrong guess costs one cache miss or one wasted prefetch, never wrong query results. The min/max signal is wrong in two cases:
+
+* The earlier row group was skipped by its **dictionary**, not its min/max. Example: `price = 30` is inside `[10, 50]` but missing from that row group's dictionary, while the later `[20, 40]` row group does contain 30.
+* The filter uses **several columns** (`a = 1 AND b = 2`). The earlier row group may have been skipped because of `b`, which says nothing about `a`.
+
+> **Known gap**: The stream treats every earlier row group it never read as skipped, including row groups that belong to other tasks' splits. A task whose split starts at row group 5 records row groups 0 to 4 as skipped even though it never checked them, which can wrongly rule out later row groups.
 
 ```mermaid
 flowchart TD
-    StartData["From Phase 1:<br/>Engine Reads RG k Data Pages"] --> Serve["1. Serve RG k Data Pages<br/>(Cache Hit or Promote In-Flight Task -> Evict Immediately;<br/>Learn Projected Columns & Mark Data Read)"]
-
-    Serve --> HasNext{"2. Does File Have a<br/>Next Row Group (k + 1)?"}
-    HasNext -- "NO (1-RG File or Last RG)" --> Close["6. Stream Closes:<br/>Update 8-File Pass-Rate Window &<br/>Zero-Drain Abort Any Unread Sockets"]
-
-    HasNext -- "YES" --> Cond1{"3. Cond 1 (Task-Split Guard):<br/>Row Groups >= 64 MiB AND<br/>Stream Read < 2 RGs?"}
-    Cond1 -- "YES (Reject: Single-RG Task Split)" --> Close
-
-    Cond1 -- "NO (Multi-RG Stream)" --> Cond23["4. Scan Candidate Row Groups > k:<br/>- Cond 2: Reject if Skipped in Upfront Dict Sweep<br/>- Cond 3: Reject if [Min, Max] Inside Rejected RG Range"]
-    Cond23 --> Found{"Surviving Next RG Found?"}
-    Found -- "NO" --> Close
-
-    Found -- "YES" --> Cond4["5. Cond 4 (Timing Deferral):<br/>Wait for RG k Foreground Futures to Complete -> <br/>Prefetch Surviving Next RG Data Pages"]
-    Cond4 --> StartData
+    Read["Engine reads data of row group k"] --> Next{"Is there a row group after k?"}
+    Next -- "No" --> Stop["No prefetch"]
+    Next -- "Yes" --> Cand["Candidate: next row group"]
+    Cand --> S1{"Skipped in dictionary sweep?"}
+    S1 -- "Yes" --> Next2["Try the following row group"]
+    S1 -- "No" --> S2{"Min/max inside a skipped range?"}
+    S2 -- "Yes" --> Next2
+    S2 -- "No" --> Pick["Prefetch this row group's data pages"]
+    Next2 --> Cand
 ```
 
 ---
 
-### 5. Guardrail 3 — Protecting Foreground Threads, Memory & Network Sockets
+### 5. Guardrail 3: Protecting Foreground Reads, Memory, and Sockets
 
-Once speculative byte ranges pass the cross-file and intra-file gates above, four runtime protections ensure background prefetching never degrades foreground query latency, executor heap stability, or shuffle network throughput:
+Once the gates above decide what to prefetch, five runtime protections keep background work from slowing down the query:
 
-| Protection Mechanism | Runtime Behavior | Problem Prevented |
+| Protection | What It Does | Problem It Prevents |
 | :--- | :--- | :--- |
-| **Reserved Foreground Thread Capacity** | Background prefetches run at `LOW` priority and are capped at `5/8` of the thread pool (`10 of 16` threads), reserving `6` threads exclusively for `HIGH`-priority foreground reads. | Prevents head-of-line thread pool starvation when dozens of tasks prefetch concurrently on an executor. |
-| **In-Place Priority Promotion** | When a foreground read hits an in-flight (queued or actively downloading) background range in the cache, the existing task is promoted from `LOW` to `HIGH` priority in-place and awaited by the caller. | Eliminates duplicate GCS HTTP requests when the CPU catches up to an in-flight prefetch. |
-| **Bounded Chunks & Immediate Eviction** | Adjacent projected columns are coalesced up to an `8 MiB` chunk ceiling, and cached buffers are evicted from the cache the instant a foreground read consumes them (using a zero-copy buffer slice on exact matches). | Prevents multi-megabyte heap spikes and garbage-collection stalls across concurrent executor tasks. |
-| **Zero-Drain Socket Abort** | Background downloads pull HTTP streams in `256 KiB` slices; when a stream closes early or skips a row group, active worker threads are interrupted before closing the channel. | Forces an immediate socket abort (`0` unread bytes drained) instead of synchronously draining unread megabytes over the NIC during shuffle stages. |
+| **Wait for the foreground read** | The prefetch of the next row group starts only after the current row group's foreground download finishes, so it downloads while the engine decodes. Applies to vectored reads. | Background downloads competing with the current row group's urgent download. |
+| **Reserved foreground threads** | Background downloads run at low priority and may use only part of the read pool. The rest is kept for foreground reads. | Many tasks' prefetches filling the pool and blocking foreground reads. |
+| **In-place promotion** | If a foreground read needs bytes that are still queued or downloading in the background, that download is raised to foreground priority and the reader waits for it. | Downloading the same bytes twice. |
+| **Bounded chunks and instant eviction** | Neighboring columns are merged into chunks of a capped size. Bytes are dropped from the cache as soon as the engine reads them. | Large heap spikes and garbage-collection pauses. |
+| **Abort instead of drain** | Background downloads read in small slices. When a file closes or a row group is skipped, the download thread is interrupted and the connection is closed without reading the rest. | Draining unread megabytes over the network while shuffle stages need the bandwidth. |
 
 ---
 
 ## Low-Level Design
 
-### 1. Module View & Class Architecture (`core` vs. `client`)
+### 1. Module View
 
-The implementation respects strict module boundaries: Parquet format parsing and stream speculation live in `core`, while reusable caching, cross-stream schema history, and priority thread pool execution live in `client`.
+Parquet parsing and prefetch decisions live in `core`. The shared cache, schema history, and prioritized read pool live in `client`. `PredictivePrefetchOptimizer` depends on `GcsFooterOptimizer` having cached the footer; it never reads the footer from GCS itself.
 
 ```mermaid
 classDiagram
     direction TB
 
-    namespace Core_PerStream_Layer {
+    namespace core {
         class SmartReadChannel {
             -ImmutableList~FormatOptimizer~ optimizers
             +read(ByteBuffer) int
@@ -285,17 +302,20 @@ classDiagram
         class FormatOptimizer {
             <<interface>>
             +onOpen(GcsFileInfo, AnalyticsCacheManager)
+            +read(long, ByteBuffer, VectoredSeekableByteChannel) int
             +afterRead(long, int, VectoredSeekableByteChannel)
-            +readVectored(List~GcsObjectRange~, IntFunction, VectoredSeekableByteChannel)
+            +readVectored(List~GcsObjectRange~, IntFunction, VectoredSeekableByteChannel) List
+            +afterReadVectored(List~GcsObjectRange~, VectoredSeekableByteChannel)
             +onClose()
         }
-        class PredictivePrefetchOptimizer {
-            -ParquetFileLayout layout
-            -RowGroupFilterTracker filterTracker
-            -PrefetchScheduler scheduler
-        }
+        class GcsFooterOptimizer
+        class PredictivePrefetchOptimizer
         class ParquetFooterParser {
             +parse(ByteBuffer, long) Optional~ParquetFileLayout~
+        }
+        class ParquetFileLayout {
+            +getSchemaFingerprint() int
+            +getRowGroups() ImmutableList~ParquetRowGroup~
         }
         class RowGroupFilterTracker {
             +findNextSurvivingRowGroup(ParquetFileLayout, int, Set~String~) OptionalInt
@@ -303,10 +323,11 @@ classDiagram
         class PrefetchScheduler {
             +schedule(VectoredSeekableByteChannel, GcsItemId, Collection~Range~, long) long
             +cancelRangeWindow(long, long)
+            +close()
         }
     }
 
-    namespace Client_ScanShared_Layer {
+    namespace client {
         class AnalyticsCacheManager {
             +getFooter(GcsItemId) Optional~ByteBuffer~
             +getPrefetchBufferCache() PrefetchBufferCache
@@ -320,72 +341,108 @@ classDiagram
         class PrefetchBufferCache {
             +registerRange(GcsItemId, long, int, CompletableFuture, Runnable) boolean
             +consumeRange(GcsItemId, long, int, IntFunction) Optional~CompletableFuture~
+            +copyInto(GcsItemId, long, ByteBuffer) int
+        }
+        class CachedRange {
+            +promote()
+            +slice(long, int) CompletableFuture
         }
         class PrioritizedReadExecutorService {
-            +submitLowPriority(Runnable, List~GcsObjectRange~, BooleanSupplier)
-            +promote(PrioritizedTask)
-            +cancelTask(PrioritizedTask)
+            +submitLowPriority()
+            +shutdown()
         }
     }
 
     SmartReadChannel --> FormatOptimizer
+    FormatOptimizer <|.. GcsFooterOptimizer
     FormatOptimizer <|.. PredictivePrefetchOptimizer
+    GcsFooterOptimizer --> AnalyticsCacheManager : puts footer
+    PredictivePrefetchOptimizer --> AnalyticsCacheManager : gets footer
     PredictivePrefetchOptimizer --> ParquetFooterParser
+    ParquetFooterParser --> ParquetFileLayout
     PredictivePrefetchOptimizer --> RowGroupFilterTracker
     PredictivePrefetchOptimizer --> PrefetchScheduler
-    PredictivePrefetchOptimizer --> AnalyticsCacheManager
     AnalyticsCacheManager --> SchemaAccessHistory
     AnalyticsCacheManager --> PrefetchBufferCache
+    PrefetchBufferCache --> CachedRange
     PrefetchScheduler --> PrefetchBufferCache
-    PrefetchScheduler --> PrioritizedReadExecutorService
+    PrefetchScheduler --> PrioritizedReadExecutorService : via prefetchVectored
 ```
 
----
+### 2. From HLD Events to Code Hooks
 
-### 2. Component Contracts, Responsibilities & Invariants
+`SmartReadChannel` calls each `FormatOptimizer` hook in order. `PredictivePrefetchOptimizer` maps the HLD events onto them as follows:
 
-| Component (`Class`) | Module & Scope | Core Responsibility & Offered Contract | Key Invariants & Bounds |
+| Hook | HLD Event | What `PredictivePrefetchOptimizer` Does |
+| :--- | :--- | :--- |
+| `onOpen` | Stream opens | Binds the shared cache and history, creates a fresh `PrefetchScheduler` and `RowGroupFilterTracker`. |
+| `read` / `afterRead` | Footer, dictionary, or data read (single buffer) | Serves from `PrefetchBufferCache.copyInto`, loads the layout on first use, then calls `observeAccess`: footer reads go to `prefetchFirstRowGroupOnce`, dictionary reads go to the dictionary trigger, data reads go to `speculateRowGroups`. |
+| `readVectored` | Data read (vectored) | Serves each range from `PrefetchBufferCache.consumeRange`, then `recordVectoredAccess` records columns and picks the next surviving row group. |
+| `afterReadVectored` | After the foreground vectored read is submitted | Footer case goes to `prefetchFirstRowGroupOnce`. Otherwise waits on the foreground range futures, then calls `speculateRowGroup` for the next row group. |
+| `onClose` | Stream closes | Records the file outcome in `SchemaAccessHistory` (if not already recorded) and cancels all unconsumed prefetches. |
+
+When the engine moves to a later row group without reading data from the current one, `observeAccess` calls `PrefetchScheduler.cancelRangeWindow` on the current row group.
+
+### 3. Component Contracts
+
+| Class | Module, Scope | Responsibility | Bounds |
 | :--- | :--- | :--- | :--- |
-| **[`ParquetFooterParser`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/ParquetFooterParser.java)** & **[`ParquetFileLayout`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/ParquetFileLayout.java)** | `core` (Per Stream) | Validates `PAR1` magic bytes, parses Thrift `FileMetaData` from `AnalyticsCacheManager.getFooter(itemId)`, computes the 32-bit `schemaFingerprint` (`hashCode()` of `"<name>:<typeId>;"` across `FileMetaData.getSchema()`), and builds immutable `@AutoValue` interval maps for dictionary pages, data pages, and column `[min, max]` statistics. | Never performs network I/O (`readTail` is prohibited); returns `Optional.empty()` if footer cache is disabled or footer is encrypted (`PARE`). |
-| **[`PredictivePrefetchOptimizer`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/PredictivePrefetchOptimizer.java)** | `core` (Per Stream) | Implements `FormatOptimizer` lifecycle hooks (`afterRead`, `readVectored`, `afterReadVectored`, `onClose`) to serve cached ranges, classify accessed offsets, and schedule or cancel speculative ranges. | Separates dictionary ranges (`[dictOffset, dataOffset)`) from data ranges (`[dataOffset, endOffset)`); coalesces adjacent columns up to `8 MiB`; defers Row Group `N + 1` prefetch until Row Group `N` foreground futures finish; for split-sized multi-row-group files (`SPLIT_BOUNDARY_ROW_GROUP_BYTES = 64 MiB`), gates `Row Group k -> k + 1` speculation on `filterTracker.getDataTouchedCount() >= 2`. |
-| **[`RowGroupFilterTracker`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/RowGroupFilterTracker.java)** | `core` (Per Stream) | Tracks touched dictionary/data row-group ordinals and rejected column `[min, max]` intervals within an open stream to predict the next surviving row group. | Marks a row group pruned if skipped during an upfront dictionary sweep or if its filter column `[min, max]` interval is contained within a rejected row group's interval. |
-| **[`PrefetchScheduler`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/PrefetchScheduler.java)** | `core` (Per Stream) | Submits low-priority vectored range requests to the channel, registers `CachedRange` entries in `PrefetchBufferCache`, and cancels unconsumed ranges when row groups are skipped or the stream closes. | Enforces `MAX_CONCURRENT_PREFETCH_RANGES = 32` in-flight ranges per stream. |
-| **[`SchemaAccessHistory`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/SchemaAccessHistory.java)** | `client` (Per Scan) | Maps 32-bit `schemaFingerprint` to learned `dictionaryColumns`, `dataColumns`, and two 8-file sliding outcome windows (`recentFooterOutcomes` and `recentDictOutcomes`). | Bounded at `1,024` schemas and `256` columns/schema ($< 1\text{ MiB}$ heap); recording a data read never removes a column from `dictionaryColumns`; gates open when $< 2$ outcomes exist or pass ratio $\ge 0.50$. |
-| **[`PrefetchBufferCache`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/PrefetchBufferCache.java)** & **[`CachedRange`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/CachedRange.java)** | `client` (Per Scan) | Byte-weighted Caffeine cache keyed by `(GcsItemId, startOffset)` with a per-file `ConcurrentSkipListSet<Long>` floor-offset index for $O(\log N)$ range lookup and multi-chunk stitching. | Default `2 GiB` byte cap (`60s` idle TTL); `consumeRange` promotes in-flight ranges, immediately evicts consumed ranges (`endOffset <= readEnd`), and uses a **zero-copy `buf.duplicate()` fast path** on exact single-range matches. |
-| **[`PrioritizedReadExecutorService`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/PrioritizedReadExecutorService.java)** & **[`GcsReadChannel`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/GcsReadChannel.java)** | `client` (Per Scan) | Unified 16-thread `PriorityBlockingQueue` executor and HTTP channel layer supporting priority promotion, `effectiveMaxMergeGap = 0` exact ranges, and `256 KiB` interruptible chunk reads. | Caps active `LOW` tasks at `10/16` threads; `cancelTask` interrupts worker threads before `readChannel.close()` to abort HTTP sockets with zero unread byte draining; `shutdown()` bounds `awaitTermination` to `10 ms`. |
+| [`ParquetFooterParser`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/ParquetFooterParser.java), [`ParquetFileLayout`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/ParquetFileLayout.java) | `core`, per stream | Parses the cached footer into an immutable layout: schema fingerprint, row groups, column byte ranges, and min/max statistics. | No network I/O. Returns empty when the footer is missing, longer than the cached tail, or encrypted (`PARE`). |
+| [`PredictivePrefetchOptimizer`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/PredictivePrefetchOptimizer.java) | `core`, per stream | Serves cached ranges, classifies reads, and decides what to prefetch. | Split-sized when more than 1 row group and row group 0 is at least `64 MiB`. Dictionary ranges `[dictOffset, dataOffset)` are kept apart from data ranges `[dataOffset, endOffset)`. Merged chunks are capped at `block.size-bytes`. |
+| [`RowGroupFilterTracker`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/RowGroupFilterTracker.java) | `core`, per stream | Tracks which row groups had dictionary and data reads, and the min/max ranges of skipped row groups. | Per-stream state only. |
+| [`PrefetchScheduler`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/PrefetchScheduler.java) | `core`, per stream | Registers ranges in the cache, submits them as low-priority vectored reads, and cancels them by window or on close. | At most `32` in-flight ranges per stream. Skips ranges already in the cache. |
+| [`SchemaAccessHistory`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/SchemaAccessHistory.java) | `client`, per filesystem instance | Maps schema fingerprint to learned columns and the two outcome windows. | `1,024` schemas, `256` columns per schema. Two 8-entry windows: all files, and files that passed the footer. Gate open when fewer than 2 entries or rate at least `0.50`. |
+| [`PrefetchBufferCache`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/PrefetchBufferCache.java), [`CachedRange`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/CachedRange.java) | `client`, per filesystem instance | Byte-weighted Caffeine cache keyed by `(GcsItemId, startOffset)`, with a per-file offset index to find and stitch covering ranges. | `2 GiB` cap, `60s` idle expiry. Consumed ranges are evicted right away. Exact matches return a zero-copy `duplicate()`. |
+| [`PrioritizedReadExecutorService`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/PrioritizedReadExecutorService.java), [`GcsReadChannel`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/GcsReadChannel.java) | `client`, per filesystem instance | 16-thread priority pool and HTTP channel with promotion, exact ranges (`effectiveMaxMergeGap = 0`), and interruptible reads. | Low-priority tasks use at most `10` of `16` threads. Reads in `256 KiB` slices. Cancel interrupts the thread before closing the channel. `shutdown()` waits at most `10 ms`. |
 
----
+### 4. Threading Model
 
-### 3. Prefetched Range & Task Lifecycle State Machine
+* `PredictivePrefetchOptimizer`, `RowGroupFilterTracker`, and `PrefetchScheduler` belong to one stream and are called from the reader's thread.
+* One exception: `afterReadVectored` schedules the next row group from a future callback that runs on a pool thread. `speculateRowGroup` is `synchronized` and checks the `volatile closed` flag, so a callback that fires after `onClose` does nothing.
+* `SchemaAccessHistory`, `PrefetchBufferCache`, and `PrioritizedReadExecutorService` are shared across streams and are thread-safe.
 
-The state diagram below specifies how each prefetched range transitions through [`PrefetchBufferCache`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/PrefetchBufferCache.java) and [`PrioritizedReadExecutorService`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/PrioritizedReadExecutorService.java), ensuring zero duplicate requests, zero memory retention after consumption, and zero socket draining on cancellation:
+### 5. Prefetched Range Lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> QueuedLow: PrefetchScheduler.schedule() registers CachedRange
+    [*] --> Queued: PrefetchScheduler.schedule() registers CachedRange
 
-    QueuedLow: Queued / Deferred (LOW Priority)
-    DownloadingLow: Downloading in 256 KiB Slices (LOW Priority, <= 10/16 Threads)
-    PromotedHigh: Promoted In-Place (HIGH Priority, All 16 Threads)
-    ResidentCache: Completed & Resident in PrefetchBufferCache (Max 2 GiB, 60s TTL)
-    ConsumedEvicted: Served to Reader (Zero-Copy duplicate() or Stitched) & Evicted
-    AbortedZeroDrain: Thread Interrupted -> HTTP Socket Aborted (0 Unread Bytes Drained)
+    Queued: Queued (low priority)
+    Downloading: Downloading in 256 KiB slices (low priority)
+    Promoted: Promoted to high priority
+    Resident: Downloaded, waiting in PrefetchBufferCache
+    Consumed: Served to reader and evicted
+    Aborted: Cancelled, socket closed without draining
+    Expired: Evicted unused (idle expiry or size cap)
+    Fallback: Download failed, reader reads from GCS
 
-    QueuedLow --> DownloadingLow: Low-priority thread slot acquired
-    QueuedLow --> PromotedHigh: Foreground read hits CachedRange -> promote()
-    DownloadingLow --> PromotedHigh: Foreground read hits CachedRange -> promote()
+    Queued --> Downloading: Low-priority thread free
+    Queued --> Promoted: Foreground read hits range
+    Downloading --> Promoted: Foreground read hits range
+    Downloading --> Resident: All slices read
+    Promoted --> Consumed: Download completes, handed to waiting reader
+    Resident --> Consumed: consumeRange() or copyInto()
+    Resident --> Expired: 60s idle or 2 GiB cap
 
-    DownloadingLow --> ResidentCache: 256 KiB slice loop completes
-    PromotedHigh --> ConsumedEvicted: Download completes -> returned directly to waiting reader
-    ResidentCache --> ConsumedEvicted: Foreground consumeRange() or copyInto()
+    Queued --> Aborted: Stream closed or row group skipped
+    Downloading --> Aborted: Stream closed or row group skipped
+    Promoted --> Aborted: All waiting readers cancelled
+    Downloading --> Fallback: Download error
+    Promoted --> Fallback: Download error
 
-    QueuedLow --> AbortedZeroDrain: Stream close / Row Group skipped -> removed from queue
-    DownloadingLow --> AbortedZeroDrain: Stream close / Row Group skipped -> runnerThread.interrupt()
-    PromotedHigh --> AbortedZeroDrain: All reader futures cancelled -> cancelTask()
-
-    ConsumedEvicted --> [*]
-    AbortedZeroDrain --> [*]
+    Consumed --> [*]
+    Aborted --> [*]
+    Expired --> [*]
+    Fallback --> [*]
 ```
+
+### 6. Known Gaps
+
+| Gap | Where | Effect |
+| :--- | :--- | :--- |
+| No prefetch for a task's own row group on split-sized files when the query has no filter. | `prefetchFirstRowGroupOnce` returns early for split files when there are no dictionary columns. | Full-column scans of large files get no benefit until a stream reads two row groups. |
+| Row groups owned by other tasks are recorded as skipped. | `RowGroupFilterTracker.markSkippedRowGroupsBefore` walks every ordinal below the current one. | Can wrongly rule out later row groups in the task's own split. |
+| The wait for the foreground read covers only the vectored path. | `observeAccess` calls `speculateRowGroups` right away on single-buffer reads. | Non-vectored readers can start the next row group while the current one is still downloading. |
 
 ---
 
@@ -419,7 +476,7 @@ stateDiagram-v2
 | `analytics-core.footer.cache.enabled` | `false` | Must be `true` when `PREDICTIVE_ROW_GROUP` is enabled so `GcsFooterOptimizer` populates `AnalyticsCacheManager.getFooter(itemId)`. |
 | `analytics-core.prefetch.buffer.cache.max-size-bytes` | `2147483648` (`2 GiB`) | Maximum total byte capacity of `PrefetchBufferCache` per `AnalyticsCacheManager`. |
 | `analytics-core.prefetch.buffer.cache.ttl-seconds` | `60` | Idle expiration time (`expireAfterAccess`, in seconds) for unconsumed ranges in `PrefetchBufferCache`. |
-| `analytics-core.prefetch.block.size-bytes` | `4194304` (`4 MiB`) | Nominal block size configuration preserved for compatibility. |
+| `analytics-core.prefetch.block.size-bytes` | `8388608` (`8 MiB`) | Maximum size of one merged prefetch range; larger spans are split into chunks of this size. |
 | `analytics-core.prefetch.history.max-columns` | `256` | Maximum number of dictionary and data columns tracked per `schemaFingerprint` in `SchemaAccessHistory`. |
 
 ### Telemetry Metrics ([`GcsAnalyticsCoreTelemetryConstants.Metric`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/common/src/main/java/com/google/cloud/gcs/analyticscore/common/GcsAnalyticsCoreTelemetryConstants.java))
@@ -441,3 +498,4 @@ Predictive prefetching is **disabled by default** (`analytics-core.prefetch.mode
 | Date | Author | Change |
 | :--- | :--- | :--- |
 | 2026-09-23 | [Prudhvi Beerelly](mailto:pbeerelly@google.com) | Restructured HLD into a 3-stage conceptual pipeline with tables and single-sentence edge cases; reorganized LLD around a module-grouped class diagram, a component contracts/bounds table, and a range lifecycle state machine (`stateDiagram-v2`). |
+| 2026-09-24 | [Prudhvi Beerelly](mailto:pbeerelly@google.com) | Reorganized HLD around a component overview and the real file cases (small vs. split-sized row groups); fixed statements that did not match the code; added HLD-to-hook mapping, threading model, and known gaps to the LLD. |
