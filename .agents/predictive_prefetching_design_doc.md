@@ -73,9 +73,9 @@ A table scan is divided into **task splits**: byte ranges of files, each read by
 
 A task reads only the row groups that start inside its split. So what decides which row groups a task reads is how big the row groups are compared to a split:
 
-* **Single row group**: The file has exactly one row group, so one task reads the whole file.
-* **Small row groups**: The file has several row groups, each much smaller than a split. One task reads several row groups in a row.
-* **Large row groups**: Each row group is about as big as a split, so each row group goes to a different task.
+* **Single-row-group files**: The file has exactly one row group, so one task reads the whole file.
+* **Small-row-group files**: The file has several row groups, each much smaller than a split. One task reads several row groups in a row.
+* **Large-row-group files**: The file has several row groups, each about as big as a split, so each row group goes to a different task.
 
 ## Goals and Non-Goals
 
@@ -163,11 +163,11 @@ Once the entry holds columns, the schema is **Warm**, and every later file with 
 
 ### 2. Base Design: Prefetching Only the Row Groups a Task Reads
 
-What the stream can safely prefetch depends on whether the file has a single row group, small row groups, or large row groups (defined in Background).
+What the stream can safely prefetch depends on whether it is a single-row-group file, a small-row-group file, or a large-row-group file (defined in Background).
 
 **Cold (first file).** The stream is still learning columns, so it prefetches very little:
 
-| Engine Read | Single Row Group | Small Row Groups | Large Row Groups |
+| Engine Read | Single-Row-Group Files | Small-Row-Group Files | Large-Row-Group Files |
 | :--- | :--- | :--- | :--- |
 | **Footer Read** | Nothing, since no columns are learned yet. | Nothing, since no columns are learned yet. | Nothing, since no columns are learned yet. |
 | **Dictionary Pages Read** | • Adds the column to Dictionary Columns.<br/>• Nothing to prefetch, since there are no later row groups. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. | • Adds the column to Dictionary Columns.<br/>• Prefetches the dictionary pages of later row groups. |
@@ -175,17 +175,17 @@ What the stream can safely prefetch depends on whether the file has a single row
 
 **Warm (later files).** The stream knows the columns, so it can prefetch before the engine asks:
 
-| Engine Read | Single Row Group | Small Row Groups | Large Row Groups |
+| Engine Read | Single-Row-Group Files | Small-Row-Group Files | Large-Row-Group Files |
 | :--- | :--- | :--- | :--- |
 | **Footer Read** | • Dictionary Columns non-empty: prefetches the dictionary pages and data pages of the row group.<br/>• Dictionary Columns empty: prefetches the data pages of the row group. | • Dictionary Columns non-empty: prefetches the dictionary pages of all row groups.<br/>• Dictionary Columns empty: prefetches the data pages of the first row group. | • Dictionary Columns non-empty: prefetches the dictionary pages of all row groups.<br/>• Dictionary Columns empty: nothing. |
 | **Dictionary Pages Read** *(only when Dictionary Columns is non-empty)* | Served from the cache. | • Served from the cache.<br/>• No data page prefetch. | • Served from the cache.<br/>• Once the dictionary pages of all Dictionary Columns in row group `k` are read, prefetches the data pages of row group `k` (once per stream). |
 | **Data Pages Read** | Served from the cache. | • Served from the cache when prefetched.<br/>• Prefetches the next row group's data pages, so that download overlaps with decoding row group `k`. | • Served from the cache.<br/>• Does not prefetch the next row group yet, because this task may own only one row group.<br/>• Starts prefetching the next row group once the task has read data pages from two row groups. |
 
-**Why large row groups are handled differently.** Every task reads the footer first, even the task that owns only the last row group. Prefetching data pages on the footer read would download another task's bytes. Prefetching the next row group after a task's own row group would do the same, because the task closes right after. So the stream waits for signals that show which row groups this task owns: reading the dictionary pages of row group `k` shows the task owns `k`, and reading data pages from two row groups shows the task covers more than one.
+**Why large-row-group files are handled differently.** Every task reads the footer first, even the task that owns only the last row group. Prefetching data pages on the footer read would download another task's bytes. Prefetching the next row group after a task's own row group would do the same, because the task closes right after. So the stream waits for signals that show which row groups this task owns: reading the dictionary pages of row group `k` shows the task owns `k`, and reading data pages from two row groups shows the task covers more than one.
 
 **Why the trigger waits for all Dictionary Columns.** Readers sometimes read the dictionary pages of the *next* row group right after their own. Waiting until the dictionary pages of every Dictionary Column in row group `k` are read, and firing only once per stream, stops a peek at the next row group from starting a large data page download.
 
-**Example (Warm schema, large row groups, Dictionary Columns non-empty).** A file has four large row groups, and Task 2 owns only row group 2:
+**Example (Warm schema, large-row-group file, Dictionary Columns non-empty).** A file has four large row groups, and Task 2 owns only row group 2:
 
 ```mermaid
 sequenceDiagram
@@ -205,9 +205,9 @@ sequenceDiagram
 ```
 
 > **Known gaps**
-> * On large row groups with empty Dictionary Columns, no dictionary page read shows which row group the task owns, so each task's own row group is never prefetched.
-> * On a file with small row groups that is split across several tasks, a task that starts partway through the file still prefetches the first row group's data pages on the footer read when Dictionary Columns is empty. Example: Task 2 starts at row group 8 but prefetches row group 0, which belongs to Task 0.
-> * On a file with several small row groups and non-empty Dictionary Columns, neither the footer nor the dictionary pages trigger a data page prefetch, so the first row group each task reads is always a cache miss.
+> * On large-row-group files with empty Dictionary Columns, no dictionary page read shows which row group the task owns, so each task's own row group is never prefetched.
+> * On a small-row-group file that is split across several tasks, a task that starts partway through the file still prefetches the first row group's data pages on the footer read when Dictionary Columns is empty. Example: Task 2 starts at row group 8 but prefetches row group 0, which belongs to Task 0.
+> * On a small-row-group file with non-empty Dictionary Columns, neither the footer nor the dictionary pages trigger a data page prefetch, so the first row group each task reads is always a cache miss.
 
 ---
 
@@ -260,7 +260,7 @@ flowchart TD
     FDict --> Dict
     Dict --> G3{"Data Read Rate >= 50%?"}
     G3 -- "No" --> Hold["Data pages wait for the engine to read them"]
-    G3 -- "Yes" --> G4{"Footer gate closed or<br/>large row groups?"}
+    G3 -- "Yes" --> G4{"Footer gate closed or<br/>large-row-group file?"}
     G4 -- "Yes" --> DataK["Prefetch row group k data pages<br/>once dictionary pages of all Dictionary Columns in k are read"]
     G4 -- "No" --> Base["Base Design: no extra prefetch"]
     NoteDict["When the footer gate is closed, this read also<br/>prefetches the dictionary pages from row group k onward"]
@@ -426,7 +426,7 @@ When the engine moves to a later row group without reading data from the current
 | Class | Module, Scope | Responsibility | Bounds |
 | :--- | :--- | :--- | :--- |
 | [`ParquetFooterParser`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/ParquetFooterParser.java), [`ParquetFileLayout`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/ParquetFileLayout.java) | `core`, per stream | Parses the cached footer into an immutable layout: schema fingerprint, row groups, column byte ranges, and min/max statistics. | No network I/O. Returns empty when the footer is missing, longer than the cached tail, or encrypted (`PARE`). |
-| [`PredictivePrefetchOptimizer`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/PredictivePrefetchOptimizer.java) | `core`, per stream | Serves cached ranges, classifies reads, and decides what to prefetch. | Large row groups when more than 1 row group and row group 0 is at least `64 MiB`. Dictionary ranges `[dictOffset, dataOffset)` are kept apart from data ranges `[dataOffset, endOffset)`. Merged chunks are capped at `block.size-bytes`. |
+| [`PredictivePrefetchOptimizer`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/PredictivePrefetchOptimizer.java) | `core`, per stream | Serves cached ranges, classifies reads, and decides what to prefetch. | Large-row-group file when more than 1 row group and row group 0 is at least `64 MiB`. Dictionary ranges `[dictOffset, dataOffset)` are kept apart from data ranges `[dataOffset, endOffset)`. Merged chunks are capped at `block.size-bytes`. |
 | [`RowGroupFilterTracker`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/RowGroupFilterTracker.java) | `core`, per stream | Tracks which row groups had dictionary page and data page reads, and the min/max ranges of skipped row groups. | Per-stream state only. |
 | [`PrefetchScheduler`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/core/src/main/java/com/google/cloud/gcs/analyticscore/core/prefetch/PrefetchScheduler.java) | `core`, per stream | Registers ranges in the cache, submits them as low-priority vectored reads, and cancels them by window or on close. | At most `32` in-flight ranges per stream. Skips ranges already in the cache. |
 | [`SchemaAccessHistory`](file:///usr/local/google/home/pbeerelly/Downloads/gcs-analytics-core/client/src/main/java/com/google/cloud/gcs/analyticscore/client/SchemaAccessHistory.java) | `client`, per filesystem instance | Maps schema fingerprint to learned columns and the two outcome windows. | `1,024` schemas, `256` columns per schema. Two 8-entry windows: all files, and files that passed the footer. Gate open when fewer than 2 entries or rate at least `0.50`. |
@@ -481,8 +481,8 @@ stateDiagram-v2
 | No prefetch for a task's own row group on large files when Dictionary Columns is empty. | `prefetchFirstRowGroupOnce` returns early for split files when there are no dictionary columns. | Full-column scans of large files get no benefit until a stream reads two row groups. |
 | Row groups owned by other tasks are recorded as skipped. | `RowGroupFilterTracker.markSkippedRowGroupsBefore` walks every ordinal below the current one. | Can wrongly rule out later row groups in the task's own split. |
 | The wait for the foreground read covers only the vectored path. | `observeAccess` calls `speculateRowGroups` right away on single-buffer reads. | Non-vectored readers can start the next row group while the current one is still downloading. |
-| Tasks that start partway through a file with small row groups prefetch the first row group. | `prefetchFirstRowGroupOnce` calls `speculateRowGroup(source, 0)` for non-split files when there are no dictionary columns. | Downloads another task's first row group on every footer read of a no-filter scan. |
-| Files with several small row groups and non-empty Dictionary Columns never prefetch the task's first row group. | `prefetchFirstRowGroupOnce` prefetches only dictionary pages when dictionary columns exist and there is more than one row group, and the dictionary trigger in `observeAccess` fires only for split files or when the footer gate is closed. | The first data page read of every task is a cache miss. |
+| Tasks that start partway through a small-row-group file prefetch the first row group. | `prefetchFirstRowGroupOnce` calls `speculateRowGroup(source, 0)` for non-split files when there are no dictionary columns. | Downloads another task's first row group on every footer read of a no-filter scan. |
+| Small-row-group files with non-empty Dictionary Columns never prefetch the task's first row group. | `prefetchFirstRowGroupOnce` prefetches only dictionary pages when dictionary columns exist and there is more than one row group, and the dictionary trigger in `observeAccess` fires only for split files or when the footer gate is closed. | The first data page read of every task is a cache miss. |
 
 ---
 
