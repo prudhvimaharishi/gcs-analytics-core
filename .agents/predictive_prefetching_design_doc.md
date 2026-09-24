@@ -128,7 +128,7 @@ flowchart LR
 The stream never sees the SQL query. It only sees raw byte-range reads. Column byte positions change from file to file, but every file in the scan runs the same query and reads the same columns. So the stream learns column **names** on the first file, then looks up their **positions** in each later file's footer. It uses two things to do this:
 
 * **Schema ID**: a hash of the column names and types listed in the footer. All files of the same table get the same ID.
-* **Schema History**: a map, shared by all files of the scan, from each Schema ID to the column names the query reads.
+* **Schema History**: a map, shared by all files of the scan, that stores two lists for each Schema ID: the filter (dictionary) columns and the data columns read so far in the scan.
 
 | Step | What the Stream Does |
 | :--- | :--- |
