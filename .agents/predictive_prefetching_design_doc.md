@@ -181,9 +181,13 @@ What the stream can safely prefetch depends on whether it is a single-row-group 
 | **Dictionary Pages Read** | Served from the cache. | • Served from the cache.<br/>• No data page prefetch. | • Served from the cache.<br/>• Once all Dictionary Columns of row group `k` are read, prefetches its data pages (once per stream). |
 | **Data Pages Read** | Served from the cache. | • Served from the cache when prefetched.<br/>• Prefetches the next row group's data pages, so that download overlaps with decoding row group `k`. | • Served from the cache.<br/>• Does not prefetch later data pages until the task has read at least two row groups. |
 
-**Why large-row-group files are handled differently.** Every task reads the footer first, even the task that owns only the last row group. Prefetching data pages on the footer read would download another task's bytes. Prefetching the next row group after a task's own row group would do the same, because the task closes right after. So the stream waits for signals that show which row groups this task owns: reading the dictionary pages of row group `k` shows the task owns `k`, and reading data pages from two row groups shows the task covers more than one.
+**Why large-row-group files wait for signals.** In a large-row-group file, each row group belongs to a different task. But every task reads the footer first. So the footer read does not tell the stream which row group this task owns. Example: a file has 4 row groups, and Task 2 owns only row group 2. If Task 2 prefetched data pages on the footer read, it could download row group 0, which is Task 0's. Prefetching row group 3 after row group 2 is also a waste, because Task 2 closes when it finishes row group 2. So the stream waits for signals:
+* Reading the dictionary pages of row group `k` shows the task owns `k`.
+* Reading data pages from two row groups shows the task covers more than one.
 
-**Why the trigger waits for all Dictionary Columns.** Readers sometimes read the dictionary pages of the *next* row group right after their own. Waiting until the dictionary pages of every Dictionary Column in row group `k` are read, and firing only once per stream, stops a peek at the next row group from starting a large data page download.
+**Why the data prefetch waits for all Dictionary Columns and fires once.** When the task reads the dictionary pages of row group `k`, the stream prefetches the data pages of `k`. Two rules keep this prefetch safe:
+* **Wait for all Dictionary Columns.** With a filter like `WHERE a = 1 AND b = 2`, the engine checks `a`'s dictionary, then `b`'s. It can skip the row group after either check. Once every dictionary is read, the row group passed all checks, so its data pages will very likely be read.
+* **Fire once per stream.** After row group 2, Task 2 sometimes peeks at the dictionary pages of row group 3. Firing once stops that peek from downloading Task 3's data pages.
 
 **Example (Warm schema, large-row-group file, Dictionary Columns non-empty).** A file has four large row groups, and Task 2 owns only row group 2:
 
