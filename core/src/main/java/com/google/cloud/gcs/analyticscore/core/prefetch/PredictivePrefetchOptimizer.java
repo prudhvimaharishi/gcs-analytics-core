@@ -43,6 +43,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
 
@@ -79,7 +80,8 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private long fileSize = -1;
   private volatile boolean closed;
   private boolean firstRowGroupPrefetched;
-  private boolean splitRowGroupDataPrefetched;
+  private final Set<Integer> rowGroupsWithDataPrefetch = ConcurrentHashMap.newKeySet();
+  private ImmutableSet<String> prefetchedDictionaryColumns = ImmutableSet.of();
   private boolean outcomeRecorded;
   @Nullable private ParquetFileLayout layout;
   private long[] rowGroupStartOffsets = new long[0];
@@ -323,18 +325,27 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     if (recordColumnsInRange(rowGroupOrdinal, position, currentReadEnd)) {
       speculateRowGroups(source, rowGroupOrdinal, currentReadEnd);
     } else {
-      int fingerprint = layout.getSchemaFingerprint();
+      onDictionaryPageRead(source, rowGroupOrdinal);
+    }
+  }
+
+  /**
+   * Prefetches dictionary pages the footer did not already cover and, once every known dictionary
+   * column of {@code rowGroupOrdinal} has been read, prefetches that row group's data pages.
+   */
+  private void onDictionaryPageRead(VectoredSeekableByteChannel source, int rowGroupOrdinal) {
+    int fingerprint = layout.getSchemaFingerprint();
+    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
+    if (!prefetchedDictionaryColumns.containsAll(dictionaryColumns)) {
       boolean deferredAtFooter = !accessHistory.shouldSpeculateAtFooter(fingerprint);
       speculateDictionaryPagesFrom(
           source, deferredAtFooter ? rowGroupOrdinal : rowGroupOrdinal + 1);
-      if (!splitRowGroupDataPrefetched
-          && (isSplitMultiRowGroupFile() || deferredAtFooter)
-          && accessHistory.shouldSpeculateOnDictionary(fingerprint)
-          && filterTracker.hasReadAllDictionaries(
-              rowGroupOrdinal, accessHistory.getDictionaryColumns(fingerprint))) {
-        splitRowGroupDataPrefetched = true;
-        long ignored = speculateRowGroup(source, rowGroupOrdinal);
-      }
+    }
+    if (!rowGroupsWithDataPrefetch.contains(rowGroupOrdinal)
+        && accessHistory.shouldSpeculateOnDictionary(fingerprint)
+        && filterTracker.hasReadAllDictionaries(rowGroupOrdinal, dictionaryColumns)) {
+      rowGroupsWithDataPrefetch.add(rowGroupOrdinal);
+      long ignored = speculateRowGroupDataPages(source, rowGroupOrdinal);
     }
   }
 
@@ -442,7 +453,10 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     long ignored = speculateRowGroup(source, 0);
   }
 
-  /** Prefetches dictionary page ranges for known dictionary columns starting at {@code startRg}. */
+  /**
+   * Prefetches dictionary page ranges for known dictionary columns starting at {@code startRg}, and
+   * remembers those columns as prefetched once every range is registered in the buffer cache.
+   */
   private void speculateDictionaryPagesFrom(VectoredSeekableByteChannel source, int startRg) {
     ImmutableSet<String> dictionaryColumns =
         accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
@@ -456,12 +470,26 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       collectRowGroupRanges(
           dictRanges, unusedDataRanges, ordinal, ImmutableSet.of(), dictionaryColumns);
     }
-    if (dictRanges.isEmpty()) {
-      return;
-    }
     dictRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    long ignored =
-        scheduler.schedule(source, itemId, coalesceConnectedRanges(dictRanges), fileSize);
+    List<Range<Long>> coalescedRanges = coalesceConnectedRanges(dictRanges);
+    long ignored = scheduler.schedule(source, itemId, coalescedRanges, fileSize);
+    if (areAllRangesRegistered(coalescedRanges)) {
+      prefetchedDictionaryColumns = dictionaryColumns;
+    }
+  }
+
+  /**
+   * Returns whether every range is cached or in flight, which is false when the scheduler dropped
+   * ranges beyond its concurrency budget or a download failed.
+   */
+  private boolean areAllRangesRegistered(List<Range<Long>> ranges) {
+    for (Range<Long> range : ranges) {
+      int length = (int) (range.upperEndpoint() - range.lowerEndpoint());
+      if (!bufferCache.getRangeCovering(itemId, range.lowerEndpoint(), length).isPresent()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -496,6 +524,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     if (rangesAhead.isEmpty()) {
       return;
     }
+    targetNextOrdinal.ifPresent(rowGroupsWithDataPrefetch::add);
     long ignored = scheduler.schedule(source, itemId, rangesAhead, fileSize);
   }
 
@@ -510,7 +539,29 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     if (ranges.isEmpty()) {
       return 0L;
     }
+    rowGroupsWithDataPrefetch.add(rowGroupOrdinal);
     return scheduler.schedule(source, itemId, ranges, fileSize);
+  }
+
+  /**
+   * Fetches only the data pages of the known data columns in a single row group, skipping its
+   * dictionary pages because the engine has already read them.
+   */
+  private long speculateRowGroupDataPages(VectoredSeekableByteChannel source, int rowGroupOrdinal) {
+    int fingerprint = layout.getSchemaFingerprint();
+    List<Range<Long>> unusedDictRanges = new ArrayList<>();
+    List<Range<Long>> dataRanges = new ArrayList<>();
+    collectRowGroupRanges(
+        unusedDictRanges,
+        dataRanges,
+        rowGroupOrdinal,
+        accessHistory.getDataColumns(fingerprint),
+        accessHistory.getDictionaryColumns(fingerprint));
+    if (dataRanges.isEmpty()) {
+      return 0L;
+    }
+    dataRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    return scheduler.schedule(source, itemId, coalesceConnectedRanges(dataRanges), fileSize);
   }
 
   /**
