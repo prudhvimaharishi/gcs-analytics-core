@@ -24,6 +24,7 @@ import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheCaffeineImp
 import com.google.cloud.gcs.analyticscore.common.cache.AnalyticsCacheNoOpImpl;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -89,6 +90,22 @@ public class AnalyticsCacheManager {
   /** Returns the column access history shared across objects opened with this cache manager. */
   public SchemaAccessHistory getSchemaAccessHistory() {
     return schemaAccessHistory;
+  }
+
+  /**
+   * Returns the cached footer for the given {@code itemId}, or {@code Optional.empty()} if it is
+   * not present in the cache.
+   */
+  public Optional<ByteBuffer> getFooter(GcsItemId itemId) {
+    checkNotNull(itemId, "itemId cannot be null");
+    return footerCache.get(itemId).map(ByteBuffer::asReadOnlyBuffer);
+  }
+
+  /** Stores the given {@code footer} buffer in the footer cache for {@code itemId}. */
+  public void putFooter(GcsItemId itemId, ByteBuffer footer) {
+    checkNotNull(itemId, "itemId cannot be null");
+    checkNotNull(footer, "footer cannot be null");
+    footerCache.put(itemId, footer.asReadOnlyBuffer());
   }
 
   /**
