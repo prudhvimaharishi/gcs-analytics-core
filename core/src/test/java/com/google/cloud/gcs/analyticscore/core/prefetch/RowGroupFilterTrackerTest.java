@@ -63,6 +63,24 @@ class RowGroupFilterTrackerTest {
   }
 
   @Test
+  void getLastDataReadOrdinal_noDataRead_returnsMinusOne() {
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+
+    assertThat(tracker.getLastDataReadOrdinal()).isEqualTo(-1);
+  }
+
+  @Test
+  void getLastDataReadOrdinal_dataReadOutOfOrder_returnsHighestOrdinal() {
+    ParquetFileLayout layout =
+        createLayoutWithStatusRanges(new String[][] {{"A", "B"}, {"C", "D"}, {"E", "F"}});
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDataRead(layout, 2, ImmutableSet.of());
+    tracker.recordDataRead(layout, 0, ImmutableSet.of());
+
+    assertThat(tracker.getLastDataReadOrdinal()).isEqualTo(2);
+  }
+
+  @Test
   void findNextSurvivingRowGroup_skipsRowGroupNotInUpfrontDictionarySweep() {
     ParquetFileLayout layout =
         createLayoutWithStatusRanges(

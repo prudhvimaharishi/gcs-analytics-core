@@ -86,7 +86,6 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   @Nullable private ParquetFileLayout layout;
   private long[] rowGroupStartOffsets = new long[0];
   private long[] rowGroupEndOffsets = new long[0];
-  private int currentRowGroupOrdinal = -1;
   private int pendingSpeculationRowGroupOrdinal = -1;
   private RowGroupFilterTracker filterTracker = new RowGroupFilterTracker();
 
@@ -311,16 +310,6 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       return;
     }
     firstRowGroupPrefetched = true;
-    if (rowGroupOrdinal != currentRowGroupOrdinal) {
-      if (currentRowGroupOrdinal >= 0
-          && rowGroupOrdinal > currentRowGroupOrdinal
-          && !filterTracker.hasDataRead(currentRowGroupOrdinal)) {
-        scheduler.cancelRangeWindow(
-            rowGroupStartOffsets[currentRowGroupOrdinal],
-            rowGroupEndOffsets[currentRowGroupOrdinal]);
-      }
-      currentRowGroupOrdinal = rowGroupOrdinal;
-    }
     long currentReadEnd = position + requestedLength;
     if (recordColumnsInRange(rowGroupOrdinal, position, currentReadEnd)) {
       speculateRowGroups(source, rowGroupOrdinal, currentReadEnd);
@@ -343,10 +332,25 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     }
     if (!rowGroupsWithDataPrefetch.contains(rowGroupOrdinal)
         && accessHistory.shouldSpeculateOnDictionary(fingerprint)
-        && isDictionaryTriggerMet(rowGroupOrdinal, dictionaryColumns)) {
+        && isDictionaryTriggerMet(rowGroupOrdinal, dictionaryColumns)
+        && !hasPendingDataPrefetchBefore(rowGroupOrdinal)
+        && speculateRowGroupDataPages(source, rowGroupOrdinal)) {
       rowGroupsWithDataPrefetch.add(rowGroupOrdinal);
-      long ignored = speculateRowGroupDataPages(source, rowGroupOrdinal);
     }
+  }
+
+  /**
+   * Returns whether an earlier row group still has a data prefetch waiting for its data read, so
+   * that a dictionary sweep keeps only the front row group's data in memory.
+   */
+  private boolean hasPendingDataPrefetchBefore(int rowGroupOrdinal) {
+    int lastDataReadOrdinal = filterTracker.getLastDataReadOrdinal();
+    for (int prefetchedOrdinal : rowGroupsWithDataPrefetch) {
+      if (prefetchedOrdinal > lastDataReadOrdinal && prefetchedOrdinal < rowGroupOrdinal) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private boolean isDictionaryTriggerMet(int rowGroupOrdinal, Set<String> dictionaryColumns) {
@@ -425,10 +429,24 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
         accessHistory.recordFileOutcome(
             fingerprint, SchemaAccessHistory.FileFilterOutcome.SURVIVED);
       }
-      filterTracker.recordDataRead(
-          layout, rowGroupOrdinal, accessHistory.getDictionaryColumns(fingerprint));
+      onDataPageRead(rowGroupOrdinal);
     }
     return touchedDataPage;
+  }
+
+  /**
+   * Records a data read in {@code rowGroupOrdinal} and cancels prefetches of the row groups between
+   * the previous data read and this one, because the engine skipped them.
+   */
+  private void onDataPageRead(int rowGroupOrdinal) {
+    int previousDataReadOrdinal = filterTracker.getLastDataReadOrdinal();
+    filterTracker.recordDataRead(
+        layout, rowGroupOrdinal, accessHistory.getDictionaryColumns(layout.getSchemaFingerprint()));
+    int firstSkippedOrdinal = previousDataReadOrdinal + 1;
+    if (rowGroupOrdinal > firstSkippedOrdinal) {
+      scheduler.cancelRangeWindow(
+          rowGroupStartOffsets[firstSkippedOrdinal], rowGroupStartOffsets[rowGroupOrdinal]);
+    }
   }
 
   private static boolean overlaps(long start, long end, long otherStart, long otherEnd) {
@@ -556,9 +574,11 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   /**
    * Fetches only the data pages of the known data columns in a single row group, skipping its
-   * dictionary pages because the engine has already read them.
+   * dictionary pages because the engine has already read them, and returns whether every data page
+   * range is now cached or in flight.
    */
-  private long speculateRowGroupDataPages(VectoredSeekableByteChannel source, int rowGroupOrdinal) {
+  private boolean speculateRowGroupDataPages(
+      VectoredSeekableByteChannel source, int rowGroupOrdinal) {
     int fingerprint = layout.getSchemaFingerprint();
     List<Range<Long>> unusedDictRanges = new ArrayList<>();
     List<Range<Long>> dataRanges = new ArrayList<>();
@@ -569,10 +589,12 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
         accessHistory.getDataColumns(fingerprint),
         accessHistory.getDictionaryColumns(fingerprint));
     if (dataRanges.isEmpty()) {
-      return 0L;
+      return false;
     }
     dataRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return scheduler.schedule(source, itemId, coalesceConnectedRanges(dataRanges), fileSize);
+    List<Range<Long>> coalescedRanges = coalesceConnectedRanges(dataRanges);
+    long ignored = scheduler.schedule(source, itemId, coalescedRanges, fileSize);
+    return areAllRangesRegistered(coalescedRanges);
   }
 
   /**

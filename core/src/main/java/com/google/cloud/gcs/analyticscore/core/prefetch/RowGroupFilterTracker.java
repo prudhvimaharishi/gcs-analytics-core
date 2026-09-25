@@ -100,6 +100,11 @@ final class RowGroupFilterTracker {
     return dataTouchedOrdinals.size();
   }
 
+  /** Returns the highest row group ordinal whose data pages have been read, or {@code -1}. */
+  int getLastDataReadOrdinal() {
+    return dataTouchedOrdinals.isEmpty() ? -1 : dataTouchedOrdinals.last();
+  }
+
   /**
    * Records that data pages in {@code rowGroupOrdinal} were read, marking any earlier untouched row
    * groups as skipped and capturing their filter-column statistics as rejected.
