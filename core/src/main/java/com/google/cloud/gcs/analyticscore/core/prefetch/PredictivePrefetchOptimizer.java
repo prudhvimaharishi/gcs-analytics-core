@@ -360,11 +360,16 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
         "Unknown dictionary trigger: " + prefetchOptions.getDictionaryTrigger());
   }
 
-  /** Records the columns covered by {@code ranges} and notes the row group to speculate next. */
+  /**
+   * Records the columns covered by {@code ranges} in file order, so that a later row group in the
+   * same call cannot mark an earlier one as skipped, and notes the row group to speculate next.
+   */
   private void recordVectoredAccess(List<GcsObjectRange> ranges) {
     int lastRowGroupOrdinal = -1;
     boolean touchedAnyDataPage = false;
-    for (GcsObjectRange range : ranges) {
+    List<GcsObjectRange> rangesInFileOrder = new ArrayList<>(ranges);
+    rangesInFileOrder.sort(Comparator.comparingLong(GcsObjectRange::getOffset));
+    for (GcsObjectRange range : rangesInFileOrder) {
       int rowGroupOrdinal = findRowGroupOrdinal(range.getOffset());
       if (rowGroupOrdinal < 0) {
         continue;
@@ -379,7 +384,12 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       return;
     }
     firstRowGroupPrefetched = true;
-    pendingSpeculationRowGroupOrdinal = lastRowGroupOrdinal + 1;
+    ImmutableSet<String> knownDictionaryColumns =
+        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    pendingSpeculationRowGroupOrdinal =
+        filterTracker
+            .findNextSurvivingRowGroup(layout, lastRowGroupOrdinal, knownDictionaryColumns)
+            .orElse(-1);
   }
 
   /**
@@ -415,9 +425,42 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     return touchedDataPage;
   }
 
-  /** Records a data read in {@code rowGroupOrdinal}. */
+  /**
+   * Records a data read in {@code rowGroupOrdinal}, cancels prefetches of earlier row groups that
+   * have finished or were skipped, and cancels any filter-only dictionary prefetches in {@code
+   * rowGroupOrdinal}.
+   */
   private void onDataPageRead(int rowGroupOrdinal) {
-    filterTracker.recordDataRead(rowGroupOrdinal);
+    int fingerprint = layout.getSchemaFingerprint();
+    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
+    int previousDataReadOrdinal = filterTracker.getLastDataReadOrdinal();
+    filterTracker.recordDataRead(layout, rowGroupOrdinal, dictionaryColumns);
+    int cleanupStartOrdinal = Math.max(0, previousDataReadOrdinal);
+    if (rowGroupOrdinal > cleanupStartOrdinal) {
+      scheduler.cancelRangeWindow(
+          rowGroupStartOffsets[cleanupStartOrdinal], rowGroupStartOffsets[rowGroupOrdinal]);
+    }
+    cancelFilterOnlyDictionaryRanges(
+        rowGroupOrdinal, dictionaryColumns, accessHistory.getDataColumns(fingerprint));
+  }
+
+  private void cancelFilterOnlyDictionaryRanges(
+      int rowGroupOrdinal, Set<String> dictionaryColumns, Set<String> dataColumns) {
+    Optional<ParquetRowGroup> rowGroup = layout.getRowGroup(rowGroupOrdinal);
+    if (!rowGroup.isPresent()) {
+      return;
+    }
+    for (String columnPath : dictionaryColumns) {
+      if (dataColumns.contains(columnPath)) {
+        continue;
+      }
+      rowGroup
+          .get()
+          .getColumnChunk(columnPath)
+          .flatMap(ParquetColumnChunk::getDictionaryPageRange)
+          .ifPresent(
+              range -> scheduler.cancelRangeWindow(range.lowerEndpoint(), range.upperEndpoint()));
+    }
   }
 
   private static boolean overlaps(long start, long end, long otherStart, long otherEnd) {
@@ -519,10 +562,15 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
    */
   private void speculateRowGroups(
       VectoredSeekableByteChannel source, int rowGroupOrdinal, long currentReadEnd) {
-    int nextOrdinal = rowGroupOrdinal + 1;
+    OptionalInt nextSurvivingOrdinal =
+        filterTracker.findNextSurvivingRowGroup(
+            layout,
+            rowGroupOrdinal,
+            accessHistory.getDictionaryColumns(layout.getSchemaFingerprint()));
     OptionalInt targetNextOrdinal =
-        shouldSpeculateNextRowGroup(nextOrdinal)
-            ? OptionalInt.of(nextOrdinal)
+        nextSurvivingOrdinal.isPresent()
+                && shouldSpeculateNextRowGroup(nextSurvivingOrdinal.getAsInt())
+            ? nextSurvivingOrdinal
             : OptionalInt.empty();
     List<Range<Long>> learnedRanges =
         collectLearnedRangesForRowGroups(rowGroupOrdinal, targetNextOrdinal);

@@ -127,6 +127,27 @@ final class PrefetchScheduler implements AutoCloseable {
   }
 
   /**
+   * Cancels in-flight requests that no foreground reader has promoted and evicts cached ranges
+   * inside {@code [startOffset, endOffset)}.
+   */
+  void cancelRangeWindow(long startOffset, long endOffset) {
+    for (java.util.Map.Entry<Long, GcsObjectRange> entry :
+        new ArrayList<>(inFlightRequests.subMap(startOffset, true, endOffset, false).entrySet())) {
+      cancelUnlessPromoted(entry.getValue());
+      inFlightRequests.remove(entry.getKey());
+    }
+    GcsItemId item = scheduledItemId;
+    if (item != null) {
+      for (Long offset : new ArrayList<>(scheduledOffsets)) {
+        if (offset >= startOffset && offset < endOffset) {
+          bufferCache.evictRange(item, offset);
+          scheduledOffsets.remove(offset);
+        }
+      }
+    }
+  }
+
+  /**
    * Cancels every outstanding speculative request that no foreground reader has promoted, and
    * evicts unconsumed stream ranges.
    */

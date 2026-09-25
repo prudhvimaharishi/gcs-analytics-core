@@ -22,6 +22,7 @@ import com.google.common.primitives.UnsignedBytes;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
+import java.util.OptionalInt;
 import org.apache.parquet.format.Type;
 
 /**
@@ -46,6 +47,73 @@ final class ParquetColumnStatistics {
   /** Creates a statistics instance from raw footer min/max bytes. */
   static ParquetColumnStatistics of(Type type, byte[] minBytes, byte[] maxBytes) {
     return new ParquetColumnStatistics(type, minBytes, maxBytes);
+  }
+
+  /**
+   * Returns whether every value in this column chunk's {@code [min, max]} interval falls inside
+   * {@code other}'s {@code [min, max]} interval. Returns {@code false} whenever the values cannot
+   * be ordered, such as for {@code INT96}, {@code NaN}, or values of an unexpected width.
+   */
+  boolean isContainedIn(ParquetColumnStatistics other) {
+    checkNotNull(other, "other cannot be null");
+    if (this.type != other.type) {
+      return false;
+    }
+    if (Arrays.equals(this.minBytes, other.minBytes)
+        && Arrays.equals(this.maxBytes, other.maxBytes)) {
+      return true;
+    }
+    OptionalInt minComparison = compareValues(this.minBytes, other.minBytes);
+    OptionalInt maxComparison = compareValues(this.maxBytes, other.maxBytes);
+    return minComparison.isPresent()
+        && maxComparison.isPresent()
+        && minComparison.getAsInt() >= 0
+        && maxComparison.getAsInt() <= 0;
+  }
+
+  /** Compares two plain-encoded values of {@link #type}, or returns empty if they are unordered. */
+  private OptionalInt compareValues(byte[] left, byte[] right) {
+    switch (type) {
+      case BOOLEAN:
+        if (left.length == 1 && right.length == 1) {
+          return OptionalInt.of(Integer.compare(left[0], right[0]));
+        }
+        return OptionalInt.empty();
+      case INT32:
+        if (left.length == Integer.BYTES && right.length == Integer.BYTES) {
+          return OptionalInt.of(Integer.compare(toInt(left), toInt(right)));
+        }
+        return OptionalInt.empty();
+      case INT64:
+        if (left.length == Long.BYTES && right.length == Long.BYTES) {
+          return OptionalInt.of(Long.compare(toLong(left), toLong(right)));
+        }
+        return OptionalInt.empty();
+      case FLOAT:
+        if (left.length == Float.BYTES && right.length == Float.BYTES) {
+          return compareDoubles(
+              Float.intBitsToFloat(toInt(left)), Float.intBitsToFloat(toInt(right)));
+        }
+        return OptionalInt.empty();
+      case DOUBLE:
+        if (left.length == Double.BYTES && right.length == Double.BYTES) {
+          return compareDoubles(
+              Double.longBitsToDouble(toLong(left)), Double.longBitsToDouble(toLong(right)));
+        }
+        return OptionalInt.empty();
+      case BYTE_ARRAY:
+      case FIXED_LEN_BYTE_ARRAY:
+        return OptionalInt.of(compareLexicographically(left, right));
+      default:
+        return OptionalInt.empty();
+    }
+  }
+
+  private static OptionalInt compareDoubles(double left, double right) {
+    if (Double.isNaN(left) || Double.isNaN(right)) {
+      return OptionalInt.empty();
+    }
+    return OptionalInt.of(Double.compare(left, right));
   }
 
   private static int toInt(byte[] bytes) {
