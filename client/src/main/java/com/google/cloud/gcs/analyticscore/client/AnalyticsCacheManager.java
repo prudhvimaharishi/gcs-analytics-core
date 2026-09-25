@@ -41,14 +41,26 @@ public class AnalyticsCacheManager {
   private final AnalyticsCache<GcsItemId, ByteBuffer> footerCache;
   private final AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
   private final AnalyticsCache<String, BucketProperties> bucketPropertiesCache;
+  private final PrefetchBufferCache prefetchBufferCache;
+
+  /**
+   * Creates a new {@link AnalyticsCacheManager} with prefetching left at its default configuration.
+   *
+   * @param options The configuration options for the caching layer.
+   */
+  public AnalyticsCacheManager(GcsCacheOptions options) {
+    this(options, GcsPrefetchOptions.builder().build());
+  }
 
   /**
    * Creates a new {@link AnalyticsCacheManager} with the specified options.
    *
    * @param options The configuration options for the caching layer.
+   * @param prefetchOptions The configuration options for predictive prefetching.
    */
-  public AnalyticsCacheManager(GcsCacheOptions options) {
+  public AnalyticsCacheManager(GcsCacheOptions options, GcsPrefetchOptions prefetchOptions) {
     checkNotNull(options, "options cannot be null");
+    checkNotNull(prefetchOptions, "prefetchOptions cannot be null");
     Weigher<GcsItemId, ByteBuffer> weigher = (key, value) -> value.remaining();
     this.footerCache =
         options.isFooterCacheEnabled()
@@ -61,6 +73,15 @@ public class AnalyticsCacheManager {
     this.bucketPropertiesCache =
         AnalyticsCacheCaffeineImpl.createWithTtlOnly(
             BUCKET_PROPERTIES_CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+    this.prefetchBufferCache =
+        new PrefetchBufferCache(
+            prefetchOptions.getBufferCacheMaxSizeBytes(),
+            prefetchOptions.getBufferCacheTtlSeconds());
+  }
+
+  /** Returns the cache holding speculatively prefetched byte blocks. */
+  public PrefetchBufferCache getPrefetchBufferCache() {
+    return prefetchBufferCache;
   }
 
   /**
@@ -135,6 +156,7 @@ public class AnalyticsCacheManager {
     footerCache.invalidateAll();
     smallObjectCache.invalidateAll();
     bucketPropertiesCache.invalidateAll();
+    prefetchBufferCache.invalidateAll();
   }
 
   /** A loader for GCS object footers. */
