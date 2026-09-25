@@ -27,6 +27,7 @@ public abstract class GcsObjectRange {
 
   private final AtomicReference<Runnable> promotionAction = new AtomicReference<>();
   private final AtomicBoolean promoted = new AtomicBoolean();
+  private final AtomicReference<Runnable> cancellationAction = new AtomicReference<>();
 
   // The future that will be completed with the contents of the byte range.
   public abstract CompletableFuture<ByteBuffer> getByteBufferFuture();
@@ -49,9 +50,21 @@ public abstract class GcsObjectRange {
     }
   }
 
+  /**
+   * Attaches a callback that cancels a low-priority prefetch when no longer needed, unless the
+   * range has already been promoted.
+   */
+  void setCancellationAction(Runnable action) {
+    cancellationAction.set(action);
+    if (promoted.get()) {
+      cancellationAction.set(null);
+    }
+  }
+
   /** Promotes the underlying background download to foreground priority if still queued. */
   public void promote() {
     promoted.set(true);
+    cancellationAction.set(null);
     runPromotionAction();
   }
 
@@ -62,6 +75,18 @@ public abstract class GcsObjectRange {
 
   private void runPromotionAction() {
     Runnable action = promotionAction.getAndSet(null);
+    if (action != null) {
+      action.run();
+    }
+  }
+
+  /** Cancels the underlying low-priority background download if it has not been promoted. */
+  public void cancel() {
+    if (promoted.get()) {
+      return;
+    }
+    promotionAction.set(null);
+    Runnable action = cancellationAction.getAndSet(null);
     if (action != null) {
       action.run();
     }

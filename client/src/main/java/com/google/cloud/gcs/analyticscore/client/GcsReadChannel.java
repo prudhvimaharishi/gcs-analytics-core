@@ -283,20 +283,36 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
       Runnable readTask = () -> readCombinedRange(combinedRange, allocate, operation);
       if (lowPriority && executorService instanceof PrioritizedReadExecutorService) {
         ((PrioritizedReadExecutorService) executorService)
-            .submitLowPriority(readTask, combinedRange.getUnderlyingRanges());
+            .submitLowPriority(
+                readTask, combinedRange.getUnderlyingRanges(), () -> allRangesDone(combinedRange));
       } else {
         var unused = executorService.submit(readTask);
       }
     }
   }
 
+  private static boolean allRangesDone(GcsObjectCombinedRange combinedObjectRange) {
+    for (GcsObjectRange child : combinedObjectRange.getUnderlyingRanges()) {
+      if (!child.getByteBufferFuture().isDone()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   void readCombinedRange(
       GcsObjectCombinedRange combinedObjectRange,
       IntFunction<ByteBuffer> allocate,
       Operation operation) {
+    if (allRangesDone(combinedObjectRange)) {
+      return;
+    }
     telemetry.measure(
         operation,
         recorder -> {
+          if (allRangesDone(combinedObjectRange)) {
+            return null;
+          }
           ReadStrategy readStrategy =
               new RandomReadStrategy(storage, itemId, readOptions, itemInfo);
           try (ReadChannel channel =
@@ -311,8 +327,22 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
                       combinedObjectRange));
             }
             int numOfBytesRead = 0;
+            int maxReadSliceBytes = 256 * 1024;
             while (dataBuffer.hasRemaining()) {
-              int bytesRead = channel.read(dataBuffer);
+              if (allRangesDone(combinedObjectRange)) {
+                Thread.currentThread().interrupt();
+                return null;
+              }
+              int originalLimit = dataBuffer.limit();
+              if (dataBuffer.remaining() > maxReadSliceBytes) {
+                dataBuffer.limit(dataBuffer.position() + maxReadSliceBytes);
+              }
+              int bytesRead;
+              try {
+                bytesRead = channel.read(dataBuffer);
+              } finally {
+                dataBuffer.limit(originalLimit);
+              }
               extractMetadataAfterRead(readStrategy);
               if (bytesRead < 0) {
                 // EOF reached.

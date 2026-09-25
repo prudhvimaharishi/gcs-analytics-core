@@ -243,6 +243,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
       statusExecutorService.shutdownNow();
       Thread.currentThread().interrupt();
     }
+    cacheManager.invalidateAll();
     gcsClient.close();
     telemetry.close();
   }

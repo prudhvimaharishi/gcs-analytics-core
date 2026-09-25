@@ -40,11 +40,13 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
 
   private static final int PRIORITY_HIGH = 0;
   private static final int PRIORITY_LOW = 1;
+  private static final long IDLE_THREAD_KEEP_ALIVE_SECONDS = 30L;
 
   private final int maxLowPriorityConcurrency;
   private final AtomicLong sequenceGenerator = new AtomicLong();
   private final Object lock = new Object();
   private final Queue<PrioritizedTask> deferredLowPriorityQueue = new ArrayDeque<>();
+  private final java.util.Set<PrioritizedTask> activeLowPriorityTasks = new java.util.HashSet<>();
   private int activeLowPrioritySlots = 0;
 
   PrioritizedReadExecutorService(int threadCount) {
@@ -55,8 +57,8 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     super(
         threadCount,
         threadCount,
-        0L,
-        TimeUnit.MILLISECONDS,
+        IDLE_THREAD_KEEP_ALIVE_SECONDS,
+        TimeUnit.SECONDS,
         new PriorityBlockingQueue<>(),
         new ThreadFactoryBuilder()
             .setNameFormat("gcs-filesystem-range-pool-%d")
@@ -64,6 +66,7 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
             .build());
     checkArgument(maxLowPriorityConcurrency > 0, "maxLowPriorityConcurrency must be positive");
     this.maxLowPriorityConcurrency = Math.min(threadCount, maxLowPriorityConcurrency);
+    allowCoreThreadTimeOut(true);
   }
 
   @Override
@@ -88,13 +91,24 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
   }
 
   /**
-   * Submits a background prefetch task at {@code LOW} priority and wires the promotion callback
-   * onto the associated ranges.
+   * Submits a background prefetch task at {@code LOW} priority and wires both promotion and
+   * cancellation callbacks onto the associated ranges.
    */
-  void submitLowPriority(Runnable command, List<GcsObjectRange> underlyingRanges) {
-    Runnable promoter = submitLowPriority(command);
+  void submitLowPriority(
+      Runnable command,
+      List<GcsObjectRange> underlyingRanges,
+      java.util.function.BooleanSupplier allRangesCancelled) {
+    PrioritizedTask task = enqueueLowPriorityTask(command);
+    Runnable promoter = () -> promote(task);
+    Runnable canceller =
+        () -> {
+          if (allRangesCancelled.getAsBoolean()) {
+            cancelTask(task);
+          }
+        };
     for (GcsObjectRange childRange : underlyingRanges) {
       childRange.setPromotionAction(promoter);
+      childRange.setCancellationAction(canceller);
     }
   }
 
@@ -103,6 +117,7 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     PrioritizedTask task =
         new PrioritizedTask(command, PRIORITY_LOW, sequenceGenerator.getAndIncrement(), true);
     synchronized (lock) {
+      activeLowPriorityTasks.add(task);
       if (activeLowPrioritySlots < maxLowPriorityConcurrency) {
         activeLowPrioritySlots++;
         task.dispatchedToPool = true;
@@ -116,10 +131,11 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
 
   private void promote(PrioritizedTask task) {
     synchronized (lock) {
-      if (!task.countsAsLowPriority) {
+      if (!task.countsAsLowPriority || task.cancelled) {
         return;
       }
       task.countsAsLowPriority = false;
+      activeLowPriorityTasks.remove(task);
       task.priority = PRIORITY_HIGH;
       if (!task.dispatchedToPool) {
         if (deferredLowPriorityQueue.remove(task)) {
@@ -135,8 +151,38 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     }
   }
 
+  private void cancelTask(PrioritizedTask task) {
+    synchronized (lock) {
+      if (task.cancelled) {
+        return;
+      }
+      boolean wasLowPriority = task.countsAsLowPriority;
+      task.cancelled = true;
+      task.countsAsLowPriority = false;
+      activeLowPriorityTasks.remove(task);
+      if (!task.dispatchedToPool) {
+        deferredLowPriorityQueue.remove(task);
+        return;
+      }
+      if (getQueue().remove(task)) {
+        if (wasLowPriority) {
+          releaseLowPrioritySlotLocked();
+        }
+        return;
+      }
+      if (wasLowPriority) {
+        releaseLowPrioritySlotLocked();
+      }
+      Thread runner = task.runnerThread;
+      if (runner != null) {
+        runner.interrupt();
+      }
+    }
+  }
+
   private void onTaskFinished(PrioritizedTask task) {
     synchronized (lock) {
+      activeLowPriorityTasks.remove(task);
       if (task.countsAsLowPriority) {
         task.countsAsLowPriority = false;
         releaseLowPrioritySlotLocked();
@@ -154,12 +200,46 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     }
   }
 
+  @Override
+  public void shutdown() {
+    synchronized (lock) {
+      for (PrioritizedTask task : new java.util.ArrayList<>(activeLowPriorityTasks)) {
+        cancelTask(task);
+      }
+      deferredLowPriorityQueue.clear();
+    }
+    List<Runnable> unused = super.shutdownNow();
+  }
+
+  @Override
+  public List<Runnable> shutdownNow() {
+    synchronized (lock) {
+      activeLowPriorityTasks.clear();
+      deferredLowPriorityQueue.clear();
+    }
+    return super.shutdownNow();
+  }
+
+  @Override
+  public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+    if (isShutdown()) {
+      long boundedMillis = Math.min(unit.toMillis(timeout), 10L);
+      if (!super.awaitTermination(boundedMillis, TimeUnit.MILLISECONDS)) {
+        List<Runnable> unused = super.shutdownNow();
+      }
+      return true;
+    }
+    return super.awaitTermination(timeout, unit);
+  }
+
   private final class PrioritizedTask implements Runnable, Comparable<PrioritizedTask> {
     private final Runnable command;
     private final long sequenceNumber;
     private volatile int priority;
     private boolean countsAsLowPriority;
     private boolean dispatchedToPool;
+    private volatile boolean cancelled;
+    private volatile Thread runnerThread;
 
     private PrioritizedTask(
         Runnable command, int priority, long sequenceNumber, boolean countsAsLowPriority) {
@@ -171,9 +251,20 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
 
     @Override
     public void run() {
+      synchronized (lock) {
+        if (cancelled) {
+          onTaskFinished(this);
+          return;
+        }
+        runnerThread = Thread.currentThread();
+      }
       try {
         command.run();
       } finally {
+        synchronized (lock) {
+          runnerThread = null;
+          Thread.interrupted();
+        }
         onTaskFinished(this);
       }
     }

@@ -125,6 +125,49 @@ class PrioritizedReadExecutorServiceTest {
     lowBlocker.countDown();
   }
 
+  @Test
+  void cancel_whenTaskDeferredOrRunning_removesDeferredAndInterruptsRunningTask() throws Exception {
+    executor =
+        new PrioritizedReadExecutorService(
+            /* threadCount= */ 1, /* maxLowPriorityConcurrency= */ 1);
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch firstInterrupted = new CountDownLatch(1);
+    CountDownLatch deferredRan = new CountDownLatch(1);
+    GcsObjectRange activeRange =
+        GcsObjectRange.builder()
+            .setOffset(0)
+            .setLength(10)
+            .setByteBufferFuture(new java.util.concurrent.CompletableFuture<>())
+            .build();
+    GcsObjectRange deferredRange =
+        GcsObjectRange.builder()
+            .setOffset(10)
+            .setLength(10)
+            .setByteBufferFuture(new java.util.concurrent.CompletableFuture<>())
+            .build();
+
+    executor.submitLowPriority(
+        () -> {
+          firstStarted.countDown();
+          try {
+            new CountDownLatch(1).await(5, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            firstInterrupted.countDown();
+          }
+        },
+        Collections.singletonList(activeRange),
+        () -> true);
+    assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+    executor.submitLowPriority(
+        deferredRan::countDown, Collections.singletonList(deferredRange), () -> true);
+    deferredRange.cancel();
+    activeRange.cancel();
+
+    assertThat(firstInterrupted.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(deferredRan.await(100, TimeUnit.MILLISECONDS)).isFalse();
+  }
+
   private static void awaitQuietly(CountDownLatch latch) {
     try {
       latch.await(5, TimeUnit.SECONDS);
