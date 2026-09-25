@@ -280,8 +280,13 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
             vectoredReadOptions.getMaxMergeSize());
 
     for (GcsObjectCombinedRange combinedRange : combinedRanges) {
-      var unused =
-          executorService.submit(() -> readCombinedRange(combinedRange, allocate, operation));
+      Runnable readTask = () -> readCombinedRange(combinedRange, allocate, operation);
+      if (lowPriority && executorService instanceof PrioritizedReadExecutorService) {
+        ((PrioritizedReadExecutorService) executorService)
+            .submitLowPriority(readTask, combinedRange.getUnderlyingRanges());
+      } else {
+        var unused = executorService.submit(readTask);
+      }
     }
   }
 

@@ -33,6 +33,10 @@ import java.util.concurrent.ExecutionException;
 @AutoValue
 public abstract class CachedRange {
 
+  private Runnable promotionAction = CachedRange::noOpPromotion;
+
+  private static void noOpPromotion() {}
+
   /** Returns the inclusive start offset of this range within the GCS object. */
   public abstract long getStartOffset();
 
@@ -45,6 +49,18 @@ public abstract class CachedRange {
   /** Creates a new {@link CachedRange} for {@code [startOffset, endOffset)}. */
   public static CachedRange create(
       long startOffset, long endOffset, CompletableFuture<ByteBuffer> future) {
+    return create(startOffset, endOffset, future, CachedRange::noOpPromotion);
+  }
+
+  /**
+   * Creates a new {@link CachedRange} for {@code [startOffset, endOffset)} with a priority
+   * promotion callback.
+   */
+  public static CachedRange create(
+      long startOffset,
+      long endOffset,
+      CompletableFuture<ByteBuffer> future,
+      Runnable promotionAction) {
     checkArgument(startOffset >= 0, "startOffset %s must be non-negative", startOffset);
     checkArgument(
         endOffset > startOffset,
@@ -52,7 +68,15 @@ public abstract class CachedRange {
         endOffset,
         startOffset);
     checkNotNull(future, "future cannot be null");
-    return new AutoValue_CachedRange(startOffset, endOffset, future);
+    checkNotNull(promotionAction, "promotionAction cannot be null");
+    CachedRange range = new AutoValue_CachedRange(startOffset, endOffset, future);
+    range.promotionAction = promotionAction;
+    return range;
+  }
+
+  /** Promotes this range's download to foreground priority if it is still queued. */
+  public void promote() {
+    promotionAction.run();
   }
 
   /** Returns the length of this range in bytes. */

@@ -100,7 +100,8 @@ final class PrefetchScheduler implements AutoCloseable {
               .setLength(length)
               .setByteBufferFuture(request)
               .build();
-      if (!bufferCache.registerRange(itemId, startOffset, length, cachedFuture)) {
+      if (!bufferCache.registerRange(
+          itemId, startOffset, length, cachedFuture, objectRange::promote)) {
         continue;
       }
       scheduledBytes += length;
@@ -125,10 +126,13 @@ final class PrefetchScheduler implements AutoCloseable {
     return scheduledBytes;
   }
 
-  /** Cancels every outstanding speculative request and evicts unconsumed stream ranges. */
+  /**
+   * Cancels every outstanding speculative request that no foreground reader has promoted, and
+   * evicts unconsumed stream ranges.
+   */
   void cancelAll() {
     for (GcsObjectRange objectRange : inFlightRequests.values()) {
-      objectRange.getByteBufferFuture().cancel(/* mayInterruptIfRunning= */ false);
+      cancelUnlessPromoted(objectRange);
     }
     inFlightRequests.clear();
     GcsItemId item = scheduledItemId;
@@ -138,6 +142,17 @@ final class PrefetchScheduler implements AutoCloseable {
       }
     }
     scheduledOffsets.clear();
+  }
+
+  /**
+   * Cancels {@code objectRange}'s download unless a foreground reader promoted it, because that
+   * reader is waiting on the same shared future.
+   */
+  private static void cancelUnlessPromoted(GcsObjectRange objectRange) {
+    if (objectRange.isPromoted()) {
+      return;
+    }
+    objectRange.getByteBufferFuture().cancel(/* mayInterruptIfRunning= */ false);
   }
 
   @Override
