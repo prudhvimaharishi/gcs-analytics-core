@@ -19,6 +19,9 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
+import com.google.cloud.gcs.analyticscore.common.ConfigurationUtil;
+import java.util.Locale;
+import java.util.Map;
 
 /** Configuration options for predictive prefetching. */
 @AutoValue
@@ -44,6 +47,15 @@ public abstract class GcsPrefetchOptions {
     /** Prefetches once every known dictionary column of the row group is read. */
     LAST_DICT_READ
   }
+
+  static final String PREFETCH_MODE_KEY = "analytics-core.prefetch.mode";
+  static final String DICTIONARY_TRIGGER_KEY = "analytics-core.prefetch.dictionary-trigger";
+  static final String BUFFER_CACHE_MAX_SIZE_BYTES_KEY =
+      "analytics-core.prefetch.buffer.cache.max-size-bytes";
+  static final String BUFFER_CACHE_TTL_SECONDS_KEY =
+      "analytics-core.prefetch.buffer.cache.ttl-seconds";
+  static final String BLOCK_SIZE_BYTES_KEY = "analytics-core.prefetch.block.size-bytes";
+  static final String HISTORY_MAX_COLUMNS_KEY = "analytics-core.prefetch.history.max-columns";
 
   private static final PrefetchMode DEFAULT_PREFETCH_MODE = PrefetchMode.DISABLED;
   private static final DictionaryTrigger DEFAULT_DICTIONARY_TRIGGER =
@@ -109,6 +121,72 @@ public abstract class GcsPrefetchOptions {
         .setBufferCacheTtlSeconds(DEFAULT_BUFFER_CACHE_TTL_SECONDS)
         .setBlockSizeBytes(DEFAULT_BLOCK_SIZE_BYTES)
         .setHistoryMaxColumns(DEFAULT_HISTORY_MAX_COLUMNS);
+  }
+
+  /**
+   * Creates a {@link GcsPrefetchOptions} instance from a map of configuration options.
+   *
+   * <p>Keys absent from the map keep their default value. Enum values are matched
+   * case-insensitively and hyphens are treated as underscores, so {@code predictive-row-group}
+   * resolves to {@code PREDICTIVE_ROW_GROUP}.
+   *
+   * @param analyticsCoreOptions the configuration options, keyed without the {@code prefix}
+   * @param prefix the prefix prepended to every recognised key
+   * @throws IllegalArgumentException if the prefetch mode or dictionary trigger value does not name
+   *     a constant of its enum
+   */
+  public static GcsPrefetchOptions createFromOptions(
+      Map<String, String> analyticsCoreOptions, String prefix) {
+    GcsPrefetchOptions.Builder optionsBuilder = builder();
+    String prefetchModeFullKey = prefix + PREFETCH_MODE_KEY;
+    if (analyticsCoreOptions.containsKey(prefetchModeFullKey)) {
+      optionsBuilder.setPrefetchMode(
+          parseEnum(
+              PrefetchMode.class,
+              prefetchModeFullKey,
+              analyticsCoreOptions.get(prefetchModeFullKey)));
+    }
+    String dictionaryTriggerFullKey = prefix + DICTIONARY_TRIGGER_KEY;
+    if (analyticsCoreOptions.containsKey(dictionaryTriggerFullKey)) {
+      optionsBuilder.setDictionaryTrigger(
+          parseEnum(
+              DictionaryTrigger.class,
+              dictionaryTriggerFullKey,
+              analyticsCoreOptions.get(dictionaryTriggerFullKey)));
+    }
+    String bufferCacheMaxSizeBytesFullKey = prefix + BUFFER_CACHE_MAX_SIZE_BYTES_KEY;
+    if (analyticsCoreOptions.containsKey(bufferCacheMaxSizeBytesFullKey)) {
+      optionsBuilder.setBufferCacheMaxSizeBytes(
+          Long.parseLong(analyticsCoreOptions.get(bufferCacheMaxSizeBytesFullKey)));
+    }
+    String bufferCacheTtlSecondsFullKey = prefix + BUFFER_CACHE_TTL_SECONDS_KEY;
+    if (analyticsCoreOptions.containsKey(bufferCacheTtlSecondsFullKey)) {
+      optionsBuilder.setBufferCacheTtlSeconds(
+          Long.parseLong(analyticsCoreOptions.get(bufferCacheTtlSecondsFullKey)));
+    }
+    String blockSizeBytesFullKey = prefix + BLOCK_SIZE_BYTES_KEY;
+    if (analyticsCoreOptions.containsKey(blockSizeBytesFullKey)) {
+      optionsBuilder.setBlockSizeBytes(
+          ConfigurationUtil.safeParseInteger(
+              blockSizeBytesFullKey, analyticsCoreOptions.get(blockSizeBytesFullKey)));
+    }
+    String historyMaxColumnsFullKey = prefix + HISTORY_MAX_COLUMNS_KEY;
+    if (analyticsCoreOptions.containsKey(historyMaxColumnsFullKey)) {
+      optionsBuilder.setHistoryMaxColumns(
+          ConfigurationUtil.safeParseInteger(
+              historyMaxColumnsFullKey, analyticsCoreOptions.get(historyMaxColumnsFullKey)));
+    }
+
+    return optionsBuilder.build();
+  }
+
+  private static <E extends Enum<E>> E parseEnum(Class<E> enumClass, String key, String value) {
+    try {
+      return Enum.valueOf(enumClass, value.replace('-', '_').toUpperCase(Locale.ROOT));
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException(
+          String.format("Invalid value '%s' for key '%s'", value, key), e);
+    }
   }
 
   /** Builder for {@link GcsPrefetchOptions}. */

@@ -21,9 +21,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.DictionaryTrigger;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.PrefetchMode;
+import com.google.common.collect.ImmutableMap;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class GcsPrefetchOptionsTest {
+
+  private static final String PREFIX = "gcs.";
 
   @Test
   void build_defaultValues_returnsDisabledMode() {
@@ -37,6 +41,106 @@ class GcsPrefetchOptionsTest {
     GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
 
     assertThat(options.getDictionaryTrigger()).isEqualTo(DictionaryTrigger.LAST_DICT_READ);
+  }
+
+  @Test
+  void createFromOptions_hyphenatedLowerCaseDictionaryTrigger_parsesTrigger() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.DICTIONARY_TRIGGER_KEY, "first-dict-read");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getDictionaryTrigger()).isEqualTo(DictionaryTrigger.FIRST_DICT_READ);
+  }
+
+  @Test
+  void createFromOptions_unrecognisedDictionaryTrigger_throwsIllegalArgumentException() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.DICTIONARY_TRIGGER_KEY, "middle-dict-read");
+
+    assertThrows(
+        IllegalArgumentException.class, () -> GcsPrefetchOptions.createFromOptions(map, PREFIX));
+  }
+
+  @Test
+  void createFromOptions_withEmptyOptions_returnsDefaults() {
+    Map<String, String> map = ImmutableMap.of();
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options).isEqualTo(GcsPrefetchOptions.builder().build());
+  }
+
+  @Test
+  void createFromOptions_mapWithPrefetchMode_parsesMode() {
+    Map<String, String> map = prefetchModeOptions("PREDICTIVE_ROW_GROUP");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getPrefetchMode()).isEqualTo(PrefetchMode.PREDICTIVE_ROW_GROUP);
+  }
+
+  @Test
+  void createFromOptions_lowerCaseMode_parsesMode() {
+    Map<String, String> map = prefetchModeOptions("predictive_row_group");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getPrefetchMode()).isEqualTo(PrefetchMode.PREDICTIVE_ROW_GROUP);
+  }
+
+  @Test
+  void createFromOptions_hyphenatedMode_parsesMode() {
+    Map<String, String> map = prefetchModeOptions("predictive-row-group");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getPrefetchMode()).isEqualTo(PrefetchMode.PREDICTIVE_ROW_GROUP);
+  }
+
+  @Test
+  void createFromOptions_unrecognisedMode_throwsIllegalArgumentException() {
+    Map<String, String> map = prefetchModeOptions("not-a-mode");
+
+    assertThrows(
+        IllegalArgumentException.class, () -> GcsPrefetchOptions.createFromOptions(map, PREFIX));
+  }
+
+  @Test
+  void createFromOptions_unrecognisedMode_exceptionMessageContainsOffendingKeyAndValue() {
+    Map<String, String> map = prefetchModeOptions("not-a-mode");
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> GcsPrefetchOptions.createFromOptions(map, PREFIX));
+
+    assertThat(exception)
+        .hasMessageThat()
+        .isEqualTo(
+            String.format(
+                "Invalid value 'not-a-mode' for key '%s'",
+                PREFIX + GcsPrefetchOptions.PREFETCH_MODE_KEY));
+  }
+
+  @Test
+  void createFromOptions_keysResolvedUnderNonEmptyPrefix_parsesMode() {
+    Map<String, String> map =
+        ImmutableMap.of("custom." + GcsPrefetchOptions.PREFETCH_MODE_KEY, "predictive-row-group");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, "custom.");
+
+    assertThat(options.getPrefetchMode()).isEqualTo(PrefetchMode.PREDICTIVE_ROW_GROUP);
+  }
+
+  @Test
+  void createFromOptions_keyUnderDifferentPrefix_isIgnored() {
+    Map<String, String> map =
+        ImmutableMap.of("other." + GcsPrefetchOptions.PREFETCH_MODE_KEY, "predictive-row-group");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getPrefetchMode()).isEqualTo(PrefetchMode.DISABLED);
   }
 
   @Test
@@ -74,6 +178,26 @@ class GcsPrefetchOptionsTest {
     GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
 
     assertThat(options.getBufferCacheTtlSeconds()).isEqualTo(60);
+  }
+
+  @Test
+  void createFromOptions_mapWithBufferCacheMaxSizeBytes_parsesMaxSizeBytes() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.BUFFER_CACHE_MAX_SIZE_BYTES_KEY, "1024");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getBufferCacheMaxSizeBytes()).isEqualTo(1024);
+  }
+
+  @Test
+  void createFromOptions_mapWithBufferCacheTtlSeconds_parsesTtlSeconds() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.BUFFER_CACHE_TTL_SECONDS_KEY, "30");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getBufferCacheTtlSeconds()).isEqualTo(30);
   }
 
   @Test
@@ -117,6 +241,16 @@ class GcsPrefetchOptionsTest {
   }
 
   @Test
+  void createFromOptions_mapWithBlockSizeBytes_parsesBlockSizeBytes() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.BLOCK_SIZE_BYTES_KEY, "65536");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getBlockSizeBytes()).isEqualTo(65536);
+  }
+
+  @Test
   void build_enabledWithZeroBlockSizeBytes_throwsIllegalArgumentException() {
     GcsPrefetchOptions.Builder builder =
         GcsPrefetchOptions.builder()
@@ -134,6 +268,16 @@ class GcsPrefetchOptionsTest {
   }
 
   @Test
+  void createFromOptions_mapWithHistoryMaxColumns_parsesHistoryMaxColumns() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.HISTORY_MAX_COLUMNS_KEY, "42");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getHistoryMaxColumns()).isEqualTo(42);
+  }
+
+  @Test
   void build_enabledWithZeroHistoryMaxColumns_throwsIllegalArgumentException() {
     GcsPrefetchOptions.Builder builder =
         GcsPrefetchOptions.builder()
@@ -141,6 +285,10 @@ class GcsPrefetchOptionsTest {
             .setHistoryMaxColumns(0);
 
     assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  private static Map<String, String> prefetchModeOptions(String mode) {
+    return ImmutableMap.of(PREFIX + GcsPrefetchOptions.PREFETCH_MODE_KEY, mode);
   }
 
   private static GcsPrefetchOptions optionsWithMode(PrefetchMode mode) {
