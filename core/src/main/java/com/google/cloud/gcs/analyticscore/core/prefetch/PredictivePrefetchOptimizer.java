@@ -39,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -86,6 +87,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private boolean firstRowGroupPrefetched;
   private final Set<Integer> rowGroupsWithDataPrefetch = ConcurrentHashMap.newKeySet();
   private volatile ImmutableSet<String> prefetchedDictionaryColumns = ImmutableSet.of();
+  private boolean outcomeRecorded;
   @Nullable private ParquetFileLayout layout;
   private long[] rowGroupStartOffsets = new long[0];
   private long[] rowGroupEndOffsets = new long[0];
@@ -228,8 +230,26 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   @Override
   public synchronized void onClose() {
     closed = true;
+    recordOutcomeOnClose();
     if (scheduler != null) {
       scheduler.close();
+    }
+  }
+
+  private void recordOutcomeOnClose() {
+    if (outcomeRecorded || layout == null || accessHistory == null) {
+      return;
+    }
+    outcomeRecorded = true;
+    int fingerprint = layout.getSchemaFingerprint();
+    if (filterTracker.getDataTouchedCount() > 0) {
+      accessHistory.recordFileOutcome(fingerprint, SchemaAccessHistory.FileFilterOutcome.SURVIVED);
+    } else if (filterTracker.getDictionaryTouchedCount() > 0) {
+      accessHistory.recordFileOutcome(
+          fingerprint, SchemaAccessHistory.FileFilterOutcome.DICT_REJECTED);
+    } else {
+      accessHistory.recordFileOutcome(
+          fingerprint, SchemaAccessHistory.FileFilterOutcome.FOOTER_REJECTED);
     }
   }
 
@@ -326,12 +346,15 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
    * dictionary trigger is met for {@code rowGroupOrdinal}, prefetches that row group's data pages.
    */
   private void onDictionaryPageRead(VectoredSeekableByteChannel source, int rowGroupOrdinal) {
-    ImmutableSet<String> dictionaryColumns =
-        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    int fingerprint = layout.getSchemaFingerprint();
+    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
     if (!prefetchedDictionaryColumns.containsAll(dictionaryColumns)) {
-      speculateDictionaryPagesFrom(source, rowGroupOrdinal + 1);
+      boolean deferredAtFooter = !accessHistory.shouldSpeculateAtFooter(fingerprint);
+      speculateDictionaryPagesFrom(
+          source, deferredAtFooter ? rowGroupOrdinal : rowGroupOrdinal + 1);
     }
     if (!rowGroupsWithDataPrefetch.contains(rowGroupOrdinal)
+        && accessHistory.shouldSpeculateOnDictionary(fingerprint)
         && isDictionaryTriggerMet(rowGroupOrdinal, dictionaryColumns)
         && !hasPendingDataPrefetchBefore(rowGroupOrdinal)
         && speculateRowGroupDataPages(source, rowGroupOrdinal)) {
@@ -429,6 +452,11 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       }
     }
     if (touchedDataPage) {
+      if (!outcomeRecorded) {
+        outcomeRecorded = true;
+        accessHistory.recordFileOutcome(
+            fingerprint, SchemaAccessHistory.FileFilterOutcome.SURVIVED);
+      }
       onDataPageRead(rowGroupOrdinal);
     }
     return touchedDataPage;
@@ -486,11 +514,15 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       return;
     }
     firstRowGroupPrefetched = true;
-    ImmutableSet<String> dictionaryColumns =
-        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    int fingerprint = layout.getSchemaFingerprint();
+    if (!accessHistory.shouldSpeculateAtFooter(fingerprint)) {
+      return;
+    }
+    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
     if (!dictionaryColumns.isEmpty()) {
       speculateDictionaryPagesFrom(source, 0);
-      if (layout.getRowGroups().size() == 1) {
+      if (layout.getRowGroups().size() == 1
+          && accessHistory.shouldSpeculateOnDictionary(fingerprint)) {
         long ignored = speculateRowGroup(source, 0);
       }
       return;
@@ -502,9 +534,9 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   }
 
   /**
-   * Prefetches dictionary page ranges for known dictionary columns starting at {@code startRg}, and
-   * remembers those columns as prefetched once every range is registered in the buffer cache, until
-   * one of those downloads fails.
+   * Prefetches dictionary page ranges for known dictionary columns starting at {@code startRg},
+   * skipping pages the engine already read, and remembers those columns as prefetched once every
+   * range is registered in the buffer cache, until one of those downloads fails.
    */
   private void speculateDictionaryPagesFrom(VectoredSeekableByteChannel source, int startRg) {
     ImmutableSet<String> dictionaryColumns =
@@ -516,8 +548,10 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     List<Range<Long>> unusedDataRanges = new ArrayList<>();
     int rowGroupCount = layout.getRowGroups().size();
     for (int ordinal = startRg; ordinal < rowGroupCount; ordinal++) {
+      Set<String> unreadDictionaryColumns = new HashSet<>(dictionaryColumns);
+      unreadDictionaryColumns.removeAll(filterTracker.getDictionaryColumnsRead(ordinal));
       collectRowGroupRanges(
-          dictRanges, unusedDataRanges, ordinal, ImmutableSet.of(), dictionaryColumns);
+          dictRanges, unusedDataRanges, ordinal, ImmutableSet.of(), unreadDictionaryColumns);
     }
     dictRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
     List<Range<Long>> coalescedRanges = coalesceConnectedRanges(dictRanges);

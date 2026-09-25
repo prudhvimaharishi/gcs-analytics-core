@@ -26,6 +26,7 @@ import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.DictionaryTrigger;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.PrefetchMode;
+import com.google.cloud.gcs.analyticscore.client.SchemaAccessHistory;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
@@ -1117,6 +1118,115 @@ class PredictivePrefetchOptimizerTest {
     rg0Range.getByteBufferFuture().complete(ByteBuffer.allocate(rg0Range.getLength()));
 
     assertThat(channel.getRequestedOffsets()).contains(rg1Id.getStartOffset());
+  }
+
+  @Test
+  void afterRead_whenFooterRejectedHistoryDominates_defersPrefetchUntilDictionaryRead()
+      throws IOException {
+    int fingerprint = layout.getSchemaFingerprint();
+    cacheManager.getSchemaAccessHistory().recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+
+    // Simulate two files closed immediately after footer read (FOOTER_REJECTED).
+    for (int i = 0; i < 2; i++) {
+      FakeVectoredSeekableByteChannel rejectedChannel =
+          new FakeVectoredSeekableByteChannel(content);
+      PredictivePrefetchOptimizer rejectedOptimizer =
+          createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
+      rejectedOptimizer.afterRead(content.length - 16, 16, rejectedChannel);
+      rejectedOptimizer.onClose();
+      rejectedChannel.close();
+    }
+    assertThat(cacheManager.getSchemaAccessHistory().shouldSpeculateAtFooter(fingerprint))
+        .isFalse();
+
+    // Third file: footer read should NOT trigger prefetch, but subsequent dictionary read SHOULD.
+    FakeVectoredSeekableByteChannel thirdChannel = new FakeVectoredSeekableByteChannel(content);
+    PredictivePrefetchOptimizer thirdOptimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
+    thirdOptimizer.afterRead(content.length - 16, 16, thirdChannel);
+    assertThat(thirdChannel.getRequestedOffsets()).isEmpty();
+
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+    readThroughChannel(
+        thirdOptimizer,
+        categoryChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        thirdChannel);
+    thirdOptimizer.onClose();
+    thirdChannel.close();
+
+    assertThat(thirdChannel.getRequestedOffsets()).contains(idChunk.getStartOffset());
+  }
+
+  @Test
+  void read_dictionaryPageWithFooterSpeculationDeferred_doesNotRefetchTheDictionaryJustRead()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    int fingerprint = multiRowGroupLayout.getSchemaFingerprint();
+    for (int i = 0; i < 2; i++) {
+      cacheManager
+          .getSchemaAccessHistory()
+          .recordFileOutcome(fingerprint, SchemaAccessHistory.FileFilterOutcome.FOOTER_REJECTED);
+    }
+    long rg0DictOffset =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN)
+            .getDictionaryPageOffset()
+            .getAsLong();
+    long rg1DictOffset =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.CATEGORY_COLUMN)
+            .getDictionaryPageOffset()
+            .getAsLong();
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+
+    readThroughChannel(optimizer, rg0DictOffset, ByteBuffer.allocate(8), channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(rg1DictOffset);
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg0DictOffset);
+  }
+
+  @Test
+  void read_whenDictRejectedHistoryDominates_doesNotSpeculateDataOnDictionaryRead()
+      throws IOException {
+    int fingerprint = layout.getSchemaFingerprint();
+    cacheManager.getSchemaAccessHistory().recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+
+    // Simulate two files that read dictionary pages and then closed without reading data pages.
+    for (int i = 0; i < 2; i++) {
+      FakeVectoredSeekableByteChannel dictRejectedChannel =
+          new FakeVectoredSeekableByteChannel(content);
+      PredictivePrefetchOptimizer dictRejectedOptimizer =
+          createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
+      readThroughChannel(
+          dictRejectedOptimizer,
+          categoryChunk.getDictionaryPageOffset().getAsLong(),
+          ByteBuffer.allocate(8),
+          dictRejectedChannel);
+      dictRejectedOptimizer.onClose();
+      dictRejectedChannel.close();
+    }
+    assertThat(cacheManager.getSchemaAccessHistory().shouldSpeculateOnDictionary(fingerprint))
+        .isFalse();
+
+    FakeVectoredSeekableByteChannel thirdChannel = new FakeVectoredSeekableByteChannel(content);
+    PredictivePrefetchOptimizer thirdOptimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
+    thirdOptimizer.afterRead(content.length - 16, 16, thirdChannel);
+    readThroughChannel(
+        thirdOptimizer,
+        categoryChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        thirdChannel);
+    thirdOptimizer.onClose();
+    thirdChannel.close();
+
+    assertThat(thirdChannel.getRequestedOffsets()).doesNotContain(idChunk.getStartOffset());
   }
 
   @Test

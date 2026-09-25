@@ -118,6 +118,22 @@ final class RowGroupFilterTracker {
     return readColumns != null && !Collections.disjoint(readColumns, knownDictionaryColumns);
   }
 
+  /** Returns the columns whose dictionary page has been read in {@code rowGroupOrdinal}. */
+  Set<String> getDictionaryColumnsRead(int rowGroupOrdinal) {
+    Set<String> readColumns = dictionaryColumnsByRowGroup.get(rowGroupOrdinal);
+    return readColumns == null ? Collections.emptySet() : Collections.unmodifiableSet(readColumns);
+  }
+
+  /** Returns the number of distinct row groups whose dictionary pages have been read. */
+  int getDictionaryTouchedCount() {
+    return dictionaryTouchedOrdinals.size();
+  }
+
+  /** Returns the number of distinct row groups whose data pages have been read. */
+  int getDataTouchedCount() {
+    return dataTouchedOrdinals.size();
+  }
+
   /** Returns the highest row group ordinal whose data pages have been read, or {@code -1}. */
   int getLastDataReadOrdinal() {
     return dataTouchedOrdinals.isEmpty() ? -1 : dataTouchedOrdinals.last();
