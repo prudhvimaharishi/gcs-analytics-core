@@ -36,7 +36,18 @@ public abstract class GcsPrefetchOptions {
     DISABLED
   }
 
+  /** Dictionary page read that triggers prefetching a row group's data pages. */
+  public enum DictionaryTrigger {
+    /** Prefetches once any known dictionary column of the row group is read. */
+    FIRST_DICT_READ,
+
+    /** Prefetches once every known dictionary column of the row group is read. */
+    LAST_DICT_READ
+  }
+
   private static final PrefetchMode DEFAULT_PREFETCH_MODE = PrefetchMode.DISABLED;
+  private static final DictionaryTrigger DEFAULT_DICTIONARY_TRIGGER =
+      DictionaryTrigger.LAST_DICT_READ;
   private static final long DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES = 2L * 1024 * 1024 * 1024; // 2 GB
   private static final long DEFAULT_BUFFER_CACHE_TTL_SECONDS = 60;
   private static final int DEFAULT_BLOCK_SIZE_BYTES = 8 * 1024 * 1024; // 8 MB
@@ -44,6 +55,12 @@ public abstract class GcsPrefetchOptions {
 
   /** Returns the prefetching strategy to apply. Defaults to {@code DISABLED}. */
   public abstract PrefetchMode getPrefetchMode();
+
+  /**
+   * Returns the dictionary page read that triggers prefetching a row group's data pages. Defaults
+   * to {@code LAST_DICT_READ}.
+   */
+  public abstract DictionaryTrigger getDictionaryTrigger();
 
   /**
    * Returns the maximum total capacity (in bytes) of the prefetch buffer cache. Defaults to {@code
@@ -87,6 +104,7 @@ public abstract class GcsPrefetchOptions {
   public static Builder builder() {
     return new AutoValue_GcsPrefetchOptions.Builder()
         .setPrefetchMode(DEFAULT_PREFETCH_MODE)
+        .setDictionaryTrigger(DEFAULT_DICTIONARY_TRIGGER)
         .setBufferCacheMaxSizeBytes(DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES)
         .setBufferCacheTtlSeconds(DEFAULT_BUFFER_CACHE_TTL_SECONDS)
         .setBlockSizeBytes(DEFAULT_BLOCK_SIZE_BYTES)
@@ -98,6 +116,12 @@ public abstract class GcsPrefetchOptions {
   public abstract static class Builder {
     /** Sets the prefetching strategy to apply. Defaults to {@code DISABLED}. */
     public abstract Builder setPrefetchMode(PrefetchMode prefetchMode);
+
+    /**
+     * Sets the dictionary page read that triggers prefetching a row group's data pages. Defaults to
+     * {@code LAST_DICT_READ}.
+     */
+    public abstract Builder setDictionaryTrigger(DictionaryTrigger dictionaryTrigger);
 
     /**
      * Sets the maximum total capacity (in bytes) of the prefetch buffer cache. Defaults to {@code
