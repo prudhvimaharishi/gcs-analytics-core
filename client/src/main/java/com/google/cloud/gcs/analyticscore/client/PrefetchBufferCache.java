@@ -262,6 +262,9 @@ public final class PrefetchBufferCache {
     }
     for (CachedRange segment : segments) {
       segment.promote();
+      if (segment.getEndOffset() <= targetEnd) {
+        removeRange(itemId, segment.getStartOffset());
+      }
     }
     if (segments.size() == 1
         && firstRange.get().getStartOffset() == offset

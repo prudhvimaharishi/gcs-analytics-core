@@ -293,7 +293,8 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
-  void consumeRange_acrossAdjacentRanges_populatesTarget() throws Exception {
+  void consumeRange_acrossAdjacentRanges_populatesTargetAndEvictsConsumedSegments()
+      throws Exception {
     PrefetchBufferCache cache = newCache();
     cache.putRange(itemId("object"), FIRST_RANGE_OFFSET, bufferOf(FIRST_RANGE));
     cache.putRange(itemId("object"), SECOND_RANGE_OFFSET, bufferOf(SECOND_RANGE));
@@ -308,6 +309,8 @@ class PrefetchBufferCacheTest {
     populated.get(actual);
 
     assertThat(actual).isEqualTo(COMBINED_RANGES);
+    assertThat(cache.isCached(itemId("object"), FIRST_RANGE_OFFSET)).isFalse();
+    assertThat(cache.isCached(itemId("object"), SECOND_RANGE_OFFSET)).isFalse();
   }
 
   @Test

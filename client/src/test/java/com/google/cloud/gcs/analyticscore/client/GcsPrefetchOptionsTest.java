@@ -102,6 +102,23 @@ class GcsPrefetchOptionsTest {
   }
 
   @Test
+  void build_defaultValues_returnsDefaultBlockSizeBytes() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getBlockSizeBytes()).isEqualTo(8 * 1024 * 1024);
+  }
+
+  @Test
+  void build_enabledWithZeroBlockSizeBytes_throwsIllegalArgumentException() {
+    GcsPrefetchOptions.Builder builder =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setBlockSizeBytes(0);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @Test
   void build_defaultValues_returnsDefaultHistoryMaxColumns() {
     GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
 

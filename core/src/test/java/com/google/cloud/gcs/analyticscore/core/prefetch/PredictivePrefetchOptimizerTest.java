@@ -48,6 +48,8 @@ class PredictivePrefetchOptimizerTest {
   private static final int RECORD_COUNT = 500;
   private static final int MULTI_ROW_GROUP_RECORD_COUNT = 5000;
   private static final int SLICE_LENGTH = 64;
+  private static final int BLOCK_SIZE_BYTES = 8 * 1024 * 1024;
+  private static final int WHOLE_FILE_BLOCK_SIZE_BYTES = 1024 * 1024;
 
   @TempDir File temporaryDirectory;
 
@@ -279,7 +281,7 @@ class PredictivePrefetchOptimizerTest {
   @Test
   void read_smallSliceOfOneColumn_doesNotRecordOtherColumns() throws IOException {
     optimizer.onClose();
-    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP, WHOLE_FILE_BLOCK_SIZE_BYTES);
     cacheManager.getSchemaAccessHistory().invalidateAll();
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
 
@@ -545,7 +547,10 @@ class PredictivePrefetchOptimizerTest {
   @Test
   void read_footerCacheDisabled_skipsPrefetching() throws IOException {
     GcsPrefetchOptions prefetchOptions =
-        GcsPrefetchOptions.builder().setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP).build();
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setBlockSizeBytes(BLOCK_SIZE_BYTES)
+            .build();
     AnalyticsCacheManager disabledFooterCacheManager =
         new AnalyticsCacheManager(
             GcsCacheOptions.builder().setFooterCacheEnabled(false).build(), prefetchOptions);
@@ -584,9 +589,33 @@ class PredictivePrefetchOptimizerTest {
     assertThat(channel.getRequestedOffsets()).contains(rg1Id.getStartOffset());
   }
 
+  @Test
+  void read_columnExceedingConfiguredBlockSizeBytes_splitsPrefetchIntoConfiguredSlices()
+      throws IOException {
+    int customBlockSizeBytes = 128;
+    optimizer.onClose();
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP, customBlockSizeBytes);
+    cacheManager.getSchemaAccessHistory().invalidateAll();
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+    long firstSliceStart = idChunk.getDataPageOffset() + SLICE_LENGTH;
+    long secondSliceStart = idChunk.getDataPageOffset() + customBlockSizeBytes;
+
+    optimizer.read(idChunk.getDataPageOffset(), ByteBuffer.allocate(SLICE_LENGTH), channel);
+
+    assertThat(channel.getRequestedOffsets()).containsAtLeast(firstSliceStart, secondSliceStart);
+  }
+
   private PredictivePrefetchOptimizer createOptimizer(PrefetchMode prefetchMode) {
+    return createOptimizer(prefetchMode, BLOCK_SIZE_BYTES);
+  }
+
+  private PredictivePrefetchOptimizer createOptimizer(
+      PrefetchMode prefetchMode, int blockSizeBytes) {
     GcsPrefetchOptions prefetchOptions =
-        GcsPrefetchOptions.builder().setPrefetchMode(prefetchMode).build();
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(prefetchMode)
+            .setBlockSizeBytes(blockSizeBytes)
+            .build();
     if (cacheManager == null) {
       cacheManager =
           new AnalyticsCacheManager(
