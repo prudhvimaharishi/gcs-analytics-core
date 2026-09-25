@@ -252,27 +252,36 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   @Override
   public void readVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
       throws IOException {
+    submitVectoredRanges(ranges, allocate, /* lowPriority= */ false);
+  }
+
+  @Override
+  public void prefetchVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
+      throws IOException {
+    submitVectoredRanges(ranges, allocate, /* lowPriority= */ true);
+  }
+
+  private void submitVectoredRanges(
+      List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate, boolean lowPriority) {
+    ExecutorService executorService = executorServiceSupplier.get();
+    checkNotNull(executorService, "Thread pool must not be null");
     Operation operation =
         Operation.builder()
             .setName(GcsAnalyticsCoreTelemetryConstants.Operation.VECTORED_READ.name())
             .setDurationMetric(Metric.READ_DURATION)
             .setAttributes(COMMON_ATTRIBUTES)
             .build();
-    ExecutorService executorService = executorServiceSupplier.get();
-    checkNotNull(executorService, "Thread pool must not be null");
     GcsVectoredReadOptions vectoredReadOptions = readOptions.getGcsVectoredReadOptions();
+    int effectiveMaxMergeGap = lowPriority ? 0 : vectoredReadOptions.getMaxMergeGap();
     ImmutableList<GcsObjectCombinedRange> combinedRanges =
         VectoredIoUtil.mergeGcsObjectRanges(
             ImmutableList.copyOf(ranges),
-            vectoredReadOptions.getMaxMergeGap(),
+            effectiveMaxMergeGap,
             vectoredReadOptions.getMaxMergeSize());
 
     for (GcsObjectCombinedRange combinedRange : combinedRanges) {
       var unused =
-          executorService.submit(
-              () -> {
-                readCombinedRange(combinedRange, allocate, operation);
-              });
+          executorService.submit(() -> readCombinedRange(combinedRange, allocate, operation));
     }
   }
 
