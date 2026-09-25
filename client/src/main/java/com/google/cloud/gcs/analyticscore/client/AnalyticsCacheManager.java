@@ -42,6 +42,7 @@ public class AnalyticsCacheManager {
   private final AnalyticsCache<GcsItemId, ByteBuffer> smallObjectCache;
   private final AnalyticsCache<String, BucketProperties> bucketPropertiesCache;
   private final PrefetchBufferCache prefetchBufferCache;
+  private final SchemaAccessHistory schemaAccessHistory;
 
   /**
    * Creates a new {@link AnalyticsCacheManager} with prefetching left at its default configuration.
@@ -77,11 +78,17 @@ public class AnalyticsCacheManager {
         new PrefetchBufferCache(
             prefetchOptions.getBufferCacheMaxSizeBytes(),
             prefetchOptions.getBufferCacheTtlSeconds());
+    this.schemaAccessHistory = new SchemaAccessHistory(prefetchOptions.getHistoryMaxColumns());
   }
 
   /** Returns the cache holding speculatively prefetched byte blocks. */
   public PrefetchBufferCache getPrefetchBufferCache() {
     return prefetchBufferCache;
+  }
+
+  /** Returns the column access history shared across objects opened with this cache manager. */
+  public SchemaAccessHistory getSchemaAccessHistory() {
+    return schemaAccessHistory;
   }
 
   /**
@@ -157,6 +164,7 @@ public class AnalyticsCacheManager {
     smallObjectCache.invalidateAll();
     bucketPropertiesCache.invalidateAll();
     prefetchBufferCache.invalidateAll();
+    schemaAccessHistory.invalidateAll();
   }
 
   /** A loader for GCS object footers. */

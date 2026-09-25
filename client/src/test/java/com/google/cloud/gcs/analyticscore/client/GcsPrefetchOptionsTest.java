@@ -95,9 +95,27 @@ class GcsPrefetchOptionsTest {
             .setPrefetchMode(PrefetchMode.DISABLED)
             .setBufferCacheMaxSizeBytes(0)
             .setBufferCacheTtlSeconds(0)
+            .setHistoryMaxColumns(0)
             .build();
 
     assertThat(options.isEnabled()).isFalse();
+  }
+
+  @Test
+  void build_defaultValues_returnsDefaultHistoryMaxColumns() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getHistoryMaxColumns()).isEqualTo(256);
+  }
+
+  @Test
+  void build_enabledWithZeroHistoryMaxColumns_throwsIllegalArgumentException() {
+    GcsPrefetchOptions.Builder builder =
+        GcsPrefetchOptions.builder()
+            .setPrefetchMode(PrefetchMode.PREDICTIVE_ROW_GROUP)
+            .setHistoryMaxColumns(0);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
   }
 
   private static GcsPrefetchOptions optionsWithMode(PrefetchMode mode) {
