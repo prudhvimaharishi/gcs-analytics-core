@@ -262,6 +262,9 @@ public final class PrefetchBufferCache {
     }
     for (CachedRange segment : segments) {
       segment.promote();
+      if (segment.getEndOffset() <= targetEnd) {
+        removeRange(itemId, segment.getStartOffset());
+      }
     }
     if (segments.size() == 1
         && firstRange.get().getStartOffset() == offset
@@ -341,6 +344,31 @@ public final class PrefetchBufferCache {
   public void evictRange(GcsItemId itemId, long startOffset) {
     checkNotNull(itemId, "itemId cannot be null");
     removeRange(itemId, startOffset);
+  }
+
+  /**
+   * Evicts any cached range overlapping {@code [startOffset, endOffset)} whose end offset has been
+   * reached ({@code segment.getEndOffset() <= endOffset}).
+   */
+  public void evictConsumedRanges(GcsItemId itemId, long startOffset, long endOffset) {
+    checkNotNull(itemId, "itemId cannot be null");
+    if (endOffset <= startOffset) {
+      return;
+    }
+    findRange(itemId, startOffset)
+        .filter(
+            segment -> segment.getEndOffset() > startOffset && segment.getEndOffset() <= endOffset)
+        .ifPresent(segment -> removeRange(itemId, segment.getStartOffset()));
+    ConcurrentSkipListSet<Long> itemOffsets = offsetsByItem.get(itemId);
+    if (itemOffsets == null) {
+      return;
+    }
+    for (Long segStart : new ArrayList<>(itemOffsets.subSet(startOffset, true, endOffset, false))) {
+      CachedRange segment = ranges.getIfPresent(RangeKey.create(itemId, segStart));
+      if (segment != null && segment.getEndOffset() <= endOffset) {
+        removeRange(itemId, segStart);
+      }
+    }
   }
 
   /** Returns whether a completed resident range covers {@code position}. */

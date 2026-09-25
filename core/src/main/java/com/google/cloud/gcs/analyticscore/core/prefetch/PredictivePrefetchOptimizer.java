@@ -284,6 +284,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     }
     long currentReadEnd = position + requestedLength;
     recordColumnsInRange(rowGroupOrdinal, position, currentReadEnd);
+    bufferCache.evictConsumedRanges(itemId, position, currentReadEnd);
     speculateRowGroups(source, rowGroupOrdinal, currentReadEnd);
   }
 
@@ -394,11 +395,16 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     return coalesceConnectedRanges(ranges);
   }
 
-  /** Merges touching or overlapping sorted ranges. */
+  /**
+   * Merges touching or overlapping sorted ranges and splits any span exceeding {@link
+   * GcsPrefetchOptions#getBlockSizeBytes()} so adjacent columns download in parallel without
+   * humongous buffers.
+   */
   private List<Range<Long>> coalesceConnectedRanges(List<Range<Long>> sortedRanges) {
     if (sortedRanges.isEmpty()) {
       return sortedRanges;
     }
+    long maxRangeBytes = prefetchOptions.getBlockSizeBytes();
     List<Range<Long>> coalesced = new ArrayList<>(sortedRanges.size());
     Range<Long> current = sortedRanges.get(0);
     for (int i = 1; i < sortedRanges.size(); i++) {
@@ -406,12 +412,26 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       if (current.isConnected(next)) {
         current = current.span(next);
       } else {
-        coalesced.add(current);
+        appendBoundedSlices(coalesced, current, maxRangeBytes);
         current = next;
       }
     }
-    coalesced.add(current);
+    appendBoundedSlices(coalesced, current, maxRangeBytes);
     return coalesced;
+  }
+
+  private static void appendBoundedSlices(
+      List<Range<Long>> target, Range<Long> span, long maxRangeBytes) {
+    long start = span.lowerEndpoint();
+    long end = span.upperEndpoint();
+    while (end - start > maxRangeBytes) {
+      long chunkEnd = start + maxRangeBytes;
+      target.add(Range.closedOpen(start, chunkEnd));
+      start = chunkEnd;
+    }
+    if (end > start) {
+      target.add(Range.closedOpen(start, end));
+    }
   }
 
   private void collectRowGroupRanges(
