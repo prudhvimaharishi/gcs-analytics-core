@@ -74,6 +74,55 @@ class SchemaAccessHistoryTest {
   }
 
   @Test
+  void recordDictionaryAccess_singleColumn_isReturned() {
+    SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
+
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
+
+    assertThat(history.getDictionaryColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+  }
+
+  @Test
+  void recordDictionaryAccess_doesNotAppearAsDataColumn() {
+    SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
+
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
+
+    assertThat(history.getDataColumns(SCHEMA_FINGERPRINT)).isEmpty();
+  }
+
+  @Test
+  void recordDataAccess_afterDictionaryAccess_promotesColumnToDataColumns() {
+    SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
+
+    history.recordDataAccess(SCHEMA_FINGERPRINT, "status");
+
+    assertThat(history.getDataColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+  }
+
+  @Test
+  void recordDataAccess_afterDictionaryAccess_retainsColumnInDictionaryColumns() {
+    SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
+
+    history.recordDataAccess(SCHEMA_FINGERPRINT, "status");
+
+    assertThat(history.getDictionaryColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+  }
+
+  @Test
+  void recordDictionaryAccess_afterDataAccess_recordsInBothSets() {
+    SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
+    history.recordDataAccess(SCHEMA_FINGERPRINT, "status");
+
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
+
+    assertThat(history.getDataColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+    assertThat(history.getDictionaryColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+  }
+
+  @Test
   void invalidateAll_discardsRecordedColumns() {
     SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
     history.recordDataAccess(SCHEMA_FINGERPRINT, "customer_id");

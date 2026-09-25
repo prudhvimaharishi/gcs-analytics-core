@@ -32,6 +32,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * learned while reading one file is reused when a later file with the same schema is opened. This
  * is what allows the second and subsequent files of a multi-file scan to be prefetched.
  *
+ * <p>Columns are tracked separately depending on whether the engine read into the data pages or
+ * only touched the dictionary page, so that a column used purely for filter evaluation is not
+ * speculatively fetched in full.
+ *
  * <p>This class is thread-safe.
  */
 public final class SchemaAccessHistory {
@@ -58,11 +62,27 @@ public final class SchemaAccessHistory {
     return tracked == null ? ImmutableSet.of() : ImmutableSet.copyOf(tracked.dataColumns);
   }
 
+  /** Returns the columns previously read only as far as their dictionary page. */
+  public ImmutableSet<String> getDictionaryColumns(int schemaFingerprint) {
+    TrackedColumns tracked = historyBySchema.getIfPresent(schemaFingerprint);
+    return tracked == null ? ImmutableSet.of() : ImmutableSet.copyOf(tracked.dictionaryColumns);
+  }
+
   /** Records that the data pages of {@code columnPath} were read. */
   public void recordDataAccess(int schemaFingerprint, String columnPath) {
     checkNotNull(columnPath, "columnPath cannot be null");
     TrackedColumns tracked = trackedColumnsFor(schemaFingerprint);
     addBounded(tracked.dataColumns, columnPath);
+  }
+
+  /**
+   * Records that the dictionary page of {@code columnPath} was read (for example, during row-group
+   * dictionary filter evaluation).
+   */
+  public void recordDictionaryAccess(int schemaFingerprint, String columnPath) {
+    checkNotNull(columnPath, "columnPath cannot be null");
+    TrackedColumns tracked = trackedColumnsFor(schemaFingerprint);
+    addBounded(tracked.dictionaryColumns, columnPath);
   }
 
   /** Discards all recorded history. */
@@ -83,5 +103,6 @@ public final class SchemaAccessHistory {
 
   private static final class TrackedColumns {
     private final Set<String> dataColumns = ConcurrentHashMap.newKeySet();
+    private final Set<String> dictionaryColumns = ConcurrentHashMap.newKeySet();
   }
 }

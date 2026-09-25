@@ -32,6 +32,7 @@ import com.google.cloud.gcs.analyticscore.core.optimizer.FormatOptimizer;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Range;
+import com.google.common.collect.Sets;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -47,16 +48,17 @@ import java.util.function.IntFunction;
 import javax.annotation.Nullable;
 
 /**
- * A {@link FormatOptimizer} that speculatively fetches exact Parquet column chunks before the
- * engine asks for them.
+ * A {@link FormatOptimizer} that speculatively fetches exact Parquet column chunks and dictionary
+ * pages before the engine asks for them.
  *
  * <p>Footer I/O is owned exclusively by {@code GcsFooterOptimizer}; this optimizer consumes the
  * footer published in {@link AnalyticsCacheManager}. If no footer is present in the global cache,
  * prefetching is skipped.
  *
- * <p>Speculation schedules exact column chunk byte ranges rather than fixed blocks, avoiding read
- * amplification on unprojected columns while allowing the underlying channel to coalesce nearby
- * ranges.
+ * <p>Speculation schedules exact column chunk and dictionary page byte ranges rather than fixed
+ * blocks, avoiding read amplification on unprojected columns. Touching ranges are merged into spans
+ * of at most {@link GcsPrefetchOptions#getBlockSizeBytes()}; ranges separated by a gap are fetched
+ * separately.
  *
  * <p>Instances are bound to a single stream and its reader thread. Row-group speculation and {@link
  * #onClose()} synchronize on the instance so that no speculation is scheduled after the stream
@@ -80,6 +82,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private long fileSize = -1;
   private volatile boolean closed;
   private boolean firstRowGroupPrefetched;
+  private volatile ImmutableSet<String> prefetchedDictionaryColumns = ImmutableSet.of();
   @Nullable private ParquetFileLayout layout;
   private long[] rowGroupStartOffsets = new long[0];
   private long[] rowGroupEndOffsets = new long[0];
@@ -302,55 +305,166 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     }
     firstRowGroupPrefetched = true;
     long currentReadEnd = position + requestedLength;
-    recordColumnsInRange(rowGroupOrdinal, position, currentReadEnd);
-    bufferCache.evictConsumedRanges(itemId, position, currentReadEnd);
-    speculateRowGroups(source, rowGroupOrdinal, currentReadEnd);
+    if (recordColumnsInRange(rowGroupOrdinal, position, currentReadEnd)) {
+      bufferCache.evictConsumedRanges(itemId, position, currentReadEnd);
+      speculateRowGroups(source, rowGroupOrdinal, currentReadEnd);
+    } else {
+      onDictionaryPageRead(source, rowGroupOrdinal);
+    }
+  }
+
+  /** Prefetches the dictionary pages of later row groups that the footer did not already cover. */
+  private void onDictionaryPageRead(VectoredSeekableByteChannel source, int rowGroupOrdinal) {
+    ImmutableSet<String> dictionaryColumns =
+        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    if (!prefetchedDictionaryColumns.containsAll(dictionaryColumns)) {
+      speculateDictionaryPagesFrom(source, rowGroupOrdinal + 1);
+    }
   }
 
   /** Records the columns covered by {@code ranges} and notes the row group to speculate next. */
   private void recordVectoredAccess(List<GcsObjectRange> ranges) {
     int lastRowGroupOrdinal = -1;
+    boolean touchedAnyDataPage = false;
     for (GcsObjectRange range : ranges) {
       int rowGroupOrdinal = findRowGroupOrdinal(range.getOffset());
       if (rowGroupOrdinal < 0) {
         continue;
       }
-      recordColumnsInRange(
-          rowGroupOrdinal, range.getOffset(), range.getOffset() + range.getLength());
-      lastRowGroupOrdinal = Math.max(lastRowGroupOrdinal, rowGroupOrdinal);
+      if (recordColumnsInRange(
+          rowGroupOrdinal, range.getOffset(), range.getOffset() + range.getLength())) {
+        touchedAnyDataPage = true;
+        lastRowGroupOrdinal = Math.max(lastRowGroupOrdinal, rowGroupOrdinal);
+      }
     }
-    if (lastRowGroupOrdinal < 0) {
+    if (!touchedAnyDataPage || lastRowGroupOrdinal < 0) {
       return;
     }
     firstRowGroupPrefetched = true;
     pendingSpeculationRowGroupOrdinal = lastRowGroupOrdinal + 1;
   }
 
-  /** Records every column of {@code rowGroupOrdinal} whose bytes fall in the given byte range. */
-  private void recordColumnsInRange(int rowGroupOrdinal, long startOffset, long endOffset) {
+  /**
+   * Records every column of {@code rowGroupOrdinal} whose bytes fall in the given byte range, and
+   * returns {@code true} if at least one column's data pages were touched.
+   */
+  private boolean recordColumnsInRange(int rowGroupOrdinal, long startOffset, long endOffset) {
     Optional<ParquetRowGroup> rowGroup = layout.getRowGroup(rowGroupOrdinal);
     if (!rowGroup.isPresent()) {
-      return;
+      return false;
     }
     int fingerprint = layout.getSchemaFingerprint();
+    boolean touchedDataPage = false;
     for (ParquetColumnChunk chunk : rowGroup.get().getColumnChunks().values()) {
-      if (overlaps(chunk.getStartOffset(), chunk.getEndOffset(), startOffset, endOffset)) {
+      if (overlaps(chunk.getDataPageOffset(), chunk.getEndOffset(), startOffset, endOffset)) {
         accessHistory.recordDataAccess(fingerprint, chunk.getColumnPath());
+        touchedDataPage = true;
+        continue;
+      }
+      if (chunk
+          .getDictionaryPageRange()
+          .filter(
+              range ->
+                  overlaps(range.lowerEndpoint(), range.upperEndpoint(), startOffset, endOffset))
+          .isPresent()) {
+        accessHistory.recordDictionaryAccess(fingerprint, chunk.getColumnPath());
       }
     }
+    if (touchedDataPage) {}
+    return touchedDataPage;
   }
 
   private static boolean overlaps(long start, long end, long otherStart, long otherEnd) {
     return start < otherEnd && end > otherStart;
   }
 
-  /** Prefetches the first row group's known columns once, as soon as the footer has been read. */
+  /**
+   * Prefetches dictionary pages across all row groups when the schema has filter columns, or
+   * prefetches the first row group's data columns otherwise.
+   */
   private void prefetchFirstRowGroupOnce(VectoredSeekableByteChannel source) {
     if (firstRowGroupPrefetched) {
       return;
     }
     firstRowGroupPrefetched = true;
+    ImmutableSet<String> dictionaryColumns =
+        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    if (!dictionaryColumns.isEmpty()) {
+      speculateDictionaryPagesFrom(source, 0);
+      if (layout.getRowGroups().size() == 1) {
+        long ignored = speculateRowGroup(source, 0);
+      }
+      return;
+    }
     long ignored = speculateRowGroup(source, 0);
+  }
+
+  /**
+   * Prefetches dictionary page ranges for known dictionary columns starting at {@code startRg}, and
+   * remembers those columns as prefetched once every range is registered in the buffer cache, until
+   * one of those downloads fails.
+   */
+  private void speculateDictionaryPagesFrom(VectoredSeekableByteChannel source, int startRg) {
+    ImmutableSet<String> dictionaryColumns =
+        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    if (dictionaryColumns.isEmpty()) {
+      return;
+    }
+    List<Range<Long>> dictRanges = new ArrayList<>();
+    List<Range<Long>> unusedDataRanges = new ArrayList<>();
+    int rowGroupCount = layout.getRowGroups().size();
+    for (int ordinal = startRg; ordinal < rowGroupCount; ordinal++) {
+      collectRowGroupRanges(
+          dictRanges, unusedDataRanges, ordinal, ImmutableSet.of(), dictionaryColumns);
+    }
+    dictRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    List<Range<Long>> coalescedRanges = coalesceConnectedRanges(dictRanges);
+    long ignored = scheduler.schedule(source, itemId, coalescedRanges, fileSize);
+    if (areAllRangesRegistered(coalescedRanges)) {
+      prefetchedDictionaryColumns = dictionaryColumns;
+      forgetPrefetchedDictionariesOnFailure(coalescedRanges, dictionaryColumns);
+    }
+  }
+
+  /**
+   * Clears {@code prefetchedDictionaryColumns} if any of {@code ranges} fails to download, because
+   * the ranges are usually still in flight when they are first found registered, and a failed range
+   * is dropped from the buffer cache and must be scheduled again by a later dictionary read.
+   */
+  private void forgetPrefetchedDictionariesOnFailure(
+      List<Range<Long>> ranges, ImmutableSet<String> dictionaryColumns) {
+    for (Range<Long> range : ranges) {
+      int length = (int) (range.upperEndpoint() - range.lowerEndpoint());
+      bufferCache
+          .getRangeCovering(itemId, range.lowerEndpoint(), length)
+          .ifPresent(
+              cachedRange -> {
+                CompletableFuture<ByteBuffer> unused =
+                    cachedRange
+                        .getFuture()
+                        .whenComplete(
+                            (buffer, error) -> {
+                              if ((error != null || buffer == null)
+                                  && prefetchedDictionaryColumns == dictionaryColumns) {
+                                prefetchedDictionaryColumns = ImmutableSet.of();
+                              }
+                            });
+              });
+    }
+  }
+
+  /**
+   * Returns whether every range is cached or in flight, which is false when the scheduler dropped
+   * ranges beyond its concurrency budget or an earlier download already failed.
+   */
+  private boolean areAllRangesRegistered(List<Range<Long>> ranges) {
+    for (Range<Long> range : ranges) {
+      int length = (int) (range.upperEndpoint() - range.lowerEndpoint());
+      if (!bufferCache.getRangeCovering(itemId, range.lowerEndpoint(), length).isPresent()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -403,25 +517,39 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
    */
   private List<Range<Long>> collectLearnedRangesForRowGroups(
       int currentRowGroupOrdinal, OptionalInt nextRowGroupOrdinal) {
-    ImmutableSet<String> dataColumns = accessHistory.getDataColumns(layout.getSchemaFingerprint());
-    if (dataColumns.isEmpty()) {
+    int fingerprint = layout.getSchemaFingerprint();
+    ImmutableSet<String> dataColumns = accessHistory.getDataColumns(fingerprint);
+    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
+    if (dataColumns.isEmpty() && dictionaryColumns.isEmpty()) {
       return new ArrayList<>();
     }
-    List<Range<Long>> ranges =
-        new ArrayList<>(collectCoalescedRowGroupRanges(currentRowGroupOrdinal, dataColumns));
+    List<Range<Long>> combined =
+        new ArrayList<>(
+            collectCoalescedRowGroupRanges(
+                currentRowGroupOrdinal,
+                dataColumns,
+                Sets.intersection(dictionaryColumns, dataColumns)));
     if (nextRowGroupOrdinal.isPresent()) {
-      ranges.addAll(collectCoalescedRowGroupRanges(nextRowGroupOrdinal.getAsInt(), dataColumns));
+      combined.addAll(
+          collectCoalescedRowGroupRanges(
+              nextRowGroupOrdinal.getAsInt(), dataColumns, dictionaryColumns));
     }
-    ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return ranges;
+    combined.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    return combined;
   }
 
   private List<Range<Long>> collectCoalescedRowGroupRanges(
-      int rowGroupOrdinal, Set<String> dataColumns) {
-    List<Range<Long>> ranges = new ArrayList<>();
-    collectRowGroupRanges(ranges, rowGroupOrdinal, dataColumns);
-    ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return coalesceConnectedRanges(ranges);
+      int rowGroupOrdinal, Set<String> dataColumns, Set<String> dictionaryColumns) {
+    List<Range<Long>> dictRanges = new ArrayList<>();
+    List<Range<Long>> dataRanges = new ArrayList<>();
+    collectRowGroupRanges(dictRanges, dataRanges, rowGroupOrdinal, dataColumns, dictionaryColumns);
+    dictRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    dataRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    List<Range<Long>> combined = new ArrayList<>(dictRanges.size() + dataRanges.size());
+    combined.addAll(coalesceConnectedRanges(dictRanges));
+    combined.addAll(coalesceConnectedRanges(dataRanges));
+    combined.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    return combined;
   }
 
   /**
@@ -464,17 +592,38 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   }
 
   private void collectRowGroupRanges(
-      List<Range<Long>> ranges, int rowGroupOrdinal, Set<String> dataColumns) {
+      List<Range<Long>> dictRanges,
+      List<Range<Long>> dataRanges,
+      int rowGroupOrdinal,
+      Set<String> dataColumns,
+      Set<String> dictionaryColumns) {
     Optional<ParquetRowGroup> rowGroup = layout.getRowGroup(rowGroupOrdinal);
     if (!rowGroup.isPresent()) {
       return;
+    }
+    for (String columnPath : dictionaryColumns) {
+      rowGroup
+          .get()
+          .getColumnChunk(columnPath)
+          .flatMap(ParquetColumnChunk::getDictionaryPageRange)
+          .ifPresent(dictRanges::add);
     }
     for (String columnPath : dataColumns) {
       rowGroup
           .get()
           .getColumnChunk(columnPath)
           .ifPresent(
-              chunk -> ranges.add(Range.closedOpen(chunk.getStartOffset(), chunk.getEndOffset())));
+              chunk -> {
+                long start =
+                    dictionaryColumns.contains(columnPath)
+                            && chunk.getDataPageOffset() > chunk.getStartOffset()
+                            && chunk.getDataPageOffset() < chunk.getEndOffset()
+                        ? chunk.getDataPageOffset()
+                        : chunk.getStartOffset();
+                if (chunk.getEndOffset() > start) {
+                  dataRanges.add(Range.closedOpen(start, chunk.getEndOffset()));
+                }
+              });
     }
   }
 
