@@ -26,6 +26,7 @@ import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 /**
  * Single unified {@link ThreadPoolExecutor} for foreground vectored reads and background
@@ -40,6 +41,7 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
 
   private static final int PRIORITY_HIGH = 0;
   private static final int PRIORITY_LOW = 1;
+  private static final long IDLE_THREAD_KEEP_ALIVE_SECONDS = 30L;
 
   private final int maxLowPriorityConcurrency;
   private final AtomicLong sequenceGenerator = new AtomicLong();
@@ -55,8 +57,8 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     super(
         threadCount,
         threadCount,
-        0L,
-        TimeUnit.MILLISECONDS,
+        IDLE_THREAD_KEEP_ALIVE_SECONDS,
+        TimeUnit.SECONDS,
         new PriorityBlockingQueue<>(),
         new ThreadFactoryBuilder()
             .setNameFormat("gcs-filesystem-range-pool-%d")
@@ -64,6 +66,7 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
             .build());
     checkArgument(maxLowPriorityConcurrency > 0, "maxLowPriorityConcurrency must be positive");
     this.maxLowPriorityConcurrency = Math.min(threadCount, maxLowPriorityConcurrency);
+    allowCoreThreadTimeOut(true);
   }
 
   @Override
@@ -88,13 +91,22 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
   }
 
   /**
-   * Submits a background prefetch task at {@code LOW} priority and wires the promotion callback
-   * onto the associated ranges.
+   * Submits a background prefetch task at {@code LOW} priority and wires both promotion and
+   * deferred-queue cancellation callbacks onto the associated ranges.
    */
-  void submitLowPriority(Runnable command, List<GcsObjectRange> underlyingRanges) {
-    Runnable promoter = submitLowPriority(command);
+  void submitLowPriority(
+      Runnable command, List<GcsObjectRange> underlyingRanges, BooleanSupplier allRangesCancelled) {
+    PrioritizedTask task = enqueueLowPriorityTask(command);
+    Runnable promoter = () -> promote(task);
+    Runnable canceller =
+        () -> {
+          if (allRangesCancelled.getAsBoolean()) {
+            cancelDeferredTask(task);
+          }
+        };
     for (GcsObjectRange childRange : underlyingRanges) {
       childRange.setPromotionAction(promoter);
+      childRange.setCancellationAction(canceller);
     }
   }
 
@@ -135,6 +147,14 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     }
   }
 
+  private void cancelDeferredTask(PrioritizedTask task) {
+    synchronized (lock) {
+      if (!task.dispatchedToPool) {
+        deferredLowPriorityQueue.remove(task);
+      }
+    }
+  }
+
   private void onTaskFinished(PrioritizedTask task) {
     synchronized (lock) {
       if (task.countsAsLowPriority) {
@@ -152,6 +172,22 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     } else if (activeLowPrioritySlots > 0) {
       activeLowPrioritySlots--;
     }
+  }
+
+  @Override
+  public void shutdown() {
+    synchronized (lock) {
+      deferredLowPriorityQueue.clear();
+    }
+    super.shutdown();
+  }
+
+  @Override
+  public List<Runnable> shutdownNow() {
+    synchronized (lock) {
+      deferredLowPriorityQueue.clear();
+    }
+    return super.shutdownNow();
   }
 
   private final class PrioritizedTask implements Runnable, Comparable<PrioritizedTask> {

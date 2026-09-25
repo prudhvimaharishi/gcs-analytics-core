@@ -56,6 +56,18 @@ class GcsObjectRangeTest {
     assertThat(range.isPromoted()).isTrue();
   }
 
+  @Test
+  void cancel_promotedBeforeCancellationAttached_skipsTheCancellation() {
+    GcsObjectRange range = createRange();
+    AtomicInteger cancellations = new AtomicInteger();
+    range.promote();
+    range.setCancellationAction(cancellations::incrementAndGet);
+
+    range.cancel();
+
+    assertThat(cancellations.get()).isEqualTo(0);
+  }
+
   private static GcsObjectRange createRange() {
     return GcsObjectRange.builder()
         .setOffset(0)

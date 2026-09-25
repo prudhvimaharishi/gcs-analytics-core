@@ -283,11 +283,21 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
       Runnable readTask = () -> readCombinedRange(combinedRange, allocate, operation);
       if (lowPriority && executorService instanceof PrioritizedReadExecutorService) {
         ((PrioritizedReadExecutorService) executorService)
-            .submitLowPriority(readTask, combinedRange.getUnderlyingRanges());
+            .submitLowPriority(
+                readTask, combinedRange.getUnderlyingRanges(), () -> allRangesDone(combinedRange));
       } else {
         var unused = executorService.submit(readTask);
       }
     }
+  }
+
+  private static boolean allRangesDone(GcsObjectCombinedRange combinedObjectRange) {
+    for (GcsObjectRange child : combinedObjectRange.getUnderlyingRanges()) {
+      if (!child.getByteBufferFuture().isDone()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   void readCombinedRange(

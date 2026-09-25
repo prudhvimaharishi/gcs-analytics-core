@@ -20,8 +20,10 @@ import static com.google.common.truth.Truth.assertThat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -123,6 +125,70 @@ class PrioritizedReadExecutorServiceTest {
 
     assertThat(promotedFinished.await(5, TimeUnit.SECONDS)).isTrue();
     lowBlocker.countDown();
+  }
+
+  @Test
+  void cancel_whenTaskDeferredInQueue_removesDeferredTaskBeforeSubmission() throws Exception {
+    executor =
+        new PrioritizedReadExecutorService(
+            /* threadCount= */ 1, /* maxLowPriorityConcurrency= */ 1);
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch firstBlocker = new CountDownLatch(1);
+    CountDownLatch deferredRan = new CountDownLatch(1);
+    GcsObjectRange deferredRange =
+        GcsObjectRange.builder()
+            .setOffset(10)
+            .setLength(10)
+            .setByteBufferFuture(new CompletableFuture<>())
+            .build();
+
+    executor.submitLowPriority(
+        () -> {
+          firstStarted.countDown();
+          awaitQuietly(firstBlocker);
+        });
+    assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+    executor.submitLowPriority(
+        deferredRan::countDown, Collections.singletonList(deferredRange), () -> true);
+    deferredRange.cancel();
+    firstBlocker.countDown();
+
+    assertThat(deferredRan.await(100, TimeUnit.MILLISECONDS)).isFalse();
+  }
+
+  @Test
+  void cancel_whenTaskAlreadySubmittedToPool_doesNotInterruptRunningTask() throws Exception {
+    executor =
+        new PrioritizedReadExecutorService(
+            /* threadCount= */ 1, /* maxLowPriorityConcurrency= */ 1);
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch firstBlocker = new CountDownLatch(1);
+    CountDownLatch firstFinished = new CountDownLatch(1);
+    AtomicBoolean wasInterrupted = new AtomicBoolean(false);
+    GcsObjectRange activeRange =
+        GcsObjectRange.builder()
+            .setOffset(0)
+            .setLength(10)
+            .setByteBufferFuture(new CompletableFuture<>())
+            .build();
+
+    executor.submitLowPriority(
+        () -> {
+          firstStarted.countDown();
+          awaitQuietly(firstBlocker);
+          wasInterrupted.set(Thread.currentThread().isInterrupted());
+          firstFinished.countDown();
+        },
+        Collections.singletonList(activeRange),
+        () -> true);
+    assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+    activeRange.cancel();
+    firstBlocker.countDown();
+
+    assertThat(firstFinished.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(wasInterrupted.get()).isFalse();
   }
 
   private static void awaitQuietly(CountDownLatch latch) {

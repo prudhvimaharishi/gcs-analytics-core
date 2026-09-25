@@ -153,6 +153,7 @@ final class PrefetchScheduler implements AutoCloseable {
       return;
     }
     objectRange.getByteBufferFuture().cancel(/* mayInterruptIfRunning= */ false);
+    objectRange.cancel();
   }
 
   @Override
