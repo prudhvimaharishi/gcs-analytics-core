@@ -175,7 +175,18 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     if (!shouldSpeculateNextRowGroup(targetOrdinal)) {
       return;
     }
-    long ignored = speculateRowGroup(source, targetOrdinal);
+    CompletableFuture<?>[] rangeFutures =
+        ranges.stream()
+            .map(GcsObjectRange::getByteBufferFuture)
+            .toArray(CompletableFuture<?>[]::new);
+    CompletableFuture<Void> unused =
+        CompletableFuture.allOf(rangeFutures)
+            .whenComplete(
+                (result, error) -> {
+                  if (!closed && error == null) {
+                    long ignored = speculateRowGroup(source, targetOrdinal);
+                  }
+                });
   }
 
   private boolean shouldSpeculateNextRowGroup(int targetOrdinal) {
