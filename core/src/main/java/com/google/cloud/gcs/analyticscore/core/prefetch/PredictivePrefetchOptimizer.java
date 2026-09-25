@@ -69,6 +69,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   private static final String PARQUET_EXTENSION = ".parquet";
   private static final int MAX_CONCURRENT_PREFETCH_RANGES = 32;
+  private static final long SPLIT_BOUNDARY_ROW_GROUP_BYTES = 64L * 1024 * 1024;
 
   private final GcsPrefetchOptions prefetchOptions;
   private final Telemetry telemetry;
@@ -214,7 +215,10 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   }
 
   private boolean shouldSpeculateNextRowGroup(int targetOrdinal) {
-    return targetOrdinal >= 0 && targetOrdinal < rowGroupStartOffsets.length;
+    if (targetOrdinal < 0 || targetOrdinal >= rowGroupStartOffsets.length) {
+      return false;
+    }
+    return !isSplitMultiRowGroupFile();
   }
 
   /**
@@ -360,6 +364,11 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
         "Unknown dictionary trigger: " + prefetchOptions.getDictionaryTrigger());
   }
 
+  private boolean isSplitMultiRowGroupFile() {
+    return rowGroupStartOffsets.length > 1
+        && (rowGroupEndOffsets[0] - rowGroupStartOffsets[0]) >= SPLIT_BOUNDARY_ROW_GROUP_BYTES;
+  }
+
   /**
    * Records the columns covered by {@code ranges} in file order, so that a later row group in the
    * same call cannot mark an earlier one as skipped, and notes the row group to speculate next.
@@ -469,7 +478,8 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   /**
    * Prefetches dictionary pages across all row groups when the schema has filter columns, or
-   * prefetches the first row group's data columns otherwise.
+   * prefetches the first row group's data columns when the file is not split across multiple
+   * split-sized row groups.
    */
   private void prefetchFirstRowGroupOnce(VectoredSeekableByteChannel source) {
     if (firstRowGroupPrefetched) {
@@ -483,6 +493,9 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       if (layout.getRowGroups().size() == 1) {
         long ignored = speculateRowGroup(source, 0);
       }
+      return;
+    }
+    if (isSplitMultiRowGroupFile()) {
       return;
     }
     long ignored = speculateRowGroup(source, 0);
