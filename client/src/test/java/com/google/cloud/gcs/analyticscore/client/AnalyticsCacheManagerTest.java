@@ -264,6 +264,33 @@ class AnalyticsCacheManagerTest {
     assertThat(callCount.get()).isEqualTo(1);
   }
 
+  @Test
+  void getSchemaAccessHistory_prefetchDisabled_returnsEmpty() {
+    manager = new AnalyticsCacheManager(GcsCacheOptions.builder().build());
+
+    assertThat(manager.getSchemaAccessHistory()).isEmpty();
+  }
+
+  @Test
+  void getSchemaAccessHistory_twoManagers_haveIsolatedHistories() {
+    manager = managerWithPrefetchEnabled();
+    AnalyticsCacheManager otherManager = managerWithPrefetchEnabled();
+
+    assertThat(otherManager.getSchemaAccessHistory().get())
+        .isNotSameInstanceAs(manager.getSchemaAccessHistory().get());
+  }
+
+  @Test
+  void invalidateAll_withSchemaAccessHistory_clearsHistory() {
+    manager = managerWithPrefetchEnabled();
+    int schemaFingerprint = 42;
+    manager.getSchemaAccessHistory().get().recordDataAccess(schemaFingerprint, "id");
+
+    manager.invalidateAll();
+
+    assertThat(manager.getSchemaAccessHistory().get().getDataColumns(schemaFingerprint)).isEmpty();
+  }
+
   private static AnalyticsCacheManager managerWithPrefetchEnabled() {
     return new AnalyticsCacheManager(
         GcsCacheOptions.builder().setFooterCacheEnabled(false).build(),
