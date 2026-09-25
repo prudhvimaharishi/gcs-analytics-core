@@ -137,6 +137,52 @@ class SchemaAccessHistoryTest {
     assertThrows(IllegalArgumentException.class, () -> new SchemaAccessHistory(0));
   }
 
+  @Test
+  void shouldSpeculateAtFooter_fewerThanTwoOutcomes_returnsTrue() {
+    SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
+    history.recordFileOutcome(
+        SCHEMA_FINGERPRINT, SchemaAccessHistory.FileFilterOutcome.FOOTER_REJECTED);
+
+    assertThat(history.shouldSpeculateAtFooter(SCHEMA_FINGERPRINT)).isTrue();
+  }
+
+  @Test
+  void shouldSpeculateAtFooter_mostlyFooterRejected_returnsFalseAndRecoversInSlidingWindow() {
+    SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
+    history.recordFileOutcome(
+        SCHEMA_FINGERPRINT, SchemaAccessHistory.FileFilterOutcome.FOOTER_REJECTED);
+    history.recordFileOutcome(
+        SCHEMA_FINGERPRINT, SchemaAccessHistory.FileFilterOutcome.FOOTER_REJECTED);
+
+    assertThat(history.shouldSpeculateAtFooter(SCHEMA_FINGERPRINT)).isFalse();
+
+    for (int i = 0; i < 8; i++) {
+      history.recordFileOutcome(SCHEMA_FINGERPRINT, SchemaAccessHistory.FileFilterOutcome.SURVIVED);
+    }
+
+    assertThat(history.shouldSpeculateAtFooter(SCHEMA_FINGERPRINT)).isTrue();
+  }
+
+  @Test
+  void shouldSpeculateOnDictionary_mostlyDictRejected_returnsFalseAndRecoversInSlidingWindow() {
+    SchemaAccessHistory history = new SchemaAccessHistory(MAX_COLUMNS);
+    assertThat(history.shouldSpeculateOnDictionary(SCHEMA_FINGERPRINT)).isTrue();
+
+    history.recordFileOutcome(
+        SCHEMA_FINGERPRINT, SchemaAccessHistory.FileFilterOutcome.DICT_REJECTED);
+    assertThat(history.shouldSpeculateOnDictionary(SCHEMA_FINGERPRINT)).isTrue();
+
+    history.recordFileOutcome(
+        SCHEMA_FINGERPRINT, SchemaAccessHistory.FileFilterOutcome.DICT_REJECTED);
+    assertThat(history.shouldSpeculateOnDictionary(SCHEMA_FINGERPRINT)).isFalse();
+
+    for (int i = 0; i < 8; i++) {
+      history.recordFileOutcome(SCHEMA_FINGERPRINT, SchemaAccessHistory.FileFilterOutcome.SURVIVED);
+    }
+
+    assertThat(history.shouldSpeculateOnDictionary(SCHEMA_FINGERPRINT)).isTrue();
+  }
+
   private static void recordDataColumns(SchemaAccessHistory history, String... columnPaths) {
     for (String columnPath : columnPaths) {
       history.recordDataAccess(SCHEMA_FINGERPRINT, columnPath);
