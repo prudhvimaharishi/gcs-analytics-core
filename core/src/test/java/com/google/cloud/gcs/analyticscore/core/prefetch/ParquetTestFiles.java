@@ -123,7 +123,7 @@ final class ParquetTestFiles {
     GenericRecord record = new GenericData.Record(RECORD_SCHEMA);
     record.put(ID_COLUMN, (long) index);
     record.put(CATEGORY_COLUMN, "category-" + (index % DISTINCT_CATEGORY_COUNT));
-    record.put(VALUE_COLUMN, index * 1.5d);
+    record.put(VALUE_COLUMN, (index % DISTINCT_CATEGORY_COUNT) * 1.5d);
     return record;
   }
 }

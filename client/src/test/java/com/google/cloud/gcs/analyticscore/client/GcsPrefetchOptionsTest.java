@@ -19,6 +19,7 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.DictionaryTrigger;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.PrefetchMode;
 import org.junit.jupiter.api.Test;
 
@@ -29,6 +30,13 @@ class GcsPrefetchOptionsTest {
     GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
 
     assertThat(options.getPrefetchMode()).isEqualTo(PrefetchMode.DISABLED);
+  }
+
+  @Test
+  void build_defaultValues_returnsLastDictReadTrigger() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getDictionaryTrigger()).isEqualTo(DictionaryTrigger.LAST_DICT_READ);
   }
 
   @Test
