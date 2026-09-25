@@ -112,6 +112,36 @@ class AnalyticsCacheManagerTest {
   }
 
   @Test
+  void getPrefetchBufferCache_prefetchDisabled_returnsEmpty() {
+    manager = new AnalyticsCacheManager(GcsCacheOptions.builder().build());
+
+    assertThat(manager.getPrefetchBufferCache()).isEmpty();
+  }
+
+  @Test
+  void getPrefetchBufferCache_prefetchEnabled_returnsCache() {
+    manager = managerWithPrefetchEnabled();
+
+    assertThat(manager.getPrefetchBufferCache()).isPresent();
+  }
+
+  @Test
+  void getFooter_footerCacheDisabledButPrefetchEnabled_callsLoaderOnce() throws IOException {
+    manager = managerWithPrefetchEnabled();
+    AtomicInteger callCount = new AtomicInteger(0);
+    AnalyticsCacheManager.FooterLoader loader =
+        itemId -> {
+          callCount.incrementAndGet();
+          return FOOTER.duplicate();
+        };
+
+    manager.getFooter(ITEM_ID, loader);
+    manager.getFooter(ITEM_ID, loader);
+
+    assertThat(callCount.get()).isEqualTo(1);
+  }
+
+  @Test
   void invalidateSmallObject_present_removesEntry() throws IOException {
     GcsCacheOptions cacheOptions =
         GcsCacheOptions.builder()
@@ -232,5 +262,11 @@ class AnalyticsCacheManagerTest {
         });
 
     assertThat(callCount.get()).isEqualTo(1);
+  }
+
+  private static AnalyticsCacheManager managerWithPrefetchEnabled() {
+    return new AnalyticsCacheManager(
+        GcsCacheOptions.builder().setFooterCacheEnabled(false).build(),
+        GcsPrefetchOptions.builder().setEnabled(true).build());
   }
 }
