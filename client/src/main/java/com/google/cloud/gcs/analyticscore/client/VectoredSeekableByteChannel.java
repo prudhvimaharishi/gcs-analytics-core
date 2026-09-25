@@ -33,6 +33,20 @@ public interface VectoredSeekableByteChannel extends SeekableByteChannel {
   void readVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
       throws IOException;
 
+  /**
+   * Moves the position to {@code newPosition} after the bytes in between were consumed from
+   * somewhere else, such as a prefetch cache.
+   *
+   * <p>Implementations that adapt to the read pattern use this to tell a cache hit apart from a
+   * seek: both leave the channel further along, but only one of them means the reader jumped.
+   *
+   * @param newPosition the position the reader has reached
+   * @throws IOException on any IO failure
+   */
+  default void advanceAfterExternalRead(long newPosition) throws IOException {
+    position(newPosition);
+  }
+
   /** Returns the item metadata info if available, or null. */
   @Nullable
   default GcsItemInfo getItemInfo() {

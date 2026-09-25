@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -452,6 +453,25 @@ class GoogleCloudStorageInputStreamTest {
       assertThat(buffer[offset + i]).isEqualTo(testData[(int) (fileSize - length) + i]);
     }
     assertThat(googleCloudStorageInputStream.getPos()).isEqualTo(initialStreamPosition);
+  }
+
+  @Test
+  void readTail_openStream_reusesStreamChannel() throws IOException {
+    VectoredSeekableByteChannel mockChannel = mock(VectoredSeekableByteChannel.class);
+    when(mockChannel.isOpen()).thenReturn(true);
+    GcsFileSystem mockFileSystem = mock(GcsFileSystem.class);
+    when(mockFileSystem.getFileSystemOptions()).thenReturn(fileSystemOptions);
+    when(mockFileSystem.getTelemetry()).thenReturn(new Telemetry(ImmutableList.of()));
+    when(mockFileSystem.getCacheManager()).thenReturn(fakeFileSystem.getCacheManager());
+    when(mockFileSystem.open(any(GcsItemId.class), any())).thenReturn(mockChannel);
+    when(mockFileSystem.getFileInfo(testGcsItemId))
+        .thenReturn(fakeFileSystem.getFileInfo(testGcsItemId));
+    googleCloudStorageInputStream =
+        GoogleCloudStorageInputStream.create(mockFileSystem, testGcsItemId);
+
+    googleCloudStorageInputStream.readTail(new byte[10], 0, 10);
+
+    verify(mockFileSystem, times(1)).open(any(GcsItemId.class), any());
   }
 
   @Test
