@@ -140,11 +140,27 @@ The stream never sees the SQL query. It only sees raw byte-range reads. Column b
 * **Schema ID**: a hash of the column names and types listed in the footer. All files of the same table get the same ID.
 * **Schema History**: a map that stores two lists for each Schema ID: **Dictionary Columns** (columns whose dictionary pages the engine read without their data pages, to check a filter) and **Data Columns** (columns whose data pages it read). A column can be in both. It is shared by all files opened through the same file system instance (see Scope), so if an engine reuses that instance across scans, it also keeps columns from earlier queries that the current query may not use.
 
-| Step | What the Stream Does |
-| :--- | :--- |
-| **1. Read the footer** | Builds a map from byte ranges to columns, and computes the Schema ID. |
-| **2. Classify each engine read** | A read inside only a column's dictionary pages adds it to Dictionary Columns. A read inside its data pages adds it to Data Columns. |
-| **3. Save column names** | Adds the names, not the byte positions, to the Schema ID's entry in Schema History. Columns are only added, never removed. |
+```mermaid
+flowchart LR
+    S1["<b>1. Read Footer</b><br/>Compute Schema ID and<br/>build byte-to-column map<br/>(Schema is Cold)"]
+    S2{"<b>2. Classify Each<br/>Engine Byte Read</b>"}
+    D1["<b>Dictionary Columns</b><br/>Add column name<br/>(e.g. status)"]
+    D2["<b>Data Columns</b><br/>Add column name<br/>(e.g. order_id, status)"]
+    S3["<b>3. Save to Schema History</b><br/>Store names under Schema ID<br/>(Schema is now Warm)"]
+
+    S1 --> S2
+    S2 -- "Read touches dict page only" --> D1
+    S2 -- "Read touches data pages" --> D2
+    D1 --> S3
+    D2 --> S3
+
+    classDef cold fill:#eceff1,stroke:#90a4ae,color:#37474f
+    classDef gate fill:#ffe082,stroke:#ff8f00,color:#4e342e
+    classDef warm fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20
+    class S1 cold
+    class S2 gate
+    class D1,D2,S3 warm
+```
 
 Once the entry holds columns, the schema is **Warm**, and every later file with the same Schema ID becomes a candidate for prefetching.
 
@@ -255,26 +271,6 @@ The default is the last read because data pages are the largest downloads, and a
 
 The trigger fires at most once per row group. A row group rejected by its dictionary does not stop the next one from firing, and a row group whose data pages were already prefetched as the next RG is not downloaded again.
 
-**Example (Warm schema, large-row-group file, Dictionary Columns non-empty).** A file has four large row groups, and Task 2 owns only row group 2:
-
-```mermaid
-sequenceDiagram
-    participant Engine as Query Engine (Task 2, owns row group 2)
-    participant Opt as Stream Optimizer
-    participant Cache as Prefetch Cache
-    participant GCS as GCS
-
-    Engine->>Opt: Read footer (schema is Warm)
-    Opt->>GCS: Prefetch dictionary pages of all row groups
-    Engine->>Cache: Read row group 2 dictionary pages (cache hit)
-    Note over Opt: Dictionary trigger fires on the last Dictionary Column read
-    Opt->>GCS: Prefetch row group 2 data pages
-    Note over Engine: Checks dictionary pages while data pages download
-    Engine->>Cache: Read row group 2 data pages (cache hit)
-    Engine->>Opt: Close stream
-    Opt->>Cache: Drop unused dictionary pages
-```
-
 #### Accepted Trade-offs
 
 * **No data prefetch on large-row-group files without a filter.** With no Dictionary Columns there is no dictionary read to show which row group the task owns, so each task's row group is a regular fetch. Guessing would download other tasks' row groups on every footer read.
@@ -311,31 +307,70 @@ Each gate stays open while its rate is at least 50%, or while fewer than 2 files
 
 #### How the Gates Change the Base Design
 
-The Dictionary Read Rate controls what the footer read prefetches. The Data Read Rate controls whether a dictionary read may lead to a data page prefetch.
+Each gate turns off one kind of prefetch. The two gates work separately, and while a gate is open, that part is Same as Base Design.
 
-| | **Data Read Rate ≥ 50%** | **Data Read Rate < 50%** |
+| Gate | What It Guards | When Closed (rate < 50%) |
 | :--- | :--- | :--- |
-| **Dictionary Read Rate ≥ 50%** | **Footer**: Base Design.<br/>**Dictionary pages**: Base Design, dictionary trigger on. | **Footer**: dictionary pages only, never data pages.<br/>**Dictionary pages**: dictionary trigger off. Data pages of row group `k` wait until the engine reads them. |
-| **Dictionary Read Rate < 50%** | **Footer**: nothing.<br/>**Dictionary pages of row group `k`**: the read proves the file passed min/max, so the stream prefetches the dictionary pages from row group `k` onward. The dictionary trigger stays on. | **Footer**: nothing.<br/>**Dictionary pages of row group `k`**: prefetches the dictionary pages from row group `k` onward only. Dictionary trigger off. |
+| **Dictionary Read Rate** | Prefetch on the footer read | The footer read prefetches nothing. The first dictionary read in row group `k` then prefetches the dictionary pages from row group `k` onward, since that read proves the file passed min/max. |
+| **Data Read Rate** | Data page prefetch on the footer and dictionary reads | The dictionary trigger is off, and the footer read skips data pages. Data pages of row group `k` wait until the engine reads them. |
+
+If both rates are low, both rules apply. Neither gate changes the next-RG prefetch that follows a data page read.
 
 The rates only look at the last 8 files, so they recover by themselves. Example: if a scan moves from non-matching partitions into matching ones, 4 Data Read files in a row bring the Dictionary Read Rate back to 50% and turn footer-read prefetching back on.
 
+The diagram shows a Warm schema whose query has a filter, since that is when the gates matter.
+
 ```mermaid
 flowchart TD
-    Footer["Engine reads footer"] --> G1{"Dictionary Read Rate >= 50%?"}
-    G1 -- "Yes" --> G2{"Data Read Rate >= 50%?"}
-    G2 -- "Yes" --> FBase["Footer: Base Design"]
-    G2 -- "No" --> FDict["Footer: dictionary pages only"]
-    G1 -- "No" --> FNone["Footer: prefetch nothing"]
-    FNone -- "min/max rejects file" --> Closed["File closes with no wasted requests"]
-    FNone -- "min/max passes" --> Dict["Engine reads dictionary pages of row group k"]
-    FBase --> Dict
-    FDict --> Dict
-    Dict --> G3{"Data Read Rate >= 50%?"}
-    G3 -- "No" --> Hold["Data pages of row group k wait<br/>for the engine to read them"]
-    G3 -- "Yes" --> DataK["Prefetch row group k data pages<br/>when the dictionary trigger fires"]
-    NoteDict["When the footer gate is closed, this read also<br/>prefetches the dictionary pages from row group k onward"]
-    NoteDict -.- Dict
+    %% Nodes
+    F["<b>① Footer Read</b>"]
+    G1{"Dict Read Rate<br/>≥ 50%?"}
+    G2a{"Data Read Rate<br/>≥ 50%?"}
+
+    B1["<b>Same as Base Design</b>"]
+    FD["Prefetch dict only"]
+    D1["<b>② Dict Read (RG k)</b><br/>Cache hit"]
+
+    F0["Prefetch nothing"]
+    X["File closes"]
+    D0["<b>② Dict Read (RG k)</b><br/>• Regular fetch<br/>• Prefetch dict from RG k onward"]
+    G2{"Data Read Rate<br/>≥ 50%?"}
+
+    B2["Prefetch data of RG k<br/><i>(Same as Base Design from here)</i>"]
+    N["No data prefetch"]
+    M3["<b>③ Data Read (RG k)</b><br/>Regular fetch"]
+
+    %% Flow/Connections
+    F --> G1
+
+    G1 -- "Yes" --> G2a
+    G2a -- "Yes" --> B1
+    G2a -- "No" --> FD
+    FD --> D1
+
+    G1 -- "No" --> F0
+    F0 -- "min/max rejects" --> X
+    F0 -- "min/max passes" --> D0
+    D0 --> G2
+
+    G2 -- "Yes" --> B2
+    G2 -- "No" --> N
+    D1 --> N
+
+    N --> M3
+
+    %% Styling definitions
+    classDef none fill:#eceff1,stroke:#90a4ae,color:#37474f
+    classDef pref fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20
+    classDef hit fill:#bbdefb,stroke:#1565c0,color:#0d47a1
+    classDef fetch fill:#ffcdd2,stroke:#c62828,color:#b71c1c
+    classDef gate fill:#ffe082,stroke:#ff8f00,color:#4e342e
+
+    class F,F0,N,X none
+    class B1,FD,B2 pref
+    class D1 hit
+    class D0,M3 fetch
+    class G1,G2a,G2 gate
 ```
 
 ---
@@ -364,15 +399,22 @@ Both signals are predictions. The min/max signal is wrong in two cases:
 
 ```mermaid
 flowchart TD
-    Read["Engine reads data pages of row group k"] --> Start["Candidate = row group k + 1"]
-    Start --> Exists{"Candidate exists?"}
-    Exists -- "No" --> Stop["No prefetch"]
-    Exists -- "Yes" --> S1{"Skipped in dictionary sweep?"}
-    S1 -- "Yes" --> Advance["Candidate = following row group"]
-    S1 -- "No" --> S2{"Min/max inside a skipped range?"}
-    S2 -- "Yes" --> Advance
-    S2 -- "No" --> Pick["Prefetch candidate's data pages"]
-    Advance --> Exists
+    R["<b>③ Data Page Read (RG k)</b><br/>Mark earlier unread RGs as skipped<br/>and save their min/max ranges"] --> C["Candidate = RG k + 1"]
+    C --> E{"Candidate<br/>exists?"}
+    E -- "No" --> N["No next-RG prefetch"]
+    E -- "Yes" --> S1{"Engine read a later RG's<br/>dictionary, but not this one's?"}
+    S1 -- "Yes: skipped<br/>in sweep" --> A["Candidate = following RG"]
+    S1 -- "No" --> S2{"Candidate's min/max inside<br/>a skipped RG's range?"}
+    S2 -- "Yes" --> A
+    S2 -- "No" --> P["Prefetch candidate's data pages"]
+    A --> E
+
+    classDef none fill:#eceff1,stroke:#90a4ae,color:#37474f
+    classDef pref fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20
+    classDef gate fill:#ffe082,stroke:#ff8f00,color:#4e342e
+    class R,C,A,N none
+    class P pref
+    class E,S1,S2 gate
 ```
 
 ---
