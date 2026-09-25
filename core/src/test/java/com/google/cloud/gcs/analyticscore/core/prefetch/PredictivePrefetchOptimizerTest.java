@@ -561,6 +561,29 @@ class PredictivePrefetchOptimizerTest {
     assertThat(channel.getRequestedOffsets()).isEmpty();
   }
 
+  @Test
+  void afterReadVectored_withInFlightForegroundRange_defersSpeculationUntilComplete()
+      throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent();
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer = createOptimizer(PrefetchMode.PREDICTIVE_ROW_GROUP);
+    ParquetColumnChunk rg0Id = columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    ParquetColumnChunk rg1Id = columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.ID_COLUMN);
+    GcsObjectRange rg0Range = rangeOverChunk(rg0Id);
+
+    List<GcsObjectRange> unserved =
+        optimizer.readVectored(ImmutableList.of(rg0Range), ByteBuffer::allocate, channel);
+    optimizer.afterReadVectored(ImmutableList.of(rg0Range), channel);
+
+    assertThat(unserved).containsExactly(rg0Range);
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg1Id.getStartOffset());
+
+    rg0Range.getByteBufferFuture().complete(ByteBuffer.allocate(rg0Range.getLength()));
+
+    assertThat(channel.getRequestedOffsets()).contains(rg1Id.getStartOffset());
+  }
+
   private PredictivePrefetchOptimizer createOptimizer(PrefetchMode prefetchMode) {
     GcsPrefetchOptions prefetchOptions =
         GcsPrefetchOptions.builder().setPrefetchMode(prefetchMode).build();
