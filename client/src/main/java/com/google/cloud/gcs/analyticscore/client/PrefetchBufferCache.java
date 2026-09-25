@@ -86,8 +86,22 @@ public final class PrefetchBufferCache {
    */
   public boolean registerRange(
       GcsItemId itemId, long startOffset, int length, CompletableFuture<ByteBuffer> future) {
+    return registerRange(itemId, startOffset, length, future, () -> {});
+  }
+
+  /**
+   * Registers an in-flight or completed range {@code [startOffset, startOffset + length)} with a
+   * callback that promotes the background download to foreground priority if demanded.
+   */
+  public boolean registerRange(
+      GcsItemId itemId,
+      long startOffset,
+      int length,
+      CompletableFuture<ByteBuffer> future,
+      Runnable promotionAction) {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(future, "future cannot be null");
+    checkNotNull(promotionAction, "promotionAction cannot be null");
     checkArgument(startOffset >= 0, "startOffset %s must be non-negative", startOffset);
     checkArgument(length > 0, "length %s must be positive", length);
     ConcurrentSkipListSet<Long> itemOffsets =
@@ -98,7 +112,7 @@ public final class PrefetchBufferCache {
       }
       long endOffset = startOffset + length;
       removeShadowedSubRangesLocked(itemId, itemOffsets, startOffset, endOffset);
-      CachedRange cachedRange = CachedRange.create(startOffset, endOffset, future);
+      CachedRange cachedRange = CachedRange.create(startOffset, endOffset, future, promotionAction);
       RangeKey key = RangeKey.create(itemId, startOffset);
       itemOffsets.add(startOffset);
       ranges.put(key, cachedRange);
@@ -246,6 +260,9 @@ public final class PrefetchBufferCache {
       }
       segments = contiguous.get();
     }
+    for (CachedRange segment : segments) {
+      segment.promote();
+    }
     if (segments.size() == 1
         && firstRange.get().getStartOffset() == offset
         && firstRange.get().getLength() == length) {
@@ -310,6 +327,7 @@ public final class PrefetchBufferCache {
         break;
       }
       CachedRange segment = covering.get();
+      segment.promote();
       int copied = segment.copyInto(currentPos, dst);
       if (copied == 0) {
         break;

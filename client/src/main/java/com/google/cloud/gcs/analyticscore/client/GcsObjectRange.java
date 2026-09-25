@@ -18,10 +18,15 @@ package com.google.cloud.gcs.analyticscore.client;
 import com.google.auto.value.AutoValue;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Represents a byte range from a GCS object range. */
 @AutoValue
 public abstract class GcsObjectRange {
+
+  private final AtomicReference<Runnable> promotionAction = new AtomicReference<>();
+  private final AtomicBoolean promoted = new AtomicBoolean();
 
   // The future that will be completed with the contents of the byte range.
   public abstract CompletableFuture<ByteBuffer> getByteBufferFuture();
@@ -31,6 +36,36 @@ public abstract class GcsObjectRange {
 
   // The length of the byte range.
   public abstract int getLength();
+
+  /**
+   * Attaches a callback that promotes a queued low-priority prefetch to foreground priority,
+   * running it right away if {@link #promote()} was already called before the callback was
+   * attached.
+   */
+  void setPromotionAction(Runnable action) {
+    promotionAction.set(action);
+    if (promoted.get()) {
+      runPromotionAction();
+    }
+  }
+
+  /** Promotes the underlying background download to foreground priority if still queued. */
+  public void promote() {
+    promoted.set(true);
+    runPromotionAction();
+  }
+
+  /** Returns whether a foreground reader has promoted this range. */
+  public boolean isPromoted() {
+    return promoted.get();
+  }
+
+  private void runPromotionAction() {
+    Runnable action = promotionAction.getAndSet(null);
+    if (action != null) {
+      action.run();
+    }
+  }
 
   public static Builder builder() {
     return new AutoValue_GcsObjectRange.Builder();

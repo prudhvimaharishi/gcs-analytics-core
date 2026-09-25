@@ -271,6 +271,17 @@ class PrefetchSchedulerTest {
     assertThat(bufferCache.isCached(ITEM_ID, RANGE_OFFSET)).isFalse();
   }
 
+  @Test
+  void cancelAll_promotedRequest_leavesTheDownloadRunning() {
+    channel.deferVectoredCompletion();
+    schedule(RANGE_OFFSET);
+    bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH).get().promote();
+
+    scheduler.cancelAll();
+
+    assertThat(channel.getRequestedRanges().get(0).getByteBufferFuture().isCancelled()).isFalse();
+  }
+
   private static byte[] createContent() {
     byte[] content = new byte[CONTENT_LENGTH];
     for (int index = 0; index < CONTENT_LENGTH; index++) {
