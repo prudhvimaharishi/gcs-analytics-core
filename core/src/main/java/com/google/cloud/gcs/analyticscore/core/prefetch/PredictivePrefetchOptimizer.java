@@ -79,6 +79,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   private long fileSize = -1;
   private volatile boolean closed;
+  private boolean firstRowGroupPrefetched;
   @Nullable private ParquetFileLayout layout;
   private long[] rowGroupStartOffsets = new long[0];
   private long[] rowGroupEndOffsets = new long[0];
@@ -120,14 +121,28 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     if (fileSize < 0) {
       fileSize = source.size();
     }
-    int requestedLength = dst.remaining();
     ensureLayoutLoaded();
     int servedBytes = serveFromCache(position, dst);
 
-    if (layout != null) {
-      observeAccess(source, position, servedBytes > 0 ? servedBytes : requestedLength);
+    // A miss is observed in afterRead once the foreground read completes, so speculation never
+    // competes with the read the caller is blocked on.
+    if (layout != null && servedBytes > 0) {
+      observeAccess(source, position, servedBytes);
     }
     return servedBytes;
+  }
+
+  @Override
+  public void afterRead(long position, int bytesRead, VectoredSeekableByteChannel source)
+      throws IOException {
+    this.sourceChannel = source;
+    if (fileSize < 0) {
+      fileSize = source.size();
+    }
+    ensureLayoutLoaded();
+    if (layout != null) {
+      observeAccess(source, position, bytesRead);
+    }
   }
 
   @Override
@@ -168,8 +183,10 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       return;
     }
     if (pendingSpeculationRowGroupOrdinal < 0) {
+      prefetchFirstRowGroupOnce(source);
       return;
     }
+    firstRowGroupPrefetched = true;
     int targetOrdinal = pendingSpeculationRowGroupOrdinal;
     pendingSpeculationRowGroupOrdinal = -1;
     if (!shouldSpeculateNextRowGroup(targetOrdinal)) {
@@ -280,8 +297,10 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       VectoredSeekableByteChannel source, long position, int requestedLength) {
     int rowGroupOrdinal = findRowGroupOrdinal(position);
     if (rowGroupOrdinal < 0) {
+      prefetchFirstRowGroupOnce(source);
       return;
     }
+    firstRowGroupPrefetched = true;
     long currentReadEnd = position + requestedLength;
     recordColumnsInRange(rowGroupOrdinal, position, currentReadEnd);
     bufferCache.evictConsumedRanges(itemId, position, currentReadEnd);
@@ -303,6 +322,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     if (lastRowGroupOrdinal < 0) {
       return;
     }
+    firstRowGroupPrefetched = true;
     pendingSpeculationRowGroupOrdinal = lastRowGroupOrdinal + 1;
   }
 
@@ -322,6 +342,15 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   private static boolean overlaps(long start, long end, long otherStart, long otherEnd) {
     return start < otherEnd && end > otherStart;
+  }
+
+  /** Prefetches the first row group's known columns once, as soon as the footer has been read. */
+  private void prefetchFirstRowGroupOnce(VectoredSeekableByteChannel source) {
+    if (firstRowGroupPrefetched) {
+      return;
+    }
+    firstRowGroupPrefetched = true;
+    long ignored = speculateRowGroup(source, 0);
   }
 
   /**

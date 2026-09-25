@@ -177,6 +177,23 @@ class SmartReadChannelTest {
   }
 
   @Test
+  void read_optimizerMiss_notifiesOptimizerAfterTheDelegateRead() throws IOException {
+    when(mockOptimizer.read(eq(0L), any(ByteBuffer.class), eq(mockDelegate))).thenReturn(0);
+    when(mockDelegate.read(any(ByteBuffer.class))).thenReturn(10);
+    SmartReadChannel smartChannel =
+        SmartReadChannel.builder()
+            .setDelegate(mockDelegate)
+            .setItemId(ITEM_ID)
+            .setCacheManager(mockCacheManager)
+            .addOptimizer(mockOptimizer)
+            .build();
+
+    smartChannel.read(ByteBuffer.allocate(10));
+
+    verify(mockOptimizer).afterRead(0L, 10, mockDelegate);
+  }
+
+  @Test
   void read_optimizerMiss_restoresPositionIfChanged() throws IOException {
     long[] delegatePosition = new long[] {0L};
     doAnswer(inv -> delegatePosition[0]).when(mockDelegate).position();
