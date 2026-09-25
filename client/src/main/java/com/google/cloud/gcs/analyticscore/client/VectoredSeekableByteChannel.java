@@ -34,6 +34,19 @@ public interface VectoredSeekableByteChannel extends SeekableByteChannel {
       throws IOException;
 
   /**
+   * Schedules speculative background reads for the provided ranges without blocking urgent
+   * foreground {@link #readVectored} requests.
+   *
+   * @param ranges speculative ranges to fetch in the background
+   * @param allocate function to allocate each range's {@link ByteBuffer}
+   * @throws IOException on any IO failure
+   */
+  default void prefetchVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
+      throws IOException {
+    readVectored(ranges, allocate);
+  }
+
+  /**
    * Moves the position to {@code newPosition} after the bytes in between were consumed from
    * somewhere else, such as a prefetch cache.
    *
