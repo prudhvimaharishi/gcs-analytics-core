@@ -39,6 +39,7 @@ public abstract class GcsPrefetchOptions {
   private static final PrefetchMode DEFAULT_PREFETCH_MODE = PrefetchMode.DISABLED;
   private static final long DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES = 2L * 1024 * 1024 * 1024; // 2 GB
   private static final long DEFAULT_BUFFER_CACHE_TTL_SECONDS = 60;
+  private static final int DEFAULT_HISTORY_MAX_COLUMNS = 256;
 
   /** Returns the prefetching strategy to apply. Defaults to {@code DISABLED}. */
   public abstract PrefetchMode getPrefetchMode();
@@ -54,6 +55,12 @@ public abstract class GcsPrefetchOptions {
    * last read or written. Defaults to {@code 60} seconds.
    */
   public abstract long getBufferCacheTtlSeconds();
+
+  /**
+   * Returns the maximum number of columns tracked per Parquet schema in the access history.
+   * Defaults to {@code 256} columns.
+   */
+  public abstract int getHistoryMaxColumns();
 
   /**
    * Returns whether predictive prefetching is enabled, that is whether the prefetch mode is
@@ -74,7 +81,8 @@ public abstract class GcsPrefetchOptions {
     return new AutoValue_GcsPrefetchOptions.Builder()
         .setPrefetchMode(DEFAULT_PREFETCH_MODE)
         .setBufferCacheMaxSizeBytes(DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES)
-        .setBufferCacheTtlSeconds(DEFAULT_BUFFER_CACHE_TTL_SECONDS);
+        .setBufferCacheTtlSeconds(DEFAULT_BUFFER_CACHE_TTL_SECONDS)
+        .setHistoryMaxColumns(DEFAULT_HISTORY_MAX_COLUMNS);
   }
 
   /** Builder for {@link GcsPrefetchOptions}. */
@@ -95,13 +103,20 @@ public abstract class GcsPrefetchOptions {
      */
     public abstract Builder setBufferCacheTtlSeconds(long bufferCacheTtlSeconds);
 
+    /**
+     * Sets the maximum number of columns tracked per Parquet schema in the access history. Defaults
+     * to {@code 256} columns.
+     */
+    public abstract Builder setHistoryMaxColumns(int historyMaxColumns);
+
     abstract GcsPrefetchOptions autoBuild();
 
     /**
      * Builds the {@link GcsPrefetchOptions} instance.
      *
-     * @throws IllegalArgumentException if {@code bufferCacheMaxSizeBytes} or {@code
-     *     bufferCacheTtlSeconds} is non-positive while the prefetch mode is not {@code DISABLED}
+     * @throws IllegalArgumentException if {@code bufferCacheMaxSizeBytes}, {@code
+     *     bufferCacheTtlSeconds} or {@code historyMaxColumns} is non-positive while the prefetch
+     *     mode is not {@code DISABLED}
      */
     public GcsPrefetchOptions build() {
       GcsPrefetchOptions options = autoBuild();
@@ -112,6 +127,9 @@ public abstract class GcsPrefetchOptions {
         checkArgument(
             options.getBufferCacheTtlSeconds() > 0,
             "bufferCacheTtlSeconds must be positive when prefetch is enabled");
+        checkArgument(
+            options.getHistoryMaxColumns() > 0,
+            "historyMaxColumns must be positive when prefetch is enabled");
       }
       return options;
     }
