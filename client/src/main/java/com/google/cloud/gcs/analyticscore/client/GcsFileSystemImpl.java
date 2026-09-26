@@ -73,7 +73,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
     this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
-    this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
+    this.cacheManager = createCacheManager(fileSystemOptions, this.telemetry);
     this.gcsClient =
         telemetry.measure(
             GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),
@@ -93,7 +93,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
     this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
-    this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
+    this.cacheManager = createCacheManager(fileSystemOptions, this.telemetry);
     this.gcsClient =
         telemetry.measure(
             GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),
@@ -111,11 +111,14 @@ public class GcsFileSystemImpl implements GcsFileSystem {
 
   @VisibleForTesting
   GcsFileSystemImpl(GcsClient gcsClient, GcsFileSystemOptions fileSystemOptions) {
-    this(
-        gcsClient,
-        fileSystemOptions,
-        createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions()),
-        new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions()));
+    this.gcsClient = gcsClient;
+    this.fileSystemOptions = fileSystemOptions;
+    this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
+    this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
+    this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
+    this.cacheManager = createCacheManager(fileSystemOptions, this.telemetry);
+    this.flatStrategy = new FlatNamespaceStrategyImpl(this.gcsClient);
+    this.hnsStrategy = new HierarchicalNamespaceStrategyImpl(this.gcsClient);
   }
 
   @VisibleForTesting
@@ -271,6 +274,14 @@ public class GcsFileSystemImpl implements GcsFileSystem {
         .getCustomTelemetryOptions()
         .ifPresent(options -> listeners.addAll(options.getOperationListeners()));
     return new Telemetry(listeners.build());
+  }
+
+  private static AnalyticsCacheManager createCacheManager(
+      GcsFileSystemOptions fileSystemOptions, Telemetry telemetry) {
+    return new AnalyticsCacheManager(
+        fileSystemOptions.getGcsCacheOptions(),
+        fileSystemOptions.getGcsClientOptions().getGcsPrefetchOptions(),
+        telemetry);
   }
 
   @VisibleForTesting
