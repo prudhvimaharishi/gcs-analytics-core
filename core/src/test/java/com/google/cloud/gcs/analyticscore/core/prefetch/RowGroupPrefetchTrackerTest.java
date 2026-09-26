@@ -35,6 +35,7 @@ import org.junit.jupiter.api.Test;
 class RowGroupPrefetchTrackerTest {
 
   private static final int SCHEMA_FINGERPRINT = 7;
+  private static final long MAX_BLOCK_SIZE_BYTES = 1024;
 
   private ParquetFileLayout fileLayout;
   private SchemaAccessHistory accessHistory;
@@ -54,7 +55,7 @@ class RowGroupPrefetchTrackerTest {
                 columnChunk("id", 400, 50),
                 dictionaryEncodedColumnChunk("category", 450, 50, 470)));
     accessHistory = new SchemaAccessHistory();
-    tracker = new RowGroupPrefetchTracker(fileLayout, accessHistory);
+    tracker = new RowGroupPrefetchTracker(fileLayout, accessHistory, MAX_BLOCK_SIZE_BYTES);
   }
 
   @Test

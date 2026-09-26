@@ -39,13 +39,16 @@ final class RowGroupPrefetchTracker {
 
   private final ParquetFileLayout layout;
   private final SchemaAccessHistory accessHistory;
+  private final long maxBlockSizeBytes;
   private final Set<Integer> prefetchedRowGroups = new HashSet<>();
   private int lastDataReadIndex = -1;
   @Nullable private Range<Long> lastObservedDataPageRange;
 
-  RowGroupPrefetchTracker(ParquetFileLayout layout, SchemaAccessHistory accessHistory) {
+  RowGroupPrefetchTracker(
+      ParquetFileLayout layout, SchemaAccessHistory accessHistory, long maxBlockSizeBytes) {
     this.layout = checkNotNull(layout, "layout cannot be null");
     this.accessHistory = checkNotNull(accessHistory, "accessHistory cannot be null");
+    this.maxBlockSizeBytes = maxBlockSizeBytes;
   }
 
   /**
@@ -106,7 +109,7 @@ final class RowGroupPrefetchTracker {
     }
     ImmutableList<Range<Long>> coalescedRanges =
         rowGroup.getCoalescedColumnRanges(
-            accessHistory.getDataColumns(layout.getSchemaFingerprint()));
+            accessHistory.getDataColumns(layout.getSchemaFingerprint()), maxBlockSizeBytes);
     if (!coalescedRanges.isEmpty() && scheduleRanges.test(coalescedRanges)) {
       prefetchedRowGroups.add(rowGroupIndex);
     }

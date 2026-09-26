@@ -151,4 +151,28 @@ class GcsPrefetchOptionsTest {
 
     assertThat(options.getBufferCacheTtlSeconds()).isEqualTo(30);
   }
+
+  @Test
+  void build_defaultValues_returnsDefaultBlockSizeBytes() {
+    GcsPrefetchOptions options = GcsPrefetchOptions.builder().build();
+
+    assertThat(options.getBlockSizeBytes()).isEqualTo(8 * 1024 * 1024);
+  }
+
+  @Test
+  void createFromOptions_mapWithBlockSizeBytes_parsesBlockSizeBytes() {
+    Map<String, String> map =
+        ImmutableMap.of(PREFIX + GcsPrefetchOptions.BLOCK_SIZE_BYTES_KEY, "65536");
+
+    GcsPrefetchOptions options = GcsPrefetchOptions.createFromOptions(map, PREFIX);
+
+    assertThat(options.getBlockSizeBytes()).isEqualTo(65536);
+  }
+
+  @Test
+  void build_zeroBlockSizeBytes_throwsIllegalArgumentException() {
+    GcsPrefetchOptions.Builder builder = GcsPrefetchOptions.builder().setBlockSizeBytes(0);
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
 }

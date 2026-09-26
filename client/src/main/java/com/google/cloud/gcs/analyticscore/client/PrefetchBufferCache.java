@@ -28,12 +28,14 @@ import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntFunction;
@@ -56,7 +58,7 @@ public final class PrefetchBufferCache {
 
   private final Cache<RangeKey, CachedRange> ranges;
   private final Telemetry telemetry;
-  private final ConcurrentHashMap<GcsItemId, ConcurrentSkipListSet<Long>> rangeIndexByItem =
+  private final ConcurrentHashMap<GcsItemId, ConcurrentSkipListMap<Long, Long>> rangeIndexByItem =
       new ConcurrentHashMap<>();
   private final ConcurrentHashMap<GcsItemId, Integer> openStreamsByItem = new ConcurrentHashMap<>();
 
@@ -94,9 +96,23 @@ public final class PrefetchBufferCache {
    */
   public boolean registerRange(
       GcsItemId itemId, long startOffset, int length, CompletableFuture<ByteBuffer> future) {
+    return registerRange(itemId, startOffset, length, future, () -> {});
+  }
+
+  /**
+   * Registers an in-flight or completed range {@code [startOffset, startOffset + length)} with a
+   * callback that promotes the background download to foreground priority if demanded.
+   */
+  public boolean registerRange(
+      GcsItemId itemId,
+      long startOffset,
+      int length,
+      CompletableFuture<ByteBuffer> future,
+      Runnable promotionAction) {
     checkNotNull(itemId, "itemId cannot be null");
     checkArgument(length > 0, "length %s must be positive", length);
-    CachedRange cachedRange = CachedRange.create(startOffset, startOffset + length, future);
+    CachedRange cachedRange =
+        CachedRange.create(startOffset, startOffset + length, future, promotionAction);
     if (!tryRegisterInIndex(itemId, cachedRange)) {
       return false;
     }
@@ -105,45 +121,65 @@ public final class PrefetchBufferCache {
             (buffer, error) -> {
               if (error != null || buffer == null) {
                 removeRange(itemId, cachedRange);
-                return;
               }
-              telemetry.recordMetric(
-                  Metric.PREFETCH_BYTES_LOADED, buffer.remaining(), Collections.emptyMap());
             });
     return true;
   }
 
   private boolean tryRegisterInIndex(GcsItemId itemId, CachedRange cachedRange) {
     AtomicBoolean registered = new AtomicBoolean();
+    List<Long> shadowedStarts = new ArrayList<>();
     rangeIndexByItem.compute(
         itemId,
         (id, existingOffsets) -> {
-          ConcurrentSkipListSet<Long> itemOffsets =
-              existingOffsets != null ? existingOffsets : new ConcurrentSkipListSet<>();
+          ConcurrentSkipListMap<Long, Long> itemOffsets =
+              existingOffsets != null ? existingOffsets : new ConcurrentSkipListMap<>();
           long startOffset = cachedRange.getStartOffset();
+          long endOffset = cachedRange.getEndOffset();
           if (isCoveredByExistingRange(id, itemOffsets, startOffset, cachedRange.getLength())) {
             return itemOffsets.isEmpty() ? null : itemOffsets;
           }
           ranges.put(RangeKey.create(id, startOffset), cachedRange);
-          itemOffsets.add(startOffset);
+          itemOffsets.put(startOffset, endOffset);
+          removeShadowedSubRanges(itemOffsets, startOffset, endOffset, shadowedStarts);
           registered.set(true);
           return itemOffsets;
         });
+    for (Long shadowedStart : shadowedStarts) {
+      ranges.invalidate(RangeKey.create(itemId, shadowedStart));
+    }
     return registered.get();
   }
 
+  private static void removeShadowedSubRanges(
+      ConcurrentSkipListMap<Long, Long> itemOffsets,
+      long startOffset,
+      long endOffset,
+      List<Long> shadowedStarts) {
+    for (Map.Entry<Long, Long> entry :
+        itemOffsets.subMap(startOffset, false, endOffset, false).entrySet()) {
+      if (entry.getValue() <= endOffset) {
+        shadowedStarts.add(entry.getKey());
+      }
+    }
+    for (Long shadowedStart : shadowedStarts) {
+      itemOffsets.remove(shadowedStart);
+    }
+  }
+
   private boolean isCoveredByExistingRange(
-      GcsItemId itemId, ConcurrentSkipListSet<Long> itemOffsets, long offset, int length) {
-    Long floorOffset = itemOffsets.floor(offset);
-    if (floorOffset == null) {
+      GcsItemId itemId, ConcurrentSkipListMap<Long, Long> itemOffsets, long offset, int length) {
+    Map.Entry<Long, Long> floorEntry = itemOffsets.floorEntry(offset);
+    if (floorEntry == null || offset + length > floorEntry.getValue()) {
       return false;
     }
+    long floorOffset = floorEntry.getKey();
     CachedRange cached = ranges.getIfPresent(RangeKey.create(itemId, floorOffset));
     if (cached == null) {
       itemOffsets.remove(floorOffset);
       return false;
     }
-    return cached.contains(offset, length);
+    return true;
   }
 
   /**
@@ -152,8 +188,7 @@ public final class PrefetchBufferCache {
    */
   public Optional<CachedRange> getRangeCovering(GcsItemId itemId, long offset, int length) {
     checkNotNull(itemId, "itemId cannot be null");
-    return findRange(itemId, rangeIndexByItem.get(itemId), offset)
-        .filter(range -> range.contains(offset, length));
+    return findRange(itemId, rangeIndexByItem.get(itemId), offset, length);
   }
 
   /**
@@ -167,7 +202,6 @@ public final class PrefetchBufferCache {
       return 0;
     }
     telemetry.recordMetric(Metric.PREFETCH_CACHE_HIT, 1L, Collections.emptyMap());
-    telemetry.recordMetric(Metric.PREFETCH_BYTES_CONSUMED, servedBytes, Collections.emptyMap());
     return servedBytes;
   }
 
@@ -196,24 +230,95 @@ public final class PrefetchBufferCache {
 
   /**
    * Returns a future that allocates the target buffer once via {@code allocate} and copies the
-   * cached bytes covering {@code [offset, offset + length)} into it, or {@code Optional.empty()} if
-   * no single cached range covers the window.
+   * cached bytes covering {@code [offset, offset + length)} into it across one or more contiguous
+   * cached ranges, or {@code Optional.empty()} if the window is not completely covered. Any covered
+   * segment is evicted once all of its bytes have been consumed.
    */
   Optional<CompletableFuture<ByteBuffer>> copyIntoAsync(
       GcsItemId itemId, long offset, int length, IntFunction<ByteBuffer> allocate) {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(allocate, "allocate cannot be null");
-    if (length <= 0) {
+    Optional<ImmutableList<CachedRange>> segments = collectContiguousRanges(itemId, offset, length);
+    if (!segments.isPresent()) {
       return Optional.empty();
     }
-    return getRangeCovering(itemId, offset, length)
-        .map(range -> range.copyIntoAsync(offset, length, allocate));
+    ImmutableList<CachedRange> coveredSegments = segments.get();
+    consumeSegments(itemId, coveredSegments, offset, offset + length);
+    if (coveredSegments.size() == 1) {
+      return Optional.of(coveredSegments.get(0).copyIntoAsync(offset, length, allocate));
+    }
+    return Optional.of(stitchSegmentsAsync(coveredSegments, offset, length, allocate));
+  }
+
+  private Optional<ImmutableList<CachedRange>> collectContiguousRanges(
+      GcsItemId itemId, long offset, int length) {
+    ConcurrentSkipListMap<Long, Long> itemOffsets = rangeIndexByItem.get(itemId);
+    if (itemOffsets == null || length <= 0) {
+      return Optional.empty();
+    }
+    ImmutableList.Builder<CachedRange> segments = ImmutableList.builder();
+    long cursor = offset;
+    long targetEnd = offset + length;
+    while (cursor < targetEnd) {
+      Optional<CachedRange> segment = findRange(itemId, itemOffsets, cursor, 1);
+      if (!segment.isPresent()) {
+        return Optional.empty();
+      }
+      segments.add(segment.get());
+      cursor = segment.get().getEndOffset();
+    }
+    return Optional.of(segments.build());
+  }
+
+  private void consumeSegments(
+      GcsItemId itemId, ImmutableList<CachedRange> segments, long startOffset, long endOffset) {
+    long cursor = startOffset;
+    for (CachedRange segment : segments) {
+      int sliceLength = (int) (Math.min(segment.getEndOffset(), endOffset) - cursor);
+      recordBytesServed(segment, sliceLength);
+      if (segment.recordBytesConsumed(sliceLength)) {
+        removeRange(itemId, segment);
+      }
+      cursor += sliceLength;
+    }
+  }
+
+  private void recordBytesServed(CachedRange range, int bytes) {
+    int newlyServed = range.recordBytesServed(bytes);
+    if (newlyServed > 0) {
+      telemetry.recordMetric(Metric.PREFETCH_BYTES_CONSUMED, newlyServed, Collections.emptyMap());
+    }
+  }
+
+  private static CompletableFuture<ByteBuffer> stitchSegmentsAsync(
+      ImmutableList<CachedRange> segments,
+      long offset,
+      int length,
+      IntFunction<ByteBuffer> allocate) {
+    long targetEnd = offset + length;
+    List<CompletableFuture<ByteBuffer>> sliceFutures = new ArrayList<>(segments.size());
+    long cursor = offset;
+    for (CachedRange segment : segments) {
+      int sliceLength = (int) (Math.min(segment.getEndOffset(), targetEnd) - cursor);
+      sliceFutures.add(segment.sliceAsync(cursor, sliceLength));
+      cursor += sliceLength;
+    }
+    return CompletableFuture.allOf(sliceFutures.toArray(new CompletableFuture<?>[0]))
+        .thenApply(
+            unused -> {
+              ByteBuffer target = allocate.apply(length);
+              for (CompletableFuture<ByteBuffer> sliceFuture : sliceFutures) {
+                target.put(sliceFuture.join());
+              }
+              target.flip();
+              return target;
+            });
   }
 
   /**
    * Copies bytes covering {@code position} into {@code dst} (waiting if the covering range is
    * currently in flight) and returns the number of bytes copied, or {@code 0} if no cached range
-   * covers {@code position}.
+   * covers {@code position}. A range is evicted once all of its bytes have been consumed.
    */
   int copyInto(GcsItemId itemId, long position, ByteBuffer dst) {
     checkNotNull(itemId, "itemId cannot be null");
@@ -225,9 +330,14 @@ public final class PrefetchBufferCache {
       if (!covering.isPresent()) {
         break;
       }
-      int copied = covering.get().copyInto(currentPos, dst);
+      CachedRange range = covering.get();
+      int copied = range.copyInto(currentPos, dst);
       if (copied == 0) {
         break;
+      }
+      recordBytesServed(range, copied);
+      if (range.recordBytesConsumed(copied)) {
+        removeRange(itemId, range);
       }
       totalCopied += copied;
     }
@@ -254,8 +364,6 @@ public final class PrefetchBufferCache {
                   if (error == null) {
                     range.getByteBufferFuture().complete(target);
                     telemetry.recordMetric(Metric.PREFETCH_CACHE_HIT, 1L, Collections.emptyMap());
-                    telemetry.recordMetric(
-                        Metric.PREFETCH_BYTES_CONSUMED, range.getLength(), Collections.emptyMap());
                     return;
                   }
                   recordCacheMiss(recordMiss);
@@ -302,11 +410,11 @@ public final class PrefetchBufferCache {
   }
 
   private void evictAllForItem(GcsItemId itemId) {
-    ConcurrentSkipListSet<Long> itemOffsets = rangeIndexByItem.remove(itemId);
+    ConcurrentSkipListMap<Long, Long> itemOffsets = rangeIndexByItem.remove(itemId);
     if (itemOffsets == null) {
       return;
     }
-    for (Long startOffset : itemOffsets) {
+    for (Long startOffset : itemOffsets.keySet()) {
       ranges.invalidate(RangeKey.create(itemId, startOffset));
     }
   }
@@ -318,14 +426,18 @@ public final class PrefetchBufferCache {
   }
 
   private Optional<CachedRange> findRange(
-      GcsItemId itemId, @Nullable ConcurrentSkipListSet<Long> itemOffsets, long offset) {
-    if (itemOffsets == null) {
+      GcsItemId itemId,
+      @Nullable ConcurrentSkipListMap<Long, Long> itemOffsets,
+      long offset,
+      int length) {
+    if (itemOffsets == null || length < 0) {
       return Optional.empty();
     }
-    Long startOffset = itemOffsets.floor(offset);
-    if (startOffset == null) {
+    Map.Entry<Long, Long> floorEntry = itemOffsets.floorEntry(offset);
+    if (floorEntry == null || offset + length > floorEntry.getValue()) {
       return Optional.empty();
     }
+    long startOffset = floorEntry.getKey();
     CachedRange cached = ranges.getIfPresent(RangeKey.create(itemId, startOffset));
     if (cached == null) {
       forgetOffset(itemId, startOffset);

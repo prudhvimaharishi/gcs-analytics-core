@@ -97,9 +97,11 @@ abstract class ParquetRowGroup {
   }
 
   /**
-   * Returns the sorted, coalesced byte ranges of the requested columns present in this row group.
+   * Returns the sorted, coalesced byte ranges of the requested columns present in this row group,
+   * merging touching ranges while the merged span stays within {@code maxBlockSizeBytes}.
    */
-  final ImmutableList<Range<Long>> getCoalescedColumnRanges(Set<String> columnPaths) {
+  final ImmutableList<Range<Long>> getCoalescedColumnRanges(
+      Set<String> columnPaths, long maxBlockSizeBytes) {
     List<Range<Long>> columnRanges = new ArrayList<>();
     for (String columnPath : columnPaths) {
       getColumnChunk(columnPath).ifPresent(chunk -> columnRanges.add(chunk.getByteRange()));
@@ -108,16 +110,17 @@ abstract class ParquetRowGroup {
       return ImmutableList.of();
     }
     columnRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return coalesceConnectedRanges(columnRanges);
+    return coalesceConnectedRanges(columnRanges, maxBlockSizeBytes);
   }
 
   private static ImmutableList<Range<Long>> coalesceConnectedRanges(
-      List<Range<Long>> sortedRanges) {
+      List<Range<Long>> sortedRanges, long maxBlockSizeBytes) {
     ImmutableList.Builder<Range<Long>> coalesced = ImmutableList.builder();
     Range<Long> current = sortedRanges.get(0);
     for (int i = 1; i < sortedRanges.size(); i++) {
       Range<Long> next = sortedRanges.get(i);
-      if (current.isConnected(next)) {
+      if (current.isConnected(next)
+          && next.upperEndpoint() - current.lowerEndpoint() <= maxBlockSizeBytes) {
         current = current.span(next);
       } else {
         coalesced.add(current);

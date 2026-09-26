@@ -19,6 +19,7 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
+import com.google.cloud.gcs.analyticscore.common.ConfigurationUtil;
 import java.util.Map;
 
 /** Configuration options for predictive prefetching. */
@@ -30,10 +31,12 @@ public abstract class GcsPrefetchOptions {
       "analytics-core.prefetch.buffer.cache.max-size-bytes";
   static final String BUFFER_CACHE_TTL_SECONDS_KEY =
       "analytics-core.prefetch.buffer.cache.ttl-seconds";
+  static final String BLOCK_SIZE_BYTES_KEY = "analytics-core.prefetch.block.size-bytes";
 
   private static final boolean DEFAULT_ENABLED = false;
   private static final long DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES = 2L * 1024 * 1024 * 1024; // 2 GB
   private static final long DEFAULT_BUFFER_CACHE_TTL_SECONDS = 60;
+  private static final int DEFAULT_BLOCK_SIZE_BYTES = 8 * 1024 * 1024; // 8 MB
 
   /**
    * Returns whether predictive prefetching is enabled. When enabled, the columns a query touches
@@ -55,6 +58,12 @@ public abstract class GcsPrefetchOptions {
   public abstract long getBufferCacheTtlSeconds();
 
   /**
+   * Returns the maximum size (in bytes) of a single prefetched byte range slice. Defaults to {@code
+   * 8388608} (8 MB).
+   */
+  public abstract int getBlockSizeBytes();
+
+  /**
    * Returns a builder for {@link GcsPrefetchOptions} with the same property values as this
    * instance.
    */
@@ -65,7 +74,8 @@ public abstract class GcsPrefetchOptions {
     return new AutoValue_GcsPrefetchOptions.Builder()
         .setEnabled(DEFAULT_ENABLED)
         .setBufferCacheMaxSizeBytes(DEFAULT_BUFFER_CACHE_MAX_SIZE_BYTES)
-        .setBufferCacheTtlSeconds(DEFAULT_BUFFER_CACHE_TTL_SECONDS);
+        .setBufferCacheTtlSeconds(DEFAULT_BUFFER_CACHE_TTL_SECONDS)
+        .setBlockSizeBytes(DEFAULT_BLOCK_SIZE_BYTES);
   }
 
   /**
@@ -93,6 +103,12 @@ public abstract class GcsPrefetchOptions {
       optionsBuilder.setBufferCacheTtlSeconds(
           Long.parseLong(analyticsCoreOptions.get(bufferCacheTtlSecondsFullKey)));
     }
+    String blockSizeBytesFullKey = prefix + BLOCK_SIZE_BYTES_KEY;
+    if (analyticsCoreOptions.containsKey(blockSizeBytesFullKey)) {
+      optionsBuilder.setBlockSizeBytes(
+          ConfigurationUtil.safeParseInteger(
+              blockSizeBytesFullKey, analyticsCoreOptions.get(blockSizeBytesFullKey)));
+    }
 
     return optionsBuilder.build();
   }
@@ -115,13 +131,19 @@ public abstract class GcsPrefetchOptions {
      */
     public abstract Builder setBufferCacheTtlSeconds(long bufferCacheTtlSeconds);
 
+    /**
+     * Sets the maximum size (in bytes) of a single prefetched byte range slice. Defaults to {@code
+     * 8388608} (8 MB).
+     */
+    public abstract Builder setBlockSizeBytes(int blockSizeBytes);
+
     abstract GcsPrefetchOptions autoBuild();
 
     /**
      * Builds the {@link GcsPrefetchOptions} instance.
      *
-     * @throws IllegalArgumentException if {@code bufferCacheMaxSizeBytes} or {@code
-     *     bufferCacheTtlSeconds} is non-positive
+     * @throws IllegalArgumentException if {@code bufferCacheMaxSizeBytes}, {@code
+     *     bufferCacheTtlSeconds} or {@code blockSizeBytes} is non-positive
      */
     public GcsPrefetchOptions build() {
       GcsPrefetchOptions options = autoBuild();
@@ -129,6 +151,7 @@ public abstract class GcsPrefetchOptions {
           options.getBufferCacheMaxSizeBytes() > 0, "bufferCacheMaxSizeBytes must be positive");
       checkArgument(
           options.getBufferCacheTtlSeconds() > 0, "bufferCacheTtlSeconds must be positive");
+      checkArgument(options.getBlockSizeBytes() > 0, "blockSizeBytes must be positive");
       return options;
     }
   }

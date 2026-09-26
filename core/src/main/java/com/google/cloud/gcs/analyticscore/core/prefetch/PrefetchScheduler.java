@@ -45,20 +45,18 @@ final class PrefetchScheduler implements AutoCloseable {
   private final GcsItemId itemId;
   private final PrefetchBufferCache bufferCache;
   private final PrefetchBufferCache.RegisteredStream registeredStream;
-  private final int maxConcurrentRanges;
   private final ConcurrentHashMap<Long, GcsObjectRange> inFlightRequests =
       new ConcurrentHashMap<>();
 
-  PrefetchScheduler(GcsItemId itemId, PrefetchBufferCache bufferCache, int maxConcurrentRanges) {
+  PrefetchScheduler(GcsItemId itemId, PrefetchBufferCache bufferCache) {
     this.itemId = checkNotNull(itemId, "itemId cannot be null");
     this.bufferCache = checkNotNull(bufferCache, "bufferCache cannot be null");
     this.registeredStream = this.bufferCache.registerStream(this.itemId);
-    this.maxConcurrentRanges = maxConcurrentRanges;
   }
 
   /**
    * Schedules speculative reads for the given byte ranges, ignoring any that are already covered in
-   * the cache or beyond the concurrency budget.
+   * the cache.
    *
    * @param byteRanges exact closed-open byte ranges {@code [startOffset, endOffset)} in ascending
    *     order
@@ -68,12 +66,7 @@ final class PrefetchScheduler implements AutoCloseable {
   boolean schedule(
       VectoredSeekableByteChannel source, Collection<Range<Long>> byteRanges, long fileSize) {
     List<GcsObjectRange> rangesToFetch = new ArrayList<>();
-    boolean allCovered = true;
     for (Range<Long> byteRange : byteRanges) {
-      if (inFlightRequests.size() >= maxConcurrentRanges) {
-        allCovered = false;
-        break;
-      }
       long startOffset = byteRange.lowerEndpoint();
       long endOffset = Math.min(byteRange.upperEndpoint(), fileSize);
       int length = (int) (endOffset - startOffset);
@@ -83,22 +76,30 @@ final class PrefetchScheduler implements AutoCloseable {
     }
 
     if (rangesToFetch.isEmpty()) {
-      return allCovered;
+      return true;
     }
-    return dispatchVectoredRead(source, rangesToFetch) && allCovered;
+    return dispatchVectoredRead(source, rangesToFetch);
   }
 
   private Optional<GcsObjectRange> tryRegisterRange(long startOffset, int length) {
     CompletableFuture<ByteBuffer> fetchFuture = new CompletableFuture<>();
-    if (!bufferCache.registerRange(itemId, startOffset, length, fetchFuture)) {
-      return Optional.empty();
-    }
     GcsObjectRange objectRange =
         GcsObjectRange.builder()
             .setOffset(startOffset)
             .setLength(length)
             .setByteBufferFuture(fetchFuture)
             .build();
+    if (!bufferCache.registerRange(
+        itemId,
+        startOffset,
+        length,
+        fetchFuture,
+        () -> {
+          inFlightRequests.remove(startOffset);
+          objectRange.promote();
+        })) {
+      return Optional.empty();
+    }
     inFlightRequests.put(startOffset, objectRange);
     CompletableFuture<ByteBuffer> unused =
         fetchFuture.whenComplete((data, error) -> inFlightRequests.remove(startOffset));
@@ -108,7 +109,7 @@ final class PrefetchScheduler implements AutoCloseable {
   private static boolean dispatchVectoredRead(
       VectoredSeekableByteChannel source, List<GcsObjectRange> rangesToFetch) {
     try {
-      source.readVectored(rangesToFetch, ByteBuffer::allocate);
+      source.prefetchVectored(rangesToFetch, ByteBuffer::allocate);
     } catch (IOException | RuntimeException e) {
       for (GcsObjectRange range : rangesToFetch) {
         range.getByteBufferFuture().completeExceptionally(e);

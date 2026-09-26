@@ -150,8 +150,22 @@ public class ParquetRowGroupTest {
             columnChunk("category", 150, 50),
             columnChunk("value", 250, 50));
 
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("value", "id", "category", "absent")))
+    assertThat(
+            group.getCoalescedColumnRanges(
+                ImmutableSet.of("value", "id", "category", "absent"), /* maxBlockSizeBytes= */ 500))
         .containsExactly(Range.closedOpen(100L, 200L), Range.closedOpen(250L, 300L))
+        .inOrder();
+  }
+
+  @Test
+  void getCoalescedColumnRanges_touchingColumnsExceedMaxBlockSize_keepsSeparateRanges() {
+    ParquetRowGroup group =
+        rowGroup(0, columnChunk("id", 100, 50), columnChunk("category", 150, 50));
+
+    assertThat(
+            group.getCoalescedColumnRanges(
+                ImmutableSet.of("id", "category"), /* maxBlockSizeBytes= */ 50))
+        .containsExactly(Range.closedOpen(100L, 150L), Range.closedOpen(150L, 200L))
         .inOrder();
   }
 
@@ -159,6 +173,8 @@ public class ParquetRowGroupTest {
   void getCoalescedColumnRanges_noMatchingColumns_returnsEmptyList() {
     ParquetRowGroup group = rowGroup(0, columnChunk("id", 100, 50));
 
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("absent"))).isEmpty();
+    assertThat(
+            group.getCoalescedColumnRanges(ImmutableSet.of("absent"), /* maxBlockSizeBytes= */ 500))
+        .isEmpty();
   }
 }

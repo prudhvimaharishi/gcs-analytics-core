@@ -246,6 +246,17 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   @Override
   public void readVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
       throws IOException {
+    submitVectoredRanges(ranges, allocate, /* prefetch= */ false);
+  }
+
+  @Override
+  public void prefetchVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
+      throws IOException {
+    submitVectoredRanges(ranges, allocate, /* prefetch= */ true);
+  }
+
+  private void submitVectoredRanges(
+      List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate, boolean prefetch) {
     Operation operation =
         Operation.builder()
             .setName(GcsAnalyticsCoreTelemetryConstants.Operation.VECTORED_READ.name())
@@ -255,26 +266,63 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     ExecutorService executorService = executorServiceSupplier.get();
     checkNotNull(executorService, "Thread pool must not be null");
     GcsVectoredReadOptions vectoredReadOptions = readOptions.getGcsVectoredReadOptions();
+    int maxMergeGap = prefetch ? 0 : vectoredReadOptions.getMaxMergeGap();
     ImmutableList<GcsObjectCombinedRange> combinedRanges =
         VectoredIoUtil.mergeGcsObjectRanges(
-            ImmutableList.copyOf(ranges),
-            vectoredReadOptions.getMaxMergeGap(),
-            vectoredReadOptions.getMaxMergeSize());
+            ImmutableList.copyOf(ranges), maxMergeGap, vectoredReadOptions.getMaxMergeSize());
 
     for (GcsObjectCombinedRange combinedRange : combinedRanges) {
-      var unused =
-          executorService.submit(
-              () -> {
-                readCombinedRange(combinedRange, allocate, operation);
-              });
+      if (prefetch) {
+        submitPrefetchRead(executorService, combinedRange, allocate, operation);
+      } else {
+        var unused =
+            executorService.submit(() -> readCombinedRange(combinedRange, allocate, operation));
+      }
     }
   }
 
-  void readCombinedRange(
+  private void submitPrefetchRead(
+      ExecutorService executorService,
+      GcsObjectCombinedRange combinedRange,
+      IntFunction<ByteBuffer> allocate,
+      Operation operation) {
+    Runnable readTask =
+        () -> recordPrefetchBytesLoaded(readCombinedRange(combinedRange, allocate, operation));
+    if (executorService instanceof PrioritizedReadExecutorService) {
+      ((PrioritizedReadExecutorService) executorService)
+          .submitLowPriority(readTask, combinedRange.getUnderlyingRanges());
+    } else {
+      var unused = executorService.submit(readTask);
+    }
+  }
+
+  private void recordPrefetchBytesLoaded(int bytesRead) {
+    if (bytesRead > 0) {
+      telemetry.recordMetric(Metric.PREFETCH_BYTES_LOADED, bytesRead, Collections.emptyMap());
+    }
+  }
+
+  private static boolean allRangesDone(GcsObjectCombinedRange combinedObjectRange) {
+    for (GcsObjectRange child : combinedObjectRange.getUnderlyingRanges()) {
+      if (!child.getByteBufferFuture().isDone()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Reads {@code combinedObjectRange} and completes its child ranges, returning the number of bytes
+   * read from GCS, or {@code 0} if all child ranges were already done or the read failed.
+   */
+  int readCombinedRange(
       GcsObjectCombinedRange combinedObjectRange,
       IntFunction<ByteBuffer> allocate,
       Operation operation) {
-    telemetry.measure(
+    if (allRangesDone(combinedObjectRange)) {
+      return 0;
+    }
+    return telemetry.measure(
         operation,
         recorder -> {
           ReadStrategy readStrategy =
@@ -317,10 +365,11 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
               populateGcsObjectRangeFromCombinedObjectRange(
                   combinedObjectRange, underlyingRange, numOfBytesRead, dataBuffer);
             }
+            return numOfBytesRead;
           } catch (Exception e) {
             completeWithException(combinedObjectRange, e);
+            return 0;
           }
-          return null;
         });
   }
 

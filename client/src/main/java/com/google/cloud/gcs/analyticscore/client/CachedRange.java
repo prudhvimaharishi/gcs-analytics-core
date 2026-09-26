@@ -23,6 +23,7 @@ import com.google.auto.value.AutoValue;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
 
@@ -34,6 +35,12 @@ import javax.annotation.Nullable;
  */
 @AutoValue
 public abstract class CachedRange {
+
+  private final AtomicInteger consumedBytes = new AtomicInteger();
+  private final AtomicInteger servedBytes = new AtomicInteger();
+  private Runnable promotionAction = CachedRange::noOpPromotion;
+
+  private static void noOpPromotion() {}
 
   /** Returns the inclusive start offset of this range within the GCS object. */
   public abstract long getStartOffset();
@@ -47,6 +54,18 @@ public abstract class CachedRange {
   /** Creates a new {@link CachedRange} for {@code [startOffset, endOffset)}. */
   public static CachedRange create(
       long startOffset, long endOffset, CompletableFuture<ByteBuffer> future) {
+    return create(startOffset, endOffset, future, CachedRange::noOpPromotion);
+  }
+
+  /**
+   * Creates a new {@link CachedRange} for {@code [startOffset, endOffset)} with a priority
+   * promotion callback.
+   */
+  public static CachedRange create(
+      long startOffset,
+      long endOffset,
+      CompletableFuture<ByteBuffer> future,
+      Runnable promotionAction) {
     checkArgument(startOffset >= 0, "startOffset %s must be non-negative", startOffset);
     checkArgument(
         endOffset > startOffset,
@@ -54,7 +73,15 @@ public abstract class CachedRange {
         endOffset,
         startOffset);
     checkNotNull(future, "future cannot be null");
-    return new AutoValue_CachedRange(startOffset, endOffset, future);
+    checkNotNull(promotionAction, "promotionAction cannot be null");
+    CachedRange range = new AutoValue_CachedRange(startOffset, endOffset, future);
+    range.promotionAction = promotionAction;
+    return range;
+  }
+
+  /** Promotes this range's download to foreground priority if it is still queued. */
+  public void promote() {
+    promotionAction.run();
   }
 
   /** Returns the length of this range in bytes. */
@@ -68,6 +95,24 @@ public abstract class CachedRange {
   }
 
   /**
+   * Records {@code bytes} as consumed from this range and returns {@code true} once the total
+   * consumed bytes reach {@link #getLength()}.
+   */
+  boolean recordBytesConsumed(int bytes) {
+    return consumedBytes.addAndGet(bytes) >= getLength();
+  }
+
+  /**
+   * Records {@code bytes} as served for metrics and returns how many of them are newly counted, so
+   * the total counted for this range never exceeds {@link #getLength()}.
+   */
+  int recordBytesServed(int bytes) {
+    int previous =
+        servedBytes.getAndAccumulate(bytes, (total, add) -> Math.min(getLength(), total + add));
+    return Math.min(getLength(), previous + bytes) - previous;
+  }
+
+  /**
    * Waits for this range's buffer if necessary and copies as many available bytes starting at
    * {@code position} into {@code dst} as fit, or returns {@code 0} if the range cannot be read.
    */
@@ -76,6 +121,7 @@ public abstract class CachedRange {
     if (position < getStartOffset() || position >= getEndOffset() || !dst.hasRemaining()) {
       return 0;
     }
+    promote();
     try {
       ByteBuffer buffer = getFuture().get();
       if (buffer == null) {
@@ -104,6 +150,7 @@ public abstract class CachedRange {
    */
   CompletableFuture<ByteBuffer> copyIntoAsync(
       long offset, int length, IntFunction<ByteBuffer> allocate) {
+    promote();
     int relativeOffset = (int) (offset - getStartOffset());
     boolean exactMatch = relativeOffset == 0 && getLength() == length;
     return getFuture()
@@ -112,11 +159,25 @@ public abstract class CachedRange {
               if (exactMatch && !buf.isReadOnly() && buf.hasArray() && buf.arrayOffset() == 0) {
                 return buf.duplicate();
               }
-              ByteBuffer view = buf.duplicate();
-              view.position(view.position() + relativeOffset);
-              view.limit(view.position() + length);
-              return copyToAllocated(view, length, allocate);
+              return copyToAllocated(sliceBuffer(buf, relativeOffset, length), length, allocate);
             });
+  }
+
+  /**
+   * Returns a future holding a read-only view of {@code [offset, offset + length)} within this
+   * range's buffer.
+   */
+  CompletableFuture<ByteBuffer> sliceAsync(long offset, int length) {
+    promote();
+    int relativeOffset = (int) (offset - getStartOffset());
+    return getFuture().thenApply(buf -> sliceBuffer(buf, relativeOffset, length));
+  }
+
+  private static ByteBuffer sliceBuffer(ByteBuffer source, int relativeOffset, int length) {
+    ByteBuffer view = source.duplicate();
+    view.position(view.position() + relativeOffset);
+    view.limit(view.position() + length);
+    return view.slice();
   }
 
   @Nullable

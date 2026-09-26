@@ -597,11 +597,77 @@ class PredictivePrefetchOptimizerTest {
     return Arrays.copyOfRange(content, (int) offset, (int) offset + length);
   }
 
+  @Test
+  void read_adjacentColumnsExceedingBlockSize_prefetchesEachColumnSeparately() throws IOException {
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    int idChunkLength = (int) (idChunk.getEndOffset() - idChunk.getStartOffset());
+    optimizer =
+        createOptimizer(
+            GcsPrefetchOptions.builder().setEnabled(true).setBlockSizeBytes(idChunkLength).build());
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(layout.getSchemaFingerprint(), ParquetTestFiles.CATEGORY_COLUMN);
+
+    prefetchFirstRowGroupIdColumn();
+
+    assertThat(channel.getRequestedOffsets())
+        .containsExactly(idChunk.getStartOffset(), categoryChunk.getStartOffset());
+  }
+
+  @Test
+  void readVectored_coalescedRangeAcrossBlockSplitColumns_stitchesFromCache() throws Exception {
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    int idChunkLength = (int) (idChunk.getEndOffset() - idChunk.getStartOffset());
+    optimizer =
+        createOptimizer(
+            GcsPrefetchOptions.builder().setEnabled(true).setBlockSizeBytes(idChunkLength).build());
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(layout.getSchemaFingerprint(), ParquetTestFiles.CATEGORY_COLUMN);
+    prefetchFirstRowGroupIdColumn();
+    long combinedStart = idChunk.getStartOffset();
+    int combinedLength = (int) (categoryChunk.getEndOffset() - combinedStart);
+    GcsObjectRange coalescedRange =
+        GcsObjectRange.builder()
+            .setOffset(combinedStart)
+            .setLength(combinedLength)
+            .setByteBufferFuture(new CompletableFuture<>())
+            .build();
+
+    List<GcsObjectRange> unserved =
+        optimizer.readVectored(ImmutableList.of(coalescedRange), ByteBuffer::allocate, channel);
+
+    assertThat(unserved).isEmpty();
+    assertThat(coalescedRange.getByteBufferFuture().get().array())
+        .isEqualTo(sliceOfContent(combinedStart, combinedLength));
+  }
+
+  @Test
+  void read_exhaustingPrefetchedColumnChunk_evictsSegmentFromCache() throws IOException {
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+    prefetchFirstRowGroupIdColumn();
+    long chunkStart = idChunk.getStartOffset();
+    int chunkLength = (int) (idChunk.getEndOffset() - chunkStart);
+
+    optimizer.read(chunkStart, ByteBuffer.allocate(chunkLength), channel);
+
+    assertThat(cacheManager.getPrefetchBufferCache().get().getRangeCovering(ITEM_ID, chunkStart, 1))
+        .isEmpty();
+  }
+
   private PredictivePrefetchOptimizer createOptimizer(boolean enabled) throws IOException {
+    return createOptimizer(GcsPrefetchOptions.builder().setEnabled(enabled).build());
+  }
+
+  private PredictivePrefetchOptimizer createOptimizer(GcsPrefetchOptions prefetchOptions)
+      throws IOException {
     if (optimizer != null) {
       optimizer.onClose();
     }
-    GcsPrefetchOptions prefetchOptions = GcsPrefetchOptions.builder().setEnabled(enabled).build();
     if (cacheManager == null) {
       cacheManager =
           new AnalyticsCacheManager(

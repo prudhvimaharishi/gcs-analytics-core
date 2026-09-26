@@ -19,6 +19,8 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
+import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.common.collect.ImmutableList;
 import java.io.IOException;
@@ -206,6 +208,20 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
+  void registerRange_largerRangeShadowsSubRange_removesSubRangeAndServesLargerRange() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), SECOND_RANGE_OFFSET, SECOND_RANGE);
+    registerCompleted(cache, itemId("object"), 6, SECOND_RANGE);
+
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
+
+    assertThat(cache.getRangeCovering(itemId("object"), SECOND_RANGE_OFFSET, 4).get().getLength())
+        .isEqualTo(COMBINED_RANGES.length);
+    assertThat(cache.getRangeCovering(itemId("object"), 6, 4).get().getLength())
+        .isEqualTo(SECOND_RANGE.length);
+  }
+
+  @Test
   void getRangeCovering_inFlightRange_returnsCachedRange() {
     PrefetchBufferCache cache = newCache();
     cache.registerRange(itemId("object"), 10, 8, new CompletableFuture<>());
@@ -246,6 +262,129 @@ class PrefetchBufferCacheTest {
         cache.copyIntoAsync(itemId("object"), 12, 4, ByteBuffer::allocate).get().get();
 
     assertThat(remainingBytes(populated)).isEqualTo(new byte[] {3, 4, 5, 6});
+  }
+
+  @Test
+  void copyIntoAsync_readToRangeEnd_evictsRange() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+
+    cache.copyIntoAsync(
+        itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE.length, ByteBuffer::allocate);
+
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 1)).isEmpty();
+  }
+
+  @Test
+  void copyIntoAsync_readEndsBeforeRangeEnd_keepsRange() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), 10, COMBINED_RANGES);
+
+    cache.copyIntoAsync(itemId("object"), 12, 4, ByteBuffer::allocate);
+
+    assertThat(cache.getRangeCovering(itemId("object"), 10, 1)).isPresent();
+  }
+
+  @Test
+  void copyIntoAsync_outOfOrderSubRanges_evictsOnlyAfterAllBytesConsumed() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), 10, COMBINED_RANGES);
+
+    cache.copyIntoAsync(itemId("object"), 14, 4, ByteBuffer::allocate);
+
+    assertThat(cache.getRangeCovering(itemId("object"), 10, 4)).isPresent();
+
+    cache.copyIntoAsync(itemId("object"), 10, 4, ByteBuffer::allocate);
+
+    assertThat(cache.getRangeCovering(itemId("object"), 10, 1)).isEmpty();
+  }
+
+  @Test
+  void copyIntoAsync_acrossAdjacentRanges_stitchesAndEvictsExhaustedSegments() throws Exception {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+    registerCompleted(cache, itemId("object"), SECOND_RANGE_OFFSET, SECOND_RANGE);
+
+    ByteBuffer populated =
+        cache
+            .copyIntoAsync(
+                itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES.length, ByteBuffer::allocate)
+            .get()
+            .get();
+
+    assertThat(remainingBytes(populated)).isEqualTo(COMBINED_RANGES);
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 1)).isEmpty();
+    assertThat(cache.getRangeCovering(itemId("object"), SECOND_RANGE_OFFSET, 1)).isEmpty();
+  }
+
+  @Test
+  void copyIntoAsync_acrossRangesWithGap_returnsEmptyWithoutConsumingFirstSegment() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+    registerCompleted(cache, itemId("object"), 6, SECOND_RANGE);
+
+    assertThat(cache.copyIntoAsync(itemId("object"), FIRST_RANGE_OFFSET, 10, ByteBuffer::allocate))
+        .isEmpty();
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE.length))
+        .isPresent();
+  }
+
+  @Test
+  void copyInto_segmentExhausted_evictsSegment() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+
+    int unusedCopiedBytes =
+        cache.copyInto(
+            itemId("object"), FIRST_RANGE_OFFSET, ByteBuffer.allocate(FIRST_RANGE.length));
+
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 1)).isEmpty();
+  }
+
+  @Test
+  void copyInto_segmentPartiallyRead_keepsSegment() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+
+    int unusedCopiedBytes =
+        cache.copyInto(itemId("object"), FIRST_RANGE_OFFSET, ByteBuffer.allocate(2));
+
+    assertThat(cache.getRangeCovering(itemId("object"), 2, 2)).isPresent();
+  }
+
+  @Test
+  void copyInto_outOfOrderSubRanges_evictsOnlyAfterAllBytesConsumed() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), 10, COMBINED_RANGES);
+
+    int unusedTailBytes = cache.copyInto(itemId("object"), 14, ByteBuffer.allocate(4));
+
+    assertThat(cache.getRangeCovering(itemId("object"), 10, 4)).isPresent();
+
+    int unusedHeadBytes = cache.copyInto(itemId("object"), 10, ByteBuffer.allocate(4));
+
+    assertThat(cache.getRangeCovering(itemId("object"), 10, 1)).isEmpty();
+  }
+
+  @Test
+  void serveFromCache_overlappingReadsOfSameRange_countsConsumedBytesOnce() {
+    RecordingOperationListener listener = new RecordingOperationListener();
+    PrefetchBufferCache cache =
+        new PrefetchBufferCache(
+            MAX_SIZE_BYTES, TTL_SECONDS, new Telemetry(ImmutableList.of(listener)));
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
+    int unusedHeadBytes =
+        cache.serveFromCache(
+            itemId("object"), FIRST_RANGE_OFFSET, ByteBuffer.allocate(4), /* recordMiss= */ true);
+
+    int unusedAllBytes =
+        cache.serveFromCache(
+            itemId("object"),
+            FIRST_RANGE_OFFSET,
+            ByteBuffer.allocate(COMBINED_RANGES.length),
+            /* recordMiss= */ true);
+
+    assertThat(listener.getTotal(Metric.PREFETCH_BYTES_CONSUMED)).isEqualTo(COMBINED_RANGES.length);
   }
 
   @Test
@@ -346,6 +485,50 @@ class PrefetchBufferCacheTest {
     firstStream.close();
 
     assertThat(cache.getRangeCovering(itemId("object"), SECOND_RANGE_OFFSET, 4)).isPresent();
+  }
+
+  @Test
+  void copyInto_registeredWithPromotionCallback_runsCallback() {
+    PrefetchBufferCache cache = newCache();
+    java.util.concurrent.atomic.AtomicBoolean promoted =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    cache.registerRange(
+        itemId("object"),
+        FIRST_RANGE_OFFSET,
+        FIRST_RANGE.length,
+        CompletableFuture.completedFuture(bufferOf(FIRST_RANGE)),
+        () -> promoted.set(true));
+
+    int unusedCopiedBytes =
+        cache.copyInto(
+            itemId("object"), FIRST_RANGE_OFFSET, ByteBuffer.allocate(FIRST_RANGE.length));
+
+    assertThat(promoted.get()).isTrue();
+  }
+
+  @Test
+  void copyIntoAsync_acrossAdjacentRanges_promotesEverySegment() {
+    PrefetchBufferCache cache = newCache();
+    java.util.concurrent.atomic.AtomicInteger promotedCount =
+        new java.util.concurrent.atomic.AtomicInteger();
+    cache.registerRange(
+        itemId("object"),
+        FIRST_RANGE_OFFSET,
+        FIRST_RANGE.length,
+        CompletableFuture.completedFuture(bufferOf(FIRST_RANGE)),
+        promotedCount::incrementAndGet);
+    cache.registerRange(
+        itemId("object"),
+        SECOND_RANGE_OFFSET,
+        SECOND_RANGE.length,
+        CompletableFuture.completedFuture(bufferOf(SECOND_RANGE)),
+        promotedCount::incrementAndGet);
+
+    var unusedFuture =
+        cache.copyIntoAsync(
+            itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES.length, ByteBuffer::allocate);
+
+    assertThat(promotedCount.get()).isEqualTo(2);
   }
 
   @Test

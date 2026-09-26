@@ -40,15 +40,15 @@ import javax.annotation.Nullable;
  * prefetching is skipped.
  *
  * <p>Speculation schedules exact column chunk and dictionary page byte ranges rather than fixed
- * blocks, avoiding read amplification on unprojected columns. Touching ranges are merged into one
- * span; ranges separated by a gap are fetched separately.
+ * blocks, avoiding read amplification on unprojected columns. Touching ranges are merged while the
+ * merged span stays within {@link GcsPrefetchOptions#getBlockSizeBytes()}; ranges separated by a
+ * gap are fetched separately.
  *
  * <p>Instances are bound to a single stream and its reader thread.
  */
 public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   private static final String PARQUET_EXTENSION = ".parquet";
-  private static final int MAX_CONCURRENT_PREFETCH_RANGES = 32;
   private static final String PREFETCH_DISABLED_IN_CACHE_MANAGER =
       "Predictive prefetching is disabled in the cache manager";
 
@@ -81,7 +81,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
             .orElseThrow(() -> new IllegalStateException(PREFETCH_DISABLED_IN_CACHE_MANAGER));
     this.itemId = itemId;
     this.cacheManager = cacheManager;
-    this.scheduler = new PrefetchScheduler(itemId, bufferCache, MAX_CONCURRENT_PREFETCH_RANGES);
+    this.scheduler = new PrefetchScheduler(itemId, bufferCache);
   }
 
   @Override
@@ -131,6 +131,8 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
             layout ->
                 tracker =
                     new RowGroupPrefetchTracker(
-                        layout, cacheManager.getSchemaAccessHistory().get()));
+                        layout,
+                        cacheManager.getSchemaAccessHistory().get(),
+                        prefetchOptions.getBlockSizeBytes()));
   }
 }

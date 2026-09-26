@@ -246,6 +246,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
       statusExecutorService.shutdownNow();
       Thread.currentThread().interrupt();
     }
+    cacheManager.invalidateAll();
     gcsClient.close();
     telemetry.close();
   }
@@ -287,17 +288,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
   @VisibleForTesting
   Supplier<ExecutorService> initializeReadExecutionServiceSupplier() {
     return Suppliers.memoize(
-        () ->
-            new ThreadPoolExecutor(
-                fileSystemOptions.getReadThreadCount(),
-                fileSystemOptions.getReadThreadCount(),
-                0L,
-                TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<Runnable>(),
-                new ThreadFactoryBuilder()
-                    .setNameFormat("gcs-filesystem-range-pool-%d")
-                    .setDaemon(true)
-                    .build()));
+        () -> new PrioritizedReadExecutorService(fileSystemOptions.getReadThreadCount()));
   }
 
   @VisibleForTesting

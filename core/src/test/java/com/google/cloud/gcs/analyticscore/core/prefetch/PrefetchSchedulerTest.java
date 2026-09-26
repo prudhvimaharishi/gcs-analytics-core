@@ -21,7 +21,6 @@ import static com.google.common.truth.Truth.assertThat;
 import com.google.cloud.gcs.analyticscore.client.FakeVectoredSeekableByteChannel;
 import com.google.cloud.gcs.analyticscore.client.GcsItemId;
 import com.google.cloud.gcs.analyticscore.client.PrefetchBufferCache;
-import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.common.collect.ImmutableList;
@@ -39,7 +38,6 @@ class PrefetchSchedulerTest {
       GcsItemId.builder().setBucketName("bucket").setObjectName("data.parquet").build();
   private static final int CONTENT_LENGTH = 512;
   private static final int RANGE_LENGTH = 32;
-  private static final int MAX_CONCURRENT_RANGES = 4;
   private static final long RANGE_OFFSET = 64;
 
   private FakeVectoredSeekableByteChannel channel;
@@ -54,7 +52,7 @@ class PrefetchSchedulerTest {
     metricListener = new RecordingOperationListener();
     telemetry = new Telemetry(ImmutableList.of(metricListener));
     bufferCache = new PrefetchBufferCache(CONTENT_LENGTH, 60, telemetry);
-    scheduler = new PrefetchScheduler(ITEM_ID, bufferCache, MAX_CONCURRENT_RANGES);
+    scheduler = new PrefetchScheduler(ITEM_ID, bufferCache);
   }
 
   @AfterEach
@@ -77,13 +75,6 @@ class PrefetchSchedulerTest {
 
     assertThat(readCachedRange(RANGE_OFFSET, RANGE_LENGTH))
         .isEqualTo(channel.sliceContent(RANGE_OFFSET, RANGE_LENGTH));
-  }
-
-  @Test
-  void schedule_uncachedRange_recordsBytesLoaded() {
-    schedule(RANGE_OFFSET);
-
-    assertThat(metricListener.getTotal(Metric.PREFETCH_BYTES_LOADED)).isEqualTo(RANGE_LENGTH);
   }
 
   @Test
@@ -168,46 +159,12 @@ class PrefetchSchedulerTest {
   }
 
   @Test
-  void schedule_moreRangesThanConcurrencyLimit_requestsOnlyUpToTheLimit() {
-    schedule(0, 32, 64, 96, 128, 160);
-
-    assertThat(channel.getRequestedOffsets()).containsExactly(0L, 32L, 64L, 96L).inOrder();
-  }
-
-  @Test
-  void schedule_rangeBeyondConcurrencyLimit_isNotRegisteredInCache() {
-    schedule(0, 32, 64, 96, 128);
-
-    assertThat(bufferCache.getRangeCovering(ITEM_ID, 128, RANGE_LENGTH)).isEmpty();
-  }
-
-  @Test
   void schedule_channelFails_removesRangeFromCache() {
     channel.failVectoredReadsWith(new IOException("vectored read rejected"));
 
     schedule(RANGE_OFFSET);
 
     assertThat(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH)).isEmpty();
-  }
-
-  @Test
-  void schedule_afterChannelFailure_freesConcurrencyBudget() {
-    channel.failVectoredReadsWith(new IOException("vectored read rejected"));
-    schedule(0, 32, 64, 96);
-
-    schedule(128);
-
-    assertThat(channel.getRequestedOffsets()).contains(128L);
-  }
-
-  @Test
-  void schedule_requestsNotSettled_countTowardConcurrencyLimit() {
-    channel.deferVectoredCompletion();
-    schedule(0, 32, 64, 96);
-
-    schedule(128);
-
-    assertThat(channel.getRequestedOffsets()).doesNotContain(128L);
   }
 
   @Test
@@ -251,17 +208,6 @@ class PrefetchSchedulerTest {
   }
 
   @Test
-  void cancelAll_withPendingRequests_freesConcurrencyBudget() {
-    channel.deferVectoredCompletion();
-    schedule(0, 32, 64, 96);
-
-    scheduler.cancelAll();
-    schedule(128);
-
-    assertThat(channel.getRequestedOffsets()).contains(128L);
-  }
-
-  @Test
   void close_withPendingRequest_cancelsTheRequest() {
     channel.deferVectoredCompletion();
     schedule(RANGE_OFFSET);
@@ -282,6 +228,17 @@ class PrefetchSchedulerTest {
   }
 
   @Test
+  void cancelAll_afterRangePromoted_doesNotCancelPromotedRequest() {
+    channel.deferVectoredCompletion();
+    schedule(RANGE_OFFSET);
+    bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH).get().promote();
+
+    scheduler.cancelAll();
+
+    assertThat(channel.getRequestedRanges().get(0).getByteBufferFuture().isCancelled()).isFalse();
+  }
+
+  @Test
   void close_lastOpenScheduler_evictsCompletedRange() {
     schedule(RANGE_OFFSET);
 
@@ -292,8 +249,7 @@ class PrefetchSchedulerTest {
 
   @Test
   void close_anotherSchedulerStillOpen_keepsCompletedRange() {
-    try (PrefetchScheduler otherScheduler =
-        new PrefetchScheduler(ITEM_ID, bufferCache, MAX_CONCURRENT_RANGES)) {
+    try (PrefetchScheduler otherScheduler = new PrefetchScheduler(ITEM_ID, bufferCache)) {
       otherScheduler.schedule(
           channel,
           ImmutableList.of(Range.closedOpen(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH)),
@@ -307,8 +263,7 @@ class PrefetchSchedulerTest {
 
   @Test
   void close_calledTwiceWithAnotherSchedulerOpen_keepsCompletedRange() {
-    try (PrefetchScheduler otherScheduler =
-        new PrefetchScheduler(ITEM_ID, bufferCache, MAX_CONCURRENT_RANGES)) {
+    try (PrefetchScheduler otherScheduler = new PrefetchScheduler(ITEM_ID, bufferCache)) {
       otherScheduler.schedule(
           channel,
           ImmutableList.of(Range.closedOpen(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH)),

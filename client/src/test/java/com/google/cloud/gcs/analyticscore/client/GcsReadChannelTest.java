@@ -24,6 +24,7 @@ import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConsta
 import com.google.cloud.gcs.analyticscore.common.telemetry.MetricKey;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Operation;
 import com.google.cloud.gcs.analyticscore.common.telemetry.OperationListener;
+import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.Storage;
@@ -35,6 +36,7 @@ import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.MoreExecutors;
 import java.io.EOFException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -628,6 +630,45 @@ class GcsReadChannelTest {
     // Clean up.
 
     gcsReadChannel.close();
+  }
+
+  @Test
+  void prefetchVectored_childRangeCancelledBeforeRead_recordsAllBytesLoaded() throws IOException {
+    RecordingOperationListener listener = new RecordingOperationListener();
+    GcsReadChannel gcsReadChannel = createDirectExecutorChannel("hello world", listener);
+    ImmutableList<GcsObjectRange> ranges = createRanges(ImmutableMap.of(0L, 5, 3L, 8));
+    ranges.get(0).getByteBufferFuture().cancel(/* mayInterruptIfRunning= */ false);
+
+    gcsReadChannel.prefetchVectored(ranges, ByteBuffer::allocate);
+
+    assertThat(listener.getTotal(Metric.PREFETCH_BYTES_LOADED)).isEqualTo(11L);
+  }
+
+  @Test
+  void readVectored_completedRead_recordsNoPrefetchBytesLoaded() throws IOException {
+    RecordingOperationListener listener = new RecordingOperationListener();
+    GcsReadChannel gcsReadChannel = createDirectExecutorChannel("hello world", listener);
+    ImmutableList<GcsObjectRange> ranges = createRanges(ImmutableMap.of(0L, 5));
+
+    gcsReadChannel.readVectored(ranges, ByteBuffer::allocate);
+
+    assertThat(listener.getTotal(Metric.PREFETCH_BYTES_LOADED)).isEqualTo(0L);
+  }
+
+  private GcsReadChannel createDirectExecutorChannel(
+      String objectData, RecordingOperationListener listener) throws IOException {
+    GcsItemId itemId =
+        GcsItemId.builder().setBucketName(TEST_BUCKET).setObjectName(TEST_OBJECT).build();
+    GcsItemInfo itemInfo =
+        GcsItemInfo.builder().setItemId(itemId).setSize(objectData.length()).build();
+    StorageTestUtils.createBlobInStorage(
+        storage, BlobId.of(itemId.getBucketName(), itemId.getObjectName().get()), objectData);
+    return new GcsReadChannel(
+        storage,
+        itemInfo,
+        TEST_GCS_READ_OPTIONS,
+        Suppliers.ofInstance(MoreExecutors.newDirectExecutorService()),
+        new Telemetry(ImmutableList.of(listener)));
   }
 
   @Test
