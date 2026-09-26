@@ -29,6 +29,10 @@ import com.google.common.collect.ImmutableSet;
  * learned while reading one file is reused when a later file with the same schema is opened. This
  * is what allows the second and subsequent files of a multi-file scan to be prefetched.
  *
+ * <p>Columns are tracked separately depending on whether the engine read into the data pages or
+ * only touched the dictionary page, so that a column used purely for filter evaluation is not
+ * speculatively fetched in full.
+ *
  * <p>The columns of each schema are bounded by a frequency-based (W-TinyLFU) policy: once a schema
  * tracks {@link #MAX_COLUMNS_PER_SCHEMA} columns, rarely read columns are evicted in favour of
  * frequently read ones, so the history follows the columns queries currently read.
@@ -42,7 +46,7 @@ public final class SchemaAccessHistory {
   /** The maximum number of columns tracked for a single schema. */
   static final int MAX_COLUMNS_PER_SCHEMA = 256;
 
-  private final Cache<Integer, Cache<String, Boolean>> historyBySchema;
+  private final Cache<Integer, TrackedColumns> historyBySchema;
 
   /** Creates an empty history. */
   public SchemaAccessHistory() {
@@ -51,8 +55,18 @@ public final class SchemaAccessHistory {
 
   /** Returns the columns previously read into their data pages for the given schema. */
   public ImmutableSet<String> getDataColumns(int schemaFingerprint) {
-    Cache<String, Boolean> columns = historyBySchema.getIfPresent(schemaFingerprint);
-    return columns == null ? ImmutableSet.of() : ImmutableSet.copyOf(columns.asMap().keySet());
+    TrackedColumns tracked = historyBySchema.getIfPresent(schemaFingerprint);
+    return tracked == null
+        ? ImmutableSet.of()
+        : ImmutableSet.copyOf(tracked.dataColumns.asMap().keySet());
+  }
+
+  /** Returns the columns previously read only as far as their dictionary page. */
+  public ImmutableSet<String> getDictionaryColumns(int schemaFingerprint) {
+    TrackedColumns tracked = historyBySchema.getIfPresent(schemaFingerprint);
+    return tracked == null
+        ? ImmutableSet.of()
+        : ImmutableSet.copyOf(tracked.dictionaryColumns.asMap().keySet());
   }
 
   /**
@@ -62,14 +76,28 @@ public final class SchemaAccessHistory {
   public void recordDataAccess(int schemaFingerprint, String columnPath) {
     checkNotNull(columnPath, "columnPath cannot be null");
     Boolean unused =
-        historyBySchema
-            .get(schemaFingerprint, fingerprint -> newColumnCache())
+        trackedColumnsFor(schemaFingerprint).dataColumns.get(columnPath, column -> Boolean.TRUE);
+  }
+
+  /**
+   * Records that the dictionary page of {@code columnPath} was read (for example, during row-group
+   * dictionary filter evaluation).
+   */
+  public void recordDictionaryAccess(int schemaFingerprint, String columnPath) {
+    checkNotNull(columnPath, "columnPath cannot be null");
+    Boolean unused =
+        trackedColumnsFor(schemaFingerprint)
+            .dictionaryColumns
             .get(columnPath, column -> Boolean.TRUE);
   }
 
   /** Discards all recorded history. */
   public void invalidateAll() {
     historyBySchema.invalidateAll();
+  }
+
+  private TrackedColumns trackedColumnsFor(int schemaFingerprint) {
+    return historyBySchema.get(schemaFingerprint, fingerprint -> new TrackedColumns());
   }
 
   /**
@@ -81,5 +109,10 @@ public final class SchemaAccessHistory {
         .maximumSize(MAX_COLUMNS_PER_SCHEMA)
         .executor(Runnable::run)
         .build();
+  }
+
+  private static final class TrackedColumns {
+    private final Cache<String, Boolean> dataColumns = newColumnCache();
+    private final Cache<String, Boolean> dictionaryColumns = newColumnCache();
   }
 }

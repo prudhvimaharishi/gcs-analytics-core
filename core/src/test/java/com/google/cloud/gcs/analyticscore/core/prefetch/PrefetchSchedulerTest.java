@@ -294,7 +294,9 @@ class PrefetchSchedulerTest {
 
   private byte[] readCachedRange(long offset, int length) {
     ByteBuffer destination = ByteBuffer.allocate(length);
-    int copiedBytes = bufferCache.serveFromCache(ITEM_ID, offset, destination, false);
+    int copiedBytes =
+        bufferCache.serveFromCache(
+            ITEM_ID, offset, destination, /* recordMiss= */ false, /* evictConsumed= */ true);
     byte[] bytes = new byte[copiedBytes];
     destination.flip();
     destination.get(bytes);

@@ -195,8 +195,9 @@ public final class PrefetchBufferCache {
    * Copies cached bytes for {@code itemId} starting at {@code position} into {@code dst}, records
    * cache hit or miss telemetry, and returns the number of bytes served (or {@code 0} on a miss).
    */
-  public int serveFromCache(GcsItemId itemId, long position, ByteBuffer dst, boolean recordMiss) {
-    int servedBytes = copyInto(itemId, position, dst);
+  public int serveFromCache(
+      GcsItemId itemId, long position, ByteBuffer dst, boolean recordMiss, boolean evictConsumed) {
+    int servedBytes = copyInto(itemId, position, dst, evictConsumed);
     if (servedBytes == 0) {
       recordCacheMiss(recordMiss);
       return 0;
@@ -321,6 +322,10 @@ public final class PrefetchBufferCache {
    * covers {@code position}. A range is evicted once all of its bytes have been consumed.
    */
   int copyInto(GcsItemId itemId, long position, ByteBuffer dst) {
+    return copyInto(itemId, position, dst, /* evictConsumed= */ true);
+  }
+
+  private int copyInto(GcsItemId itemId, long position, ByteBuffer dst, boolean evictConsumed) {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(dst, "dst cannot be null");
     int totalCopied = 0;
@@ -336,7 +341,7 @@ public final class PrefetchBufferCache {
         break;
       }
       recordBytesServed(range, copied);
-      if (range.recordBytesConsumed(copied)) {
+      if (evictConsumed && range.recordBytesConsumed(copied)) {
         removeRange(itemId, range);
       }
       totalCopied += copied;

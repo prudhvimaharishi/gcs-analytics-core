@@ -74,16 +74,17 @@ abstract class ParquetRowGroup {
   }
 
   /**
-   * Returns whether {@code [startOffset, endOffset)} overlaps any dictionary page in this row
-   * group.
+   * Returns the paths of every column chunk in this row group whose dictionary page overlaps {@code
+   * [startOffset, endOffset)}.
    */
-  final boolean touchesDictionaryPage(long startOffset, long endOffset) {
+  final ImmutableSet<String> findDictionaryColumnsInRange(long startOffset, long endOffset) {
+    ImmutableSet.Builder<String> touchedColumns = ImmutableSet.builder();
     for (ParquetColumnChunk chunk : getColumnChunks().values()) {
       if (chunk.touchesDictionaryPage(startOffset, endOffset)) {
-        return true;
+        touchedColumns.add(chunk.getColumnPath());
       }
     }
-    return false;
+    return touchedColumns.build();
   }
 
   /** Returns the data-page byte range of the column chunk containing {@code position}, if any. */
@@ -97,24 +98,60 @@ abstract class ParquetRowGroup {
   }
 
   /**
-   * Returns the sorted, coalesced byte ranges of the requested columns present in this row group,
-   * merging touching ranges while the merged span stays within {@code maxBlockSizeBytes}.
+   * Returns the sorted, coalesced byte ranges of this row group: dictionary page ranges for {@code
+   * dictionaryColumns} and data ranges for {@code dataColumns} (data-page ranges for columns also
+   * in {@code dictionaryColumns}, or whole column chunks otherwise). Dictionary ranges and data
+   * ranges are coalesced separately within {@code maxBlockSizeBytes} so a small dictionary page is
+   * never merged into an adjacent data download.
    */
   final ImmutableList<Range<Long>> getCoalescedColumnRanges(
-      Set<String> columnPaths, long maxBlockSizeBytes) {
-    List<Range<Long>> columnRanges = new ArrayList<>();
-    for (String columnPath : columnPaths) {
-      getColumnChunk(columnPath).ifPresent(chunk -> columnRanges.add(chunk.getByteRange()));
+      Set<String> dataColumns, Set<String> dictionaryColumns, long maxBlockSizeBytes) {
+    List<Range<Long>> dictionaryRanges = collectDictionaryRanges(dictionaryColumns);
+    List<Range<Long>> dataRanges = collectDataRanges(dataColumns, dictionaryColumns);
+    List<Range<Long>> combinedRanges = new ArrayList<>();
+    combinedRanges.addAll(coalesceConnectedRanges(dictionaryRanges, maxBlockSizeBytes));
+    combinedRanges.addAll(coalesceConnectedRanges(dataRanges, maxBlockSizeBytes));
+    combinedRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    return ImmutableList.copyOf(combinedRanges);
+  }
+
+  private List<Range<Long>> collectDictionaryRanges(Set<String> dictionaryColumns) {
+    List<Range<Long>> ranges = new ArrayList<>();
+    for (String columnPath : dictionaryColumns) {
+      getColumnChunk(columnPath)
+          .flatMap(ParquetColumnChunk::getDictionaryPageRange)
+          .ifPresent(ranges::add);
     }
-    if (columnRanges.isEmpty()) {
-      return ImmutableList.of();
+    ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    return ranges;
+  }
+
+  private List<Range<Long>> collectDataRanges(
+      Set<String> dataColumns, Set<String> dictionaryColumns) {
+    List<Range<Long>> ranges = new ArrayList<>();
+    for (String columnPath : dataColumns) {
+      Optional<ParquetColumnChunk> maybeChunk = getColumnChunk(columnPath);
+      if (!maybeChunk.isPresent()) {
+        continue;
+      }
+      ParquetColumnChunk chunk = maybeChunk.get();
+      if (dictionaryColumns.contains(columnPath) && chunk.getDictionaryPageRange().isPresent()) {
+        if (chunk.getDataPageOffset() < chunk.getEndOffset()) {
+          ranges.add(chunk.getDataPageRange());
+        }
+      } else {
+        ranges.add(chunk.getByteRange());
+      }
     }
-    columnRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return coalesceConnectedRanges(columnRanges, maxBlockSizeBytes);
+    ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    return ranges;
   }
 
   private static ImmutableList<Range<Long>> coalesceConnectedRanges(
       List<Range<Long>> sortedRanges, long maxBlockSizeBytes) {
+    if (sortedRanges.isEmpty()) {
+      return ImmutableList.of();
+    }
     ImmutableList.Builder<Range<Long>> coalesced = ImmutableList.builder();
     Range<Long> current = sortedRanges.get(0);
     for (int i = 1; i < sortedRanges.size(); i++) {

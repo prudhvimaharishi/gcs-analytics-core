@@ -86,13 +86,55 @@ class SchemaAccessHistoryTest {
   }
 
   @Test
+  void getDictionaryColumns_unknownSchema_returnsEmpty() {
+    SchemaAccessHistory history = new SchemaAccessHistory();
+
+    var dictionaryColumns = history.getDictionaryColumns(SCHEMA_FINGERPRINT);
+
+    assertThat(dictionaryColumns).isEmpty();
+  }
+
+  @Test
+  void recordDictionaryAccess_singleColumn_isReturnedOnlyAsDictionaryColumn() {
+    SchemaAccessHistory history = new SchemaAccessHistory();
+
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
+
+    assertThat(history.getDictionaryColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+    assertThat(history.getDataColumns(SCHEMA_FINGERPRINT)).isEmpty();
+  }
+
+  @Test
+  void recordDataAccess_afterDictionaryAccess_retainsColumnInDictionaryColumns() {
+    SchemaAccessHistory history = new SchemaAccessHistory();
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
+
+    history.recordDataAccess(SCHEMA_FINGERPRINT, "status");
+
+    assertThat(history.getDictionaryColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+  }
+
+  @Test
+  void recordDictionaryAccess_afterDataAccess_recordsInBothSets() {
+    SchemaAccessHistory history = new SchemaAccessHistory();
+    history.recordDataAccess(SCHEMA_FINGERPRINT, "status");
+
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
+
+    assertThat(history.getDataColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+    assertThat(history.getDictionaryColumns(SCHEMA_FINGERPRINT)).containsExactly("status");
+  }
+
+  @Test
   void invalidateAll_discardsRecordedColumns() {
     SchemaAccessHistory history = new SchemaAccessHistory();
     history.recordDataAccess(SCHEMA_FINGERPRINT, "customer_id");
+    history.recordDictionaryAccess(SCHEMA_FINGERPRINT, "status");
 
     history.invalidateAll();
 
     assertThat(history.getDataColumns(SCHEMA_FINGERPRINT)).isEmpty();
+    assertThat(history.getDictionaryColumns(SCHEMA_FINGERPRINT)).isEmpty();
   }
 
   private static void recordColumnsOnce(SchemaAccessHistory history, String prefix, int count) {

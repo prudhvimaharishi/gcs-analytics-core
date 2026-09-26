@@ -330,6 +330,31 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
+  void serveFromCache_evictConsumedFalse_keepsExhaustedRangeForSubsequentVectoredStitch()
+      throws Exception {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+    registerCompleted(cache, itemId("object"), SECOND_RANGE_OFFSET, SECOND_RANGE);
+
+    int served =
+        cache.serveFromCache(
+            itemId("object"),
+            FIRST_RANGE_OFFSET,
+            ByteBuffer.allocate(FIRST_RANGE.length),
+            /* recordMiss= */ true,
+            /* evictConsumed= */ false);
+    ByteBuffer stitched =
+        cache
+            .copyIntoAsync(
+                itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES.length, ByteBuffer::allocate)
+            .get()
+            .get();
+
+    assertThat(served).isEqualTo(FIRST_RANGE.length);
+    assertThat(remainingBytes(stitched)).isEqualTo(COMBINED_RANGES);
+  }
+
+  @Test
   void copyInto_segmentExhausted_evictsSegment() {
     PrefetchBufferCache cache = newCache();
     registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
@@ -375,14 +400,19 @@ class PrefetchBufferCacheTest {
     registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
     int unusedHeadBytes =
         cache.serveFromCache(
-            itemId("object"), FIRST_RANGE_OFFSET, ByteBuffer.allocate(4), /* recordMiss= */ true);
+            itemId("object"),
+            FIRST_RANGE_OFFSET,
+            ByteBuffer.allocate(4),
+            /* recordMiss= */ true,
+            /* evictConsumed= */ false);
 
     int unusedAllBytes =
         cache.serveFromCache(
             itemId("object"),
             FIRST_RANGE_OFFSET,
             ByteBuffer.allocate(COMBINED_RANGES.length),
-            /* recordMiss= */ true);
+            /* recordMiss= */ true,
+            /* evictConsumed= */ true);
 
     assertThat(listener.getTotal(Metric.PREFETCH_BYTES_CONSUMED)).isEqualTo(COMBINED_RANGES.length);
   }

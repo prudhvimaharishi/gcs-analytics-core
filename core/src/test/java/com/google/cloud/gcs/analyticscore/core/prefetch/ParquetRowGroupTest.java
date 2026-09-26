@@ -114,17 +114,22 @@ public class ParquetRowGroupTest {
   }
 
   @Test
-  void touchesDictionaryPage_rangeOverlapsDictionaryPage_returnsTrue() {
-    ParquetRowGroup group = rowGroup(0, dictionaryEncodedColumnChunk("category", 150, 50, 170));
+  void findDictionaryColumnsInRange_returnsOnlyColumnsWhoseDictionaryPagesOverlap() {
+    ParquetRowGroup group =
+        rowGroup(
+            0,
+            columnChunk("id", 100, 50),
+            dictionaryEncodedColumnChunk("category", 150, 50, 170),
+            dictionaryEncodedColumnChunk("status", 200, 50, 220));
 
-    assertThat(group.touchesDictionaryPage(155, 165)).isTrue();
+    assertThat(group.findDictionaryColumnsInRange(155, 175)).containsExactly("category");
   }
 
   @Test
-  void touchesDictionaryPage_rangeOutsideDictionaryPages_returnsFalse() {
+  void findDictionaryColumnsInRange_rangeInDataPagesOnly_returnsEmpty() {
     ParquetRowGroup group = rowGroup(0, dictionaryEncodedColumnChunk("category", 150, 50, 170));
 
-    assertThat(group.touchesDictionaryPage(170, 190)).isFalse();
+    assertThat(group.findDictionaryColumnsInRange(170, 190)).isEmpty();
   }
 
   @Test
@@ -152,8 +157,44 @@ public class ParquetRowGroupTest {
 
     assertThat(
             group.getCoalescedColumnRanges(
-                ImmutableSet.of("value", "id", "category", "absent"), /* maxBlockSizeBytes= */ 500))
+                ImmutableSet.of("value", "id", "category", "absent"),
+                ImmutableSet.of(),
+                /* maxBlockSizeBytes= */ 500))
         .containsExactly(Range.closedOpen(100L, 200L), Range.closedOpen(250L, 300L))
+        .inOrder();
+  }
+
+  @Test
+  void getCoalescedColumnRanges_includesDictionaryPageForFilterOnlyColumnsWithoutMergingIntoData() {
+    ParquetRowGroup group =
+        rowGroup(
+            0,
+            columnChunk("id", 100, 50),
+            dictionaryEncodedColumnChunk("category", 150, 50, 170),
+            dictionaryEncodedColumnChunk("status", 250, 50, 270));
+
+    assertThat(
+            group.getCoalescedColumnRanges(
+                ImmutableSet.of("id"),
+                ImmutableSet.of("id", "category", "status"),
+                /* maxBlockSizeBytes= */ 500))
+        .containsExactly(
+            Range.closedOpen(100L, 150L),
+            Range.closedOpen(150L, 170L),
+            Range.closedOpen(250L, 270L))
+        .inOrder();
+  }
+
+  @Test
+  void getCoalescedColumnRanges_columnInBothDataAndDictionary_splitsDictionaryAndDataRanges() {
+    ParquetRowGroup group = rowGroup(0, dictionaryEncodedColumnChunk("category", 150, 50, 170));
+
+    assertThat(
+            group.getCoalescedColumnRanges(
+                ImmutableSet.of("category"),
+                ImmutableSet.of("category"),
+                /* maxBlockSizeBytes= */ 500))
+        .containsExactly(Range.closedOpen(150L, 170L), Range.closedOpen(170L, 200L))
         .inOrder();
   }
 
@@ -164,7 +205,7 @@ public class ParquetRowGroupTest {
 
     assertThat(
             group.getCoalescedColumnRanges(
-                ImmutableSet.of("id", "category"), /* maxBlockSizeBytes= */ 50))
+                ImmutableSet.of("id", "category"), ImmutableSet.of(), /* maxBlockSizeBytes= */ 50))
         .containsExactly(Range.closedOpen(100L, 150L), Range.closedOpen(150L, 200L))
         .inOrder();
   }
@@ -174,7 +215,8 @@ public class ParquetRowGroupTest {
     ParquetRowGroup group = rowGroup(0, columnChunk("id", 100, 50));
 
     assertThat(
-            group.getCoalescedColumnRanges(ImmutableSet.of("absent"), /* maxBlockSizeBytes= */ 500))
+            group.getCoalescedColumnRanges(
+                ImmutableSet.of("absent"), ImmutableSet.of(), /* maxBlockSizeBytes= */ 500))
         .isEmpty();
   }
 }

@@ -52,6 +52,13 @@ public interface FormatOptimizer {
   int read(long position, ByteBuffer dst, VectoredSeekableByteChannel delegate) throws IOException;
 
   /**
+   * Invoked after a read operation completes, whether served by an optimizer or the delegate
+   * channel.
+   */
+  default void afterRead(long position, int bytesRead, VectoredSeekableByteChannel delegate)
+      throws IOException {}
+
+  /**
    * Intercepts vectored read operations.
    *
    * @param ranges The list of ranges requested.
@@ -66,6 +73,20 @@ public interface FormatOptimizer {
       throws IOException {
     return ranges;
   }
+
+  /**
+   * Invoked once the ranges of a vectored request have been dispatched, whether they were served
+   * from the optimizer or handed to the channel.
+   *
+   * <p>Speculative work belongs here rather than in {@link #readVectored(List, IntFunction,
+   * VectoredSeekableByteChannel)}: both compete for the same thread pool, and a prefetch queued
+   * first delays the read the engine is actually waiting on.
+   *
+   * @param ranges the ranges the engine requested
+   * @param delegate the channel serving reads this optimizer does not satisfy
+   */
+  default void afterReadVectored(List<GcsObjectRange> ranges, VectoredSeekableByteChannel delegate)
+      throws IOException {}
 
   /** Invoked when the channel is closed. */
   default void onClose() throws IOException {}

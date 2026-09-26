@@ -99,6 +99,11 @@ public class SmartReadChannel implements VectoredSeekableByteChannel {
       int bytesRead = optimizer.read(position, dst, delegate);
       if (bytesRead > 0) {
         delegate.position(position + bytesRead);
+        for (FormatOptimizer otherOptimizer : optimizers) {
+          if (otherOptimizer != optimizer) {
+            otherOptimizer.afterRead(position, bytesRead, delegate);
+          }
+        }
         return bytesRead;
       }
       if (bytesRead < 0) {
@@ -108,7 +113,13 @@ public class SmartReadChannel implements VectoredSeekableByteChannel {
         delegate.position(position);
       }
     }
-    return delegate.read(dst);
+    int bytesRead = delegate.read(dst);
+    if (bytesRead > 0) {
+      for (FormatOptimizer optimizer : optimizers) {
+        optimizer.afterRead(position, bytesRead, delegate);
+      }
+    }
+    return bytesRead;
   }
 
   @Override
@@ -116,12 +127,17 @@ public class SmartReadChannel implements VectoredSeekableByteChannel {
       throws IOException {
     List<GcsObjectRange> remainingRanges = ranges;
     for (FormatOptimizer optimizer : optimizers) {
-      remainingRanges = optimizer.readVectored(remainingRanges, allocate, delegate);
       if (remainingRanges.isEmpty()) {
-        return;
+        break;
       }
+      remainingRanges = optimizer.readVectored(remainingRanges, allocate, delegate);
     }
-    delegate.readVectored(remainingRanges, allocate);
+    if (!remainingRanges.isEmpty()) {
+      delegate.readVectored(remainingRanges, allocate);
+    }
+    for (FormatOptimizer optimizer : optimizers) {
+      optimizer.afterReadVectored(ranges, delegate);
+    }
   }
 
   @Override

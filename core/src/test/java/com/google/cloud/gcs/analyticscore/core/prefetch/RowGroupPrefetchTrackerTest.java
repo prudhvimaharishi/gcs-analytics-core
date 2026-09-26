@@ -76,25 +76,31 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void onSingleRead_dictionaryPageReadWithLearnedColumns_schedulesCoalescedRanges() {
+  void onSingleRead_dictionaryPageReadWithLearnedColumns_schedulesLaterDictAndSplitDataRanges() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "category");
     List<Range<Long>> scheduledRanges = new ArrayList<>();
 
     tracker.onSingleRead(150, 8, scheduledRanges::addAll);
 
-    assertThat(scheduledRanges).containsExactly(Range.closedOpen(100L, 200L));
+    assertThat(scheduledRanges)
+        .containsExactly(
+            Range.closedOpen(450L, 470L),
+            Range.closedOpen(100L, 150L),
+            Range.closedOpen(150L, 170L),
+            Range.closedOpen(170L, 200L))
+        .inOrder();
   }
 
   @Test
-  void onSingleRead_dictionaryPageReadTwiceAfterSuccess_schedulesOnlyOnce() {
+  void onSingleRead_dictionaryPageReadTwiceAfterSuccess_schedulesNothingOnSecondRead() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    tracker.onSingleRead(150, 8, ranges -> true);
     List<Range<Long>> scheduledRanges = new ArrayList<>();
-    tracker.onSingleRead(150, 8, scheduledRanges::addAll);
 
     tracker.onSingleRead(158, 8, scheduledRanges::addAll);
 
-    assertThat(scheduledRanges).hasSize(1);
+    assertThat(scheduledRanges).isEmpty();
   }
 
   @Test
@@ -105,12 +111,32 @@ class RowGroupPrefetchTrackerTest {
 
     tracker.onSingleRead(158, 8, scheduledRanges::addAll);
 
-    assertThat(scheduledRanges).containsExactly(Range.closedOpen(100L, 150L));
+    assertThat(scheduledRanges)
+        .containsExactly(Range.closedOpen(450L, 470L), Range.closedOpen(100L, 150L))
+        .inOrder();
   }
 
   @Test
-  void onSingleRead_dictionaryPageReadAfterDataPageInSameRowGroup_doesNotSchedule() {
+  void onSingleRead_chunkReadFromDictionaryPage_doesNotRecordDictionaryColumn() {
+    tracker.onSingleRead(150, 50, ranges -> true);
+
+    assertThat(accessHistory.getDictionaryColumns(SCHEMA_FINGERPRINT)).isEmpty();
+  }
+
+  @Test
+  void onSingleRead_dictionaryPageReadBeforeChunkRead_keepsDictionaryColumn() {
+    tracker.onSingleRead(150, 20, ranges -> true);
+
+    tracker.onSingleRead(150, 50, ranges -> true);
+
+    assertThat(accessHistory.getDictionaryColumns(SCHEMA_FINGERPRINT)).containsExactly("category");
+  }
+
+  @Test
+  void onSingleRead_dictionaryPageReadAfterDataPageInSameRowGroup_doesNotScheduleDataColumns() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
+    tracker.onSingleRead(900, 16, ranges -> true);
     tracker.onSingleRead(100, 16, ranges -> true);
     List<Range<Long>> scheduledRanges = new ArrayList<>();
 
@@ -120,8 +146,34 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void onSingleRead_positionOutsideAllRowGroups_schedulesNothing() {
+  void
+      onSingleRead_dictionaryPageInLaterRowGroupWhileEarlierPrefetchPending_skipsLaterDataPrefetch() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
+    tracker.onSingleRead(900, 16, ranges -> true);
+    tracker.onSingleRead(150, 8, ranges -> true);
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.onSingleRead(450, 8, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).isEmpty();
+  }
+
+  @Test
+  void
+      onSingleRead_dictionaryPageInLaterRowGroupWhenFirstRowGroupSkipped_schedulesLaterDataColumns() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
+    tracker.onSingleRead(900, 16, ranges -> true);
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.onSingleRead(450, 8, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).containsExactly(Range.closedOpen(400L, 450L));
+  }
+
+  @Test
+  void onSingleRead_positionOutsideAllRowGroupsWithoutLearnedColumns_schedulesNothing() {
     List<Range<Long>> scheduledRanges = new ArrayList<>();
 
     tracker.onSingleRead(900, 16, scheduledRanges::addAll);
@@ -130,7 +182,64 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void onVectoredRead_rangeInsideRowGroup_recordsDataColumn() {
+  void onSingleRead_positionOutsideAllRowGroupsWithLearnedDataColumn_prefetchesFirstRowGroup() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.onSingleRead(900, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).containsExactly(Range.closedOpen(100L, 150L));
+  }
+
+  @Test
+  void
+      onSingleRead_positionOutsideAllRowGroupsWithLearnedDictionaryColumn_prefetchesDictionaries() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.onSingleRead(900, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges)
+        .containsExactly(Range.closedOpen(150L, 170L), Range.closedOpen(450L, 470L))
+        .inOrder();
+  }
+
+  @Test
+  void
+      onSingleRead_singleRowGroupWithLearnedDataAndDictionaryColumn_splitsDictionaryAndDataRanges() {
+    ParquetFileLayout singleRowGroupLayout =
+        layout(rowGroup(0, dictionaryEncodedColumnChunk("category", 150, 50, 170)));
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "category");
+    accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
+    RowGroupPrefetchTracker singleRowGroupTracker =
+        new RowGroupPrefetchTracker(singleRowGroupLayout, accessHistory, MAX_BLOCK_SIZE_BYTES);
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    singleRowGroupTracker.onSingleRead(900, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges)
+        .containsExactly(
+            Range.closedOpen(150L, 170L),
+            Range.closedOpen(150L, 170L),
+            Range.closedOpen(170L, 200L))
+        .inOrder();
+  }
+
+  @Test
+  void onSingleRead_dataPageRead_prefetchesRemainingCurrentRowGroupAndNextRowGroupColumns() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "value");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.onSingleRead(100, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges)
+        .containsExactly(Range.closedOpen(250L, 300L), Range.closedOpen(400L, 450L))
+        .inOrder();
+  }
+
+  @Test
+  void onVectoredRead_rangeInsideRowGroup_recordsDataColumnAndNextRowGroupTarget() {
     GcsObjectRange range =
         GcsObjectRange.builder()
             .setOffset(100)
@@ -141,6 +250,16 @@ class RowGroupPrefetchTrackerTest {
     tracker.onVectoredRead(ImmutableList.of(range));
 
     assertThat(accessHistory.getDataColumns(SCHEMA_FINGERPRINT)).containsExactly("id");
+    assertThat(tracker.pollPendingNextRowGroup(ranges -> true)).hasValue(1);
+  }
+
+  @Test
+  void pollPendingNextRowGroup_withoutPriorDataRead_prefetchesFirstRowGroupAndReturnsEmpty() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    assertThat(tracker.pollPendingNextRowGroup(scheduledRanges::addAll)).isEmpty();
+    assertThat(scheduledRanges).containsExactly(Range.closedOpen(100L, 150L));
   }
 
   @Test

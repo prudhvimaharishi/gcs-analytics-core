@@ -28,12 +28,14 @@ import com.google.cloud.gcs.analyticscore.core.optimizer.FormatOptimizer;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.OptionalInt;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
 
 /**
- * A {@link FormatOptimizer} that speculatively fetches exact Parquet column chunks before the
- * engine asks for them.
+ * A {@link FormatOptimizer} that speculatively fetches exact Parquet column chunks and dictionary
+ * pages before the engine asks for them.
  *
  * <p>Footer I/O is owned exclusively by {@code GcsFooterOptimizer}; this optimizer consumes the
  * footer published in {@link AnalyticsCacheManager}. If no footer is present in the global cache,
@@ -44,7 +46,9 @@ import javax.annotation.Nullable;
  * merged span stays within {@link GcsPrefetchOptions#getBlockSizeBytes()}; ranges separated by a
  * gap are fetched separately.
  *
- * <p>Instances are bound to a single stream and its reader thread.
+ * <p>Instances are bound to a single stream and its reader thread. Deferred row-group speculation
+ * and {@link #onClose()} synchronize on the instance so that no speculation is scheduled after the
+ * stream closes.
  */
 public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
@@ -58,6 +62,8 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private AnalyticsCacheManager cacheManager;
   private PrefetchBufferCache bufferCache;
   private PrefetchScheduler scheduler;
+  private long fileSize = -1;
+  private volatile boolean closed;
   @Nullable private RowGroupPrefetchTracker tracker;
 
   public PredictivePrefetchOptimizer(GcsPrefetchOptions prefetchOptions) {
@@ -87,23 +93,44 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   @Override
   public int read(long position, ByteBuffer dst, VectoredSeekableByteChannel source)
       throws IOException {
-    long fileSize = source.size();
-    int requestedLength = dst.remaining();
+    if (fileSize < 0) {
+      fileSize = source.size();
+    }
     ensureTrackerLoaded();
-    int servedBytes = bufferCache.serveFromCache(itemId, position, dst, tracker != null);
-    if (tracker != null) {
-      int readLength = servedBytes > 0 ? servedBytes : requestedLength;
+    boolean evictConsumed = tracker == null || tracker.touchesDataPages(position, dst.remaining());
+    int servedBytes =
+        bufferCache.serveFromCache(itemId, position, dst, tracker != null, evictConsumed);
+    // A miss is observed in afterRead once the foreground read completes, so speculation never
+    // competes with the read the caller is blocked on.
+    if (tracker != null && servedBytes > 0) {
       tracker.onSingleRead(
-          position, readLength, ranges -> scheduler.schedule(source, ranges, fileSize));
+          position, servedBytes, ranges -> scheduler.schedule(source, ranges, fileSize));
     }
     return servedBytes;
+  }
+
+  @Override
+  public void afterRead(long position, int bytesRead, VectoredSeekableByteChannel source)
+      throws IOException {
+    if (fileSize < 0) {
+      fileSize = source.size();
+    }
+    ensureTrackerLoaded();
+    if (tracker != null) {
+      tracker.onSingleRead(
+          position, bytesRead, ranges -> scheduler.schedule(source, ranges, fileSize));
+    }
   }
 
   @Override
   public List<GcsObjectRange> readVectored(
       List<GcsObjectRange> ranges,
       IntFunction<ByteBuffer> allocate,
-      VectoredSeekableByteChannel source) {
+      VectoredSeekableByteChannel source)
+      throws IOException {
+    if (fileSize < 0) {
+      fileSize = source.size();
+    }
     ensureTrackerLoaded();
     List<GcsObjectRange> unservedRanges =
         bufferCache.serveVectoredFromCache(itemId, ranges, allocate, source, tracker != null);
@@ -114,9 +141,45 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   }
 
   @Override
-  public void onClose() {
+  public void afterReadVectored(List<GcsObjectRange> ranges, VectoredSeekableByteChannel source) {
+    ensureTrackerLoaded();
+    if (tracker == null) {
+      return;
+    }
+    OptionalInt targetRowGroup =
+        tracker.pollPendingNextRowGroup(
+            toSchedule -> scheduler.schedule(source, toSchedule, fileSize));
+    if (!targetRowGroup.isPresent()) {
+      return;
+    }
+    int targetIndex = targetRowGroup.getAsInt();
+    CompletableFuture<?>[] rangeFutures =
+        ranges.stream()
+            .map(GcsObjectRange::getByteBufferFuture)
+            .toArray(CompletableFuture<?>[]::new);
+    CompletableFuture<Void> unused =
+        CompletableFuture.allOf(rangeFutures)
+            .whenComplete(
+                (result, error) -> {
+                  if (error == null) {
+                    prefetchRowGroupIfOpen(source, targetIndex);
+                  }
+                });
+  }
+
+  @Override
+  public synchronized void onClose() {
+    closed = true;
     if (scheduler != null) {
       scheduler.close();
+    }
+  }
+
+  private synchronized void prefetchRowGroupIfOpen(
+      VectoredSeekableByteChannel source, int rowGroupIndex) {
+    if (!closed && tracker != null) {
+      tracker.prefetchRowGroup(
+          rowGroupIndex, ranges -> scheduler.schedule(source, ranges, fileSize));
     }
   }
 
