@@ -248,6 +248,70 @@ class PrefetchSchedulerTest {
   }
 
   @Test
+  void cancelRangeWindow_pendingRequestInsideWindow_cancelsTheRequest() {
+    channel.deferVectoredCompletion();
+    schedule(RANGE_OFFSET);
+
+    scheduler.cancelRangeWindow(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH);
+
+    assertThat(channel.getRequestedRanges().get(0).getByteBufferFuture().isCancelled()).isTrue();
+  }
+
+  @Test
+  void cancelRangeWindow_pendingRequestInsideWindow_leavesTheRangeUncached() {
+    channel.deferVectoredCompletion();
+    schedule(RANGE_OFFSET);
+
+    scheduler.cancelRangeWindow(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH);
+
+    assertThat(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, 1)).isEmpty();
+  }
+
+  @Test
+  void cancelRangeWindow_requestOutsideWindow_leavesTheRequestRunning() {
+    channel.deferVectoredCompletion();
+    schedule(RANGE_OFFSET);
+
+    scheduler.cancelRangeWindow(0, RANGE_OFFSET);
+
+    assertThat(channel.getRequestedRanges().get(0).getByteBufferFuture().isCancelled()).isFalse();
+  }
+
+  @Test
+  void cancelRangeWindow_afterRangePromoted_doesNotCancelPromotedRequest() {
+    channel.deferVectoredCompletion();
+    schedule(RANGE_OFFSET);
+    bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH).get().promote();
+
+    scheduler.cancelRangeWindow(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH);
+
+    assertThat(channel.getRequestedRanges().get(0).getByteBufferFuture().isCancelled()).isFalse();
+  }
+
+  @Test
+  void cancelRangeWindow_rangeRegisteredByAnotherScheduler_keepsRange() {
+    try (PrefetchScheduler otherScheduler = new PrefetchScheduler(ITEM_ID, bufferCache)) {
+      otherScheduler.schedule(
+          channel,
+          ImmutableList.of(Range.closedOpen(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH)),
+          CONTENT_LENGTH);
+
+      scheduler.cancelRangeWindow(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH);
+
+      assertThat(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH)).isPresent();
+    }
+  }
+
+  @Test
+  void cancelRangeWindow_completedRangeInsideWindow_evictsRange() {
+    schedule(RANGE_OFFSET);
+
+    scheduler.cancelRangeWindow(RANGE_OFFSET, RANGE_OFFSET + RANGE_LENGTH);
+
+    assertThat(bufferCache.getRangeCovering(ITEM_ID, RANGE_OFFSET, RANGE_LENGTH)).isEmpty();
+  }
+
+  @Test
   void close_anotherSchedulerStillOpen_keepsCompletedRange() {
     try (PrefetchScheduler otherScheduler = new PrefetchScheduler(ITEM_ID, bufferCache)) {
       otherScheduler.schedule(

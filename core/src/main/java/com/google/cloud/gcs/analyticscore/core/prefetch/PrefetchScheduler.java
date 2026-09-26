@@ -28,9 +28,11 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 
 /**
  * Schedules and cancels speculative range requests for a single open stream against {@link
@@ -45,8 +47,10 @@ final class PrefetchScheduler implements AutoCloseable {
   private final GcsItemId itemId;
   private final PrefetchBufferCache bufferCache;
   private final PrefetchBufferCache.RegisteredStream registeredStream;
-  private final ConcurrentHashMap<Long, GcsObjectRange> inFlightRequests =
-      new ConcurrentHashMap<>();
+  private final ConcurrentSkipListMap<Long, GcsObjectRange> inFlightRequests =
+      new ConcurrentSkipListMap<>();
+  private final ConcurrentSkipListMap<Long, CompletableFuture<ByteBuffer>> registeredRanges =
+      new ConcurrentSkipListMap<>();
 
   PrefetchScheduler(GcsItemId itemId, PrefetchBufferCache bufferCache) {
     this.itemId = checkNotNull(itemId, "itemId cannot be null");
@@ -101,6 +105,7 @@ final class PrefetchScheduler implements AutoCloseable {
       return Optional.empty();
     }
     inFlightRequests.put(startOffset, objectRange);
+    registeredRanges.put(startOffset, fetchFuture);
     CompletableFuture<ByteBuffer> unused =
         fetchFuture.whenComplete((data, error) -> inFlightRequests.remove(startOffset));
     return Optional.of(objectRange);
@@ -118,6 +123,29 @@ final class PrefetchScheduler implements AutoCloseable {
     }
     return rangesToFetch.stream()
         .noneMatch(range -> range.getByteBufferFuture().isCompletedExceptionally());
+  }
+
+  /**
+   * Cancels in-flight requests and evicts cached ranges that this scheduler registered inside
+   * {@code [startOffset, endOffset)}, leaving ranges registered by other streams untouched.
+   */
+  void cancelRangeWindow(long startOffset, long endOffset) {
+    NavigableMap<Long, GcsObjectRange> window =
+        inFlightRequests.subMap(startOffset, true, endOffset, false);
+    for (GcsObjectRange objectRange : window.values()) {
+      objectRange.getByteBufferFuture().cancel(/* mayInterruptIfRunning= */ false);
+    }
+    window.clear();
+    evictRegisteredRanges(startOffset, endOffset);
+  }
+
+  private void evictRegisteredRanges(long startOffset, long endOffset) {
+    NavigableMap<Long, CompletableFuture<ByteBuffer>> window =
+        registeredRanges.subMap(startOffset, true, endOffset, false);
+    for (Map.Entry<Long, CompletableFuture<ByteBuffer>> entry : window.entrySet()) {
+      bufferCache.evictRange(itemId, entry.getKey(), entry.getValue());
+    }
+    window.clear();
   }
 
   /** Cancels every outstanding speculative request. */

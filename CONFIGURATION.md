@@ -34,6 +34,18 @@ These settings control how aggressively the library prefetches and caches metada
 | `analytics-core.small-file.cache.enabled` | Controls whether the small object cache is enabled. | `false` |
 | `analytics-core.small-file.cache.max-size-bytes` | The maximum capacity (in bytes) to hold in the small object cache. | `209715200` (200 MB) |
 
+### Predictive Prefetching
+
+These settings control the predictive prefetcher, which learns the column access pattern of a query and speculatively fetches the bytes the engine is about to request. Prefetched bytes are held in an in-memory buffer cache that is bounded by total size and expires after a period of inactivity.
+
+| Property | Type | Description | Default Value |
+| :--- | :--- | :--- | :--- |
+| `analytics-core.prefetch.enabled` | Boolean | Controls whether predictive prefetching is enabled. Enabling it also enables the footer cache, which prefetching reads the Parquet layout from. | `false` |
+| `analytics-core.prefetch.dictionary-trigger` | Enum | Dictionary page read that triggers prefetching a row group's data pages. `FIRST_DICT_READ` prefetches once any learned filter column's dictionary in the row group is read; `LAST_DICT_READ` waits until all of them are read. Values are case-insensitive and hyphens are accepted. | `LAST_DICT_READ` |
+| `analytics-core.prefetch.buffer.cache.max-size-bytes` | Long | The maximum total capacity (in bytes) of the prefetch buffer cache. | `2147483648` (2 GB) |
+| `analytics-core.prefetch.buffer.cache.ttl-seconds` | Long | How long (in seconds) prefetched bytes are retained in the buffer cache after it was last read or written. | `60` |
+| `analytics-core.prefetch.block.size-bytes` | Integer | The maximum size (in bytes) of a single prefetch request. Adjacent column ranges are merged only while the merged request stays within this size. | `8388608` (8 MB) |
+
 ### Read Performance and I/O Tuning
 
 These parameters fine-tune the low-level data streaming behavior. They allow you to optimize thread concurrency, heuristic file access patterns, and vectored I/O merging to maximize data throughput against GCS.

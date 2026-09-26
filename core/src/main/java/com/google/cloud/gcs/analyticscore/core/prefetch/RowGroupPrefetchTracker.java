@@ -19,18 +19,20 @@ package com.google.cloud.gcs.analyticscore.core.prefetch;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.DictionaryTrigger;
 import com.google.cloud.gcs.analyticscore.client.SchemaAccessHistory;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import javax.annotation.Nullable;
 
@@ -41,22 +43,32 @@ import javax.annotation.Nullable;
  */
 final class RowGroupPrefetchTracker {
 
+  private static final long SPLIT_BOUNDARY_ROW_GROUP_BYTES = 64L * 1024 * 1024;
+
   private final ParquetFileLayout layout;
   private final SchemaAccessHistory accessHistory;
   private final long maxBlockSizeBytes;
+  private final DictionaryTrigger dictionaryTrigger;
+  private final BiConsumer<Long, Long> cancelRangeWindow;
+  private final RowGroupFilterTracker filterTracker = new RowGroupFilterTracker();
   private final Set<Integer> prefetchedRowGroups = ConcurrentHashMap.newKeySet();
-  private final Set<Integer> rowGroupsWithDictionaryRead = new HashSet<>();
   private ImmutableSet<String> prefetchedDictionaryColumns = ImmutableSet.of();
   private boolean firstRowGroupPrefetched;
+  private boolean outcomeRecorded;
   private int pendingSpeculationRowGroupIndex = -1;
-  private int lastDataReadIndex = -1;
   @Nullable private Range<Long> lastObservedDataPageRange;
 
   RowGroupPrefetchTracker(
-      ParquetFileLayout layout, SchemaAccessHistory accessHistory, long maxBlockSizeBytes) {
+      ParquetFileLayout layout,
+      SchemaAccessHistory accessHistory,
+      long maxBlockSizeBytes,
+      DictionaryTrigger dictionaryTrigger,
+      BiConsumer<Long, Long> cancelRangeWindow) {
     this.layout = checkNotNull(layout, "layout cannot be null");
     this.accessHistory = checkNotNull(accessHistory, "accessHistory cannot be null");
     this.maxBlockSizeBytes = maxBlockSizeBytes;
+    this.dictionaryTrigger = checkNotNull(dictionaryTrigger, "dictionaryTrigger cannot be null");
+    this.cancelRangeWindow = checkNotNull(cancelRangeWindow, "cancelRangeWindow cannot be null");
   }
 
   /**
@@ -95,12 +107,15 @@ final class RowGroupPrefetchTracker {
   }
 
   /**
-   * Records the columns touched by a vectored read and remembers the next row group to speculate
-   * once the foreground read completes.
+   * Records the columns touched by a vectored read in file order, so that a later row group in the
+   * same call cannot mark an earlier one as skipped, and remembers the next surviving row group to
+   * speculate once the foreground read completes.
    */
   void onVectoredRead(List<GcsObjectRange> ranges) {
     int lastRowGroupIndex = -1;
-    for (GcsObjectRange range : ranges) {
+    List<GcsObjectRange> rangesInFileOrder = new ArrayList<>(ranges);
+    rangesInFileOrder.sort(Comparator.comparingLong(GcsObjectRange::getOffset));
+    for (GcsObjectRange range : rangesInFileOrder) {
       Optional<ParquetRowGroup> maybeRowGroup = layout.findRowGroupAt(range.getOffset());
       if (maybeRowGroup.isPresent()
           && recordColumnsInRange(
@@ -112,7 +127,13 @@ final class RowGroupPrefetchTracker {
       return;
     }
     firstRowGroupPrefetched = true;
-    pendingSpeculationRowGroupIndex = lastRowGroupIndex + 1;
+    pendingSpeculationRowGroupIndex =
+        filterTracker
+            .findNextSurvivingRowGroup(
+                layout,
+                lastRowGroupIndex,
+                accessHistory.getDictionaryColumns(layout.getSchemaFingerprint()))
+            .orElse(-1);
   }
 
   /**
@@ -148,6 +169,26 @@ final class RowGroupPrefetchTracker {
     }
   }
 
+  /**
+   * Records how the file was rejected if the stream closes without reading any data page, for the
+   * read-rate gates of the schema.
+   */
+  void recordOutcomeOnClose() {
+    if (filterTracker.getDictionaryTouchedCount() > 0) {
+      recordOutcomeOnce(SchemaAccessHistory.FileFilterOutcome.DICT_REJECTED);
+    } else {
+      recordOutcomeOnce(SchemaAccessHistory.FileFilterOutcome.FOOTER_REJECTED);
+    }
+  }
+
+  private void recordOutcomeOnce(SchemaAccessHistory.FileFilterOutcome outcome) {
+    if (outcomeRecorded) {
+      return;
+    }
+    outcomeRecorded = true;
+    accessHistory.recordFileOutcome(layout.getSchemaFingerprint(), outcome);
+  }
+
   private boolean recordColumnsInRange(ParquetRowGroup rowGroup, long startOffset, long endOffset) {
     int fingerprint = layout.getSchemaFingerprint();
     ImmutableSet<String> touchedDataColumns =
@@ -158,12 +199,10 @@ final class RowGroupPrefetchTracker {
     for (String columnPath :
         findDictionaryOnlyColumns(rowGroup, startOffset, endOffset, touchedDataColumns)) {
       accessHistory.recordDictionaryAccess(fingerprint, columnPath);
-      if (rowGroup.getIndex() > lastDataReadIndex) {
-        rowGroupsWithDictionaryRead.add(rowGroup.getIndex());
-      }
+      filterTracker.recordDictionaryRead(rowGroup.getIndex(), columnPath);
     }
     if (!touchedDataColumns.isEmpty()) {
-      lastDataReadIndex = Math.max(lastDataReadIndex, rowGroup.getIndex());
+      onDataPageRead(rowGroup.getIndex());
       return true;
     }
     return false;
@@ -182,18 +221,36 @@ final class RowGroupPrefetchTracker {
         rowGroup.findDictionaryColumnsInRange(startOffset, endOffset), touchedDataColumns);
   }
 
+  private void onDataPageRead(int rowGroupIndex) {
+    recordOutcomeOnce(SchemaAccessHistory.FileFilterOutcome.SURVIVED);
+    int cleanupStartIndex = Math.max(0, filterTracker.getLastDataReadIndex());
+    filterTracker.recordDataRead(rowGroupIndex);
+    if (rowGroupIndex > cleanupStartIndex) {
+      cancelRangeWindow.accept(
+          layout.getRowGroups().get(cleanupStartIndex).getStartOffset(),
+          layout.getRowGroups().get(rowGroupIndex).getStartOffset());
+    }
+  }
+
   private void prefetchFirstRowGroupOnce(Predicate<ImmutableList<Range<Long>>> scheduleRanges) {
     if (firstRowGroupPrefetched) {
       return;
     }
     firstRowGroupPrefetched = true;
-    ImmutableSet<String> dictionaryColumns =
-        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    int fingerprint = layout.getSchemaFingerprint();
+    if (!accessHistory.shouldSpeculateAtFooter(fingerprint)) {
+      return;
+    }
+    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
     if (!dictionaryColumns.isEmpty()) {
       speculateDictionaryPagesFrom(0, scheduleRanges);
-      if (layout.getRowGroups().size() == 1) {
+      if (layout.getRowGroups().size() == 1
+          && accessHistory.shouldSpeculateOnDictionary(fingerprint)) {
         prefetchRowGroup(0, scheduleRanges);
       }
+      return;
+    }
+    if (isSplitMultiRowGroupFile()) {
       return;
     }
     prefetchRowGroup(0, scheduleRanges);
@@ -202,25 +259,39 @@ final class RowGroupPrefetchTracker {
   private void onDictionaryPageRead(
       ParquetRowGroup rowGroup, Predicate<ImmutableList<Range<Long>>> scheduleRanges) {
     int rowGroupIndex = rowGroup.getIndex();
-    ImmutableSet<String> dictionaryColumns =
-        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    int fingerprint = layout.getSchemaFingerprint();
+    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
     if (!prefetchedDictionaryColumns.containsAll(dictionaryColumns)) {
-      speculateDictionaryPagesFrom(rowGroupIndex + 1, scheduleRanges);
+      boolean deferredAtFooter = !accessHistory.shouldSpeculateAtFooter(fingerprint);
+      speculateDictionaryPagesFrom(
+          deferredAtFooter ? rowGroupIndex : rowGroupIndex + 1, scheduleRanges);
     }
     if (!prefetchedRowGroups.contains(rowGroupIndex)
-        && rowGroupsWithDictionaryRead.contains(rowGroupIndex)
+        && accessHistory.shouldSpeculateOnDictionary(fingerprint)
+        && isDictionaryTriggerMet(rowGroupIndex, dictionaryColumns)
         && !hasPendingDataPrefetchBefore(rowGroupIndex)) {
       prefetchRowGroup(rowGroupIndex, scheduleRanges);
     }
   }
 
   private boolean hasPendingDataPrefetchBefore(int rowGroupIndex) {
+    int lastDataReadIndex = filterTracker.getLastDataReadIndex();
     for (int prefetchedIndex : prefetchedRowGroups) {
       if (prefetchedIndex > lastDataReadIndex && prefetchedIndex < rowGroupIndex) {
         return true;
       }
     }
     return false;
+  }
+
+  private boolean isDictionaryTriggerMet(int rowGroupIndex, Set<String> dictionaryColumns) {
+    switch (dictionaryTrigger) {
+      case FIRST_DICT_READ:
+        return filterTracker.hasReadAnyDictionary(rowGroupIndex, dictionaryColumns);
+      case LAST_DICT_READ:
+        return filterTracker.hasReadAllDictionaries(layout, rowGroupIndex, dictionaryColumns);
+    }
+    throw new IllegalStateException("Unknown dictionary trigger: " + dictionaryTrigger);
   }
 
   private void speculateDictionaryPagesFrom(
@@ -233,7 +304,11 @@ final class RowGroupPrefetchTracker {
     ImmutableList.Builder<Range<Long>> dictionaryRanges = ImmutableList.builder();
     int rowGroupCount = layout.getRowGroups().size();
     for (int index = startRowGroupIndex; index < rowGroupCount; index++) {
-      dictionaryRanges.addAll(collectRowGroupRanges(index, ImmutableSet.of(), dictionaryColumns));
+      dictionaryRanges.addAll(
+          collectRowGroupRanges(
+              index,
+              ImmutableSet.of(),
+              Sets.difference(dictionaryColumns, filterTracker.getDictionaryColumnsRead(index))));
     }
     ImmutableList<Range<Long>> ranges = dictionaryRanges.build();
     if (ranges.isEmpty() || scheduleRanges.test(ranges)) {
@@ -256,9 +331,10 @@ final class RowGroupPrefetchTracker {
     if (!ranges.isEmpty()) {
       boolean unused = scheduleRanges.test(ImmutableList.copyOf(ranges));
     }
-    int nextIndex = rowGroupIndex + 1;
-    if (shouldSpeculateNextRowGroup(nextIndex)) {
-      prefetchRowGroup(nextIndex, scheduleRanges);
+    OptionalInt nextIndex =
+        filterTracker.findNextSurvivingRowGroup(layout, rowGroupIndex, dictionaryColumns);
+    if (nextIndex.isPresent() && shouldSpeculateNextRowGroup(nextIndex.getAsInt())) {
+      prefetchRowGroup(nextIndex.getAsInt(), scheduleRanges);
     }
   }
 
@@ -274,7 +350,16 @@ final class RowGroupPrefetchTracker {
   }
 
   private boolean shouldSpeculateNextRowGroup(int targetIndex) {
-    return targetIndex >= 0 && targetIndex < layout.getRowGroups().size();
+    return targetIndex >= 0
+        && targetIndex < layout.getRowGroups().size()
+        && !isSplitMultiRowGroupFile();
+  }
+
+  private boolean isSplitMultiRowGroupFile() {
+    List<ParquetRowGroup> rowGroups = layout.getRowGroups();
+    return rowGroups.size() > 1
+        && rowGroups.get(0).getEndOffset() - rowGroups.get(0).getStartOffset()
+            >= SPLIT_BOUNDARY_ROW_GROUP_BYTES;
   }
 
   private boolean isWithinLastDataPageRange(long position, int length) {

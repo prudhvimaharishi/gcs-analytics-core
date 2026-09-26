@@ -170,6 +170,9 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   @Override
   public synchronized void onClose() {
     closed = true;
+    if (tracker != null) {
+      tracker.recordOutcomeOnClose();
+    }
     if (scheduler != null) {
       scheduler.close();
     }
@@ -196,6 +199,8 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
                     new RowGroupPrefetchTracker(
                         layout,
                         cacheManager.getSchemaAccessHistory().get(),
-                        prefetchOptions.getBlockSizeBytes()));
+                        prefetchOptions.getBlockSizeBytes(),
+                        prefetchOptions.getDictionaryTrigger(),
+                        scheduler::cancelRangeWindow));
   }
 }

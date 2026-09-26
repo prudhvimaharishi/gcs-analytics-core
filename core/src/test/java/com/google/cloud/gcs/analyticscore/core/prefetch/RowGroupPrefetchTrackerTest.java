@@ -23,7 +23,9 @@ import static com.google.cloud.gcs.analyticscore.core.prefetch.ParquetLayoutFixt
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.DictionaryTrigger;
 import com.google.cloud.gcs.analyticscore.client.SchemaAccessHistory;
+import com.google.cloud.gcs.analyticscore.client.SchemaAccessHistory.FileFilterOutcome;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Range;
 import java.util.ArrayList;
@@ -36,9 +38,11 @@ class RowGroupPrefetchTrackerTest {
 
   private static final int SCHEMA_FINGERPRINT = 7;
   private static final long MAX_BLOCK_SIZE_BYTES = 1024;
+  private static final long SPLIT_SIZE_BYTES = 64L * 1024 * 1024;
 
   private ParquetFileLayout fileLayout;
   private SchemaAccessHistory accessHistory;
+  private List<Range<Long>> cancelledWindows;
   private RowGroupPrefetchTracker tracker;
 
   @BeforeEach
@@ -55,7 +59,14 @@ class RowGroupPrefetchTrackerTest {
                 columnChunk("id", 400, 50),
                 dictionaryEncodedColumnChunk("category", 450, 50, 470)));
     accessHistory = new SchemaAccessHistory();
-    tracker = new RowGroupPrefetchTracker(fileLayout, accessHistory, MAX_BLOCK_SIZE_BYTES);
+    cancelledWindows = new ArrayList<>();
+    tracker =
+        new RowGroupPrefetchTracker(
+            fileLayout,
+            accessHistory,
+            MAX_BLOCK_SIZE_BYTES,
+            DictionaryTrigger.LAST_DICT_READ,
+            (start, end) -> cancelledWindows.add(Range.closedOpen(start, end)));
   }
 
   @Test
@@ -213,7 +224,12 @@ class RowGroupPrefetchTrackerTest {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "category");
     accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
     RowGroupPrefetchTracker singleRowGroupTracker =
-        new RowGroupPrefetchTracker(singleRowGroupLayout, accessHistory, MAX_BLOCK_SIZE_BYTES);
+        new RowGroupPrefetchTracker(
+            singleRowGroupLayout,
+            accessHistory,
+            MAX_BLOCK_SIZE_BYTES,
+            DictionaryTrigger.LAST_DICT_READ,
+            (start, end) -> {});
     List<Range<Long>> scheduledRanges = new ArrayList<>();
 
     singleRowGroupTracker.onSingleRead(900, 16, scheduledRanges::addAll);
@@ -239,6 +255,37 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
+  void onSingleRead_enteringLaterRowGroup_cancelsEarlierRowGroupWindow() {
+    tracker.onSingleRead(100, 16, ranges -> true);
+
+    tracker.onSingleRead(400, 16, ranges -> true);
+
+    assertThat(cancelledWindows).containsExactly(Range.closedOpen(100L, 400L));
+  }
+
+  @Test
+  void onSingleRead_splitMultiRowGroupFile_skipsFirstRowGroupAndNextRowGroupSpeculation() {
+    ParquetFileLayout splitLayout =
+        layout(
+            rowGroup(0, columnChunk("id", 0, SPLIT_SIZE_BYTES)),
+            rowGroup(1, columnChunk("id", SPLIT_SIZE_BYTES, SPLIT_SIZE_BYTES)));
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    RowGroupPrefetchTracker splitTracker =
+        new RowGroupPrefetchTracker(
+            splitLayout,
+            accessHistory,
+            MAX_BLOCK_SIZE_BYTES,
+            DictionaryTrigger.LAST_DICT_READ,
+            (start, end) -> {});
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    splitTracker.onSingleRead(SPLIT_SIZE_BYTES * 2, 16, scheduledRanges::addAll);
+    splitTracker.onSingleRead(0, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).isEmpty();
+  }
+
+  @Test
   void onVectoredRead_rangeInsideRowGroup_recordsDataColumnAndNextRowGroupTarget() {
     GcsObjectRange range =
         GcsObjectRange.builder()
@@ -251,6 +298,34 @@ class RowGroupPrefetchTrackerTest {
 
     assertThat(accessHistory.getDataColumns(SCHEMA_FINGERPRINT)).containsExactly("id");
     assertThat(tracker.pollPendingNextRowGroup(ranges -> true)).hasValue(1);
+  }
+
+  @Test
+  void onVectoredRead_chunkReadAfterDictionarySweep_returnsNextRowGroup() {
+    RowGroupPrefetchTracker sweepTracker =
+        new RowGroupPrefetchTracker(
+            layout(
+                sweptRowGroup(0, 100),
+                sweptRowGroup(1, 300),
+                sweptRowGroup(2, 500),
+                sweptRowGroup(3, 700)),
+            accessHistory,
+            MAX_BLOCK_SIZE_BYTES,
+            DictionaryTrigger.LAST_DICT_READ,
+            (start, end) -> {});
+    for (long categoryDictionaryOffset : new long[] {200, 400, 600, 800}) {
+      sweepTracker.onSingleRead(categoryDictionaryOffset, 20, ranges -> true);
+    }
+    GcsObjectRange chunkRead =
+        GcsObjectRange.builder()
+            .setOffset(100)
+            .setLength(150)
+            .setByteBufferFuture(new CompletableFuture<>())
+            .build();
+
+    sweepTracker.onVectoredRead(ImmutableList.of(chunkRead));
+
+    assertThat(sweepTracker.pollPendingNextRowGroup(ranges -> true)).hasValue(1);
   }
 
   @Test
@@ -293,5 +368,56 @@ class RowGroupPrefetchTrackerTest {
     tracker.onVectoredRead(ImmutableList.of(range));
 
     assertThat(accessHistory.getDataColumns(SCHEMA_FINGERPRINT)).isEmpty();
+  }
+
+  @Test
+  void onSingleRead_dataPageReadWhileFooterGateClosed_reopensGateBeforeClose() {
+    recordOutcomes(FileFilterOutcome.FOOTER_REJECTED, FileFilterOutcome.FOOTER_REJECTED);
+    recordOutcomes(FileFilterOutcome.SURVIVED);
+
+    tracker.onSingleRead(100, 16, ranges -> true);
+
+    assertThat(accessHistory.shouldSpeculateAtFooter(SCHEMA_FINGERPRINT)).isTrue();
+  }
+
+  @Test
+  void onVectoredRead_dataPageReadWhileFooterGateClosed_reopensGateBeforeClose() {
+    recordOutcomes(FileFilterOutcome.FOOTER_REJECTED, FileFilterOutcome.FOOTER_REJECTED);
+    recordOutcomes(FileFilterOutcome.SURVIVED);
+    GcsObjectRange range =
+        GcsObjectRange.builder()
+            .setOffset(100)
+            .setLength(50)
+            .setByteBufferFuture(new CompletableFuture<>())
+            .build();
+
+    tracker.onVectoredRead(ImmutableList.of(range));
+
+    assertThat(accessHistory.shouldSpeculateAtFooter(SCHEMA_FINGERPRINT)).isTrue();
+  }
+
+  @Test
+  void recordOutcomeOnClose_afterDataPageRead_doesNotRecordRejection() {
+    recordOutcomes(FileFilterOutcome.FOOTER_REJECTED, FileFilterOutcome.FOOTER_REJECTED);
+    recordOutcomes(FileFilterOutcome.SURVIVED);
+    tracker.onSingleRead(100, 16, ranges -> true);
+
+    tracker.recordOutcomeOnClose();
+
+    assertThat(accessHistory.shouldSpeculateAtFooter(SCHEMA_FINGERPRINT)).isTrue();
+  }
+
+  private void recordOutcomes(FileFilterOutcome... outcomes) {
+    for (FileFilterOutcome outcome : outcomes) {
+      accessHistory.recordFileOutcome(SCHEMA_FINGERPRINT, outcome);
+    }
+  }
+
+  private static ParquetRowGroup sweptRowGroup(int index, long startOffset) {
+    return rowGroup(
+        index,
+        columnChunk("id", startOffset, 50),
+        dictionaryEncodedColumnChunk("name", startOffset + 50, 50, startOffset + 70),
+        dictionaryEncodedColumnChunk("category", startOffset + 100, 50, startOffset + 120));
   }
 }

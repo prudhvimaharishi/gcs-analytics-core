@@ -21,6 +21,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.collect.ImmutableSet;
+import java.util.ArrayDeque;
 
 /**
  * Records which columns an engine actually reads, keyed by a schema fingerprint.
@@ -41,7 +42,18 @@ import com.google.common.collect.ImmutableSet;
  */
 public final class SchemaAccessHistory {
 
+  /** Outcome of evaluating row-group filters on an opened Parquet stream. */
+  public enum FileFilterOutcome {
+    /** Stream closed after footer read without reading any dictionary or data page. */
+    FOOTER_REJECTED,
+    /** Stream read dictionary page(s) but closed without reading any data page. */
+    DICT_REJECTED,
+    /** Stream read at least one data page. */
+    SURVIVED
+  }
+
   private static final int MAX_TRACKED_SCHEMAS = 1024;
+  private static final int OUTCOME_WINDOW_SIZE = 8;
 
   /** The maximum number of columns tracked for a single schema. */
   static final int MAX_COLUMNS_PER_SCHEMA = 256;
@@ -91,6 +103,31 @@ public final class SchemaAccessHistory {
             .get(columnPath, column -> Boolean.TRUE);
   }
 
+  /** Records the filter survival outcome of a stream for the given schema. */
+  public void recordFileOutcome(int schemaFingerprint, FileFilterOutcome outcome) {
+    checkNotNull(outcome, "outcome cannot be null");
+    TrackedColumns tracked = trackedColumnsFor(schemaFingerprint);
+    tracked.recordOutcome(outcome);
+  }
+
+  /**
+   * Returns whether at least half of recent files for {@code schemaFingerprint} survived the
+   * footer-level min/max filter ({@code footerPassRate >= 0.50}).
+   */
+  public boolean shouldSpeculateAtFooter(int schemaFingerprint) {
+    TrackedColumns tracked = historyBySchema.getIfPresent(schemaFingerprint);
+    return tracked == null || tracked.shouldSpeculateAtFooter();
+  }
+
+  /**
+   * Returns whether at least half of recent files that passed the footer filter also survived the
+   * dictionary filter ({@code dictPassRate >= 0.50}).
+   */
+  public boolean shouldSpeculateOnDictionary(int schemaFingerprint) {
+    TrackedColumns tracked = historyBySchema.getIfPresent(schemaFingerprint);
+    return tracked == null || tracked.shouldSpeculateOnDictionary();
+  }
+
   /** Discards all recorded history. */
   public void invalidateAll() {
     historyBySchema.invalidateAll();
@@ -114,5 +151,48 @@ public final class SchemaAccessHistory {
   private static final class TrackedColumns {
     private final Cache<String, Boolean> dataColumns = newColumnCache();
     private final Cache<String, Boolean> dictionaryColumns = newColumnCache();
+    private final ArrayDeque<FileFilterOutcome> recentFooterOutcomes =
+        new ArrayDeque<>(OUTCOME_WINDOW_SIZE);
+    private final ArrayDeque<FileFilterOutcome> recentDictOutcomes =
+        new ArrayDeque<>(OUTCOME_WINDOW_SIZE);
+
+    synchronized void recordOutcome(FileFilterOutcome outcome) {
+      if (recentFooterOutcomes.size() >= OUTCOME_WINDOW_SIZE) {
+        recentFooterOutcomes.pollFirst();
+      }
+      recentFooterOutcomes.addLast(outcome);
+      if (outcome != FileFilterOutcome.FOOTER_REJECTED) {
+        if (recentDictOutcomes.size() >= OUTCOME_WINDOW_SIZE) {
+          recentDictOutcomes.pollFirst();
+        }
+        recentDictOutcomes.addLast(outcome);
+      }
+    }
+
+    synchronized boolean shouldSpeculateAtFooter() {
+      if (recentFooterOutcomes.size() < 2) {
+        return true;
+      }
+      int passedFooter = 0;
+      for (FileFilterOutcome outcome : recentFooterOutcomes) {
+        if (outcome != FileFilterOutcome.FOOTER_REJECTED) {
+          passedFooter++;
+        }
+      }
+      return passedFooter * 2 >= recentFooterOutcomes.size();
+    }
+
+    synchronized boolean shouldSpeculateOnDictionary() {
+      if (recentDictOutcomes.size() < 2) {
+        return true;
+      }
+      int survived = 0;
+      for (FileFilterOutcome outcome : recentDictOutcomes) {
+        if (outcome == FileFilterOutcome.SURVIVED) {
+          survived++;
+        }
+      }
+      return survived * 2 >= recentDictOutcomes.size();
+    }
   }
 }
