@@ -30,14 +30,16 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
 
@@ -49,6 +51,11 @@ import javax.annotation.Nullable;
  * CompletableFuture}, unifying in-flight background downloads and resident buffers under a single
  * representation.
  *
+ * <p>A small range may be cached alongside a larger range that contains it, for example a
+ * dictionary page next to the whole column chunk. A read is served by the smallest range covering
+ * it, so it never waits on a larger download it does not need, and an exact match is served without
+ * copying. Each range is evicted once every one of its bytes has been read.
+ *
  * <p>Entries are bounded by total bytes and expire once they have been idle for the configured
  * time.
  *
@@ -56,11 +63,15 @@ import javax.annotation.Nullable;
  */
 public final class PrefetchBufferCache {
 
+  private static final Comparator<RangeKey> BY_START_THEN_END =
+      Comparator.comparingLong(RangeKey::getStartOffset).thenComparingLong(RangeKey::getEndOffset);
+
   private final Cache<RangeKey, CachedRange> ranges;
   private final Telemetry telemetry;
-  private final ConcurrentHashMap<GcsItemId, ConcurrentSkipListMap<Long, Long>> rangeIndexByItem =
+  private final ConcurrentHashMap<GcsItemId, ConcurrentSkipListSet<RangeKey>> rangeIndexByItem =
       new ConcurrentHashMap<>();
   private final ConcurrentHashMap<GcsItemId, Integer> openStreamsByItem = new ConcurrentHashMap<>();
+  private final AtomicInteger maxRangeLength = new AtomicInteger();
 
   /**
    * Creates a cache storing exact byte ranges.
@@ -81,7 +92,7 @@ public final class PrefetchBufferCache {
             .removalListener(
                 (RangeKey key, CachedRange value, RemovalCause cause) -> {
                   if (key != null && cause != RemovalCause.REPLACED) {
-                    forgetOffset(key.getItemId(), key.getStartOffset());
+                    forgetKey(key);
                   }
                 })
             .build();
@@ -128,76 +139,41 @@ public final class PrefetchBufferCache {
 
   private boolean tryRegisterInIndex(GcsItemId itemId, CachedRange cachedRange) {
     AtomicBoolean registered = new AtomicBoolean();
-    List<Long> shadowedStarts = new ArrayList<>();
     rangeIndexByItem.compute(
         itemId,
-        (id, existingOffsets) -> {
-          ConcurrentSkipListMap<Long, Long> itemOffsets =
-              existingOffsets != null ? existingOffsets : new ConcurrentSkipListMap<>();
+        (id, existingKeys) -> {
+          ConcurrentSkipListSet<RangeKey> itemKeys =
+              existingKeys != null ? existingKeys : new ConcurrentSkipListSet<>(BY_START_THEN_END);
           long startOffset = cachedRange.getStartOffset();
-          long endOffset = cachedRange.getEndOffset();
-          if (isCoveredByExistingRange(id, itemOffsets, startOffset, cachedRange.getLength())) {
-            return itemOffsets.isEmpty() ? null : itemOffsets;
+          if (findSmallestCovering(id, itemKeys, startOffset, cachedRange.getLength())
+              .isPresent()) {
+            return itemKeys.isEmpty() ? null : itemKeys;
           }
-          ranges.put(RangeKey.create(id, startOffset), cachedRange);
-          itemOffsets.put(startOffset, endOffset);
-          removeShadowedSubRanges(itemOffsets, startOffset, endOffset, shadowedStarts);
+          RangeKey key = RangeKey.create(id, startOffset, cachedRange.getEndOffset());
+          maxRangeLength.accumulateAndGet(cachedRange.getLength(), Math::max);
+          ranges.put(key, cachedRange);
+          itemKeys.add(key);
           registered.set(true);
-          return itemOffsets;
+          return itemKeys;
         });
-    for (Long shadowedStart : shadowedStarts) {
-      ranges.invalidate(RangeKey.create(itemId, shadowedStart));
-    }
     return registered.get();
   }
 
-  private static void removeShadowedSubRanges(
-      ConcurrentSkipListMap<Long, Long> itemOffsets,
-      long startOffset,
-      long endOffset,
-      List<Long> shadowedStarts) {
-    for (Map.Entry<Long, Long> entry :
-        itemOffsets.subMap(startOffset, false, endOffset, false).entrySet()) {
-      if (entry.getValue() <= endOffset) {
-        shadowedStarts.add(entry.getKey());
-      }
-    }
-    for (Long shadowedStart : shadowedStarts) {
-      itemOffsets.remove(shadowedStart);
-    }
-  }
-
-  private boolean isCoveredByExistingRange(
-      GcsItemId itemId, ConcurrentSkipListMap<Long, Long> itemOffsets, long offset, int length) {
-    Map.Entry<Long, Long> floorEntry = itemOffsets.floorEntry(offset);
-    if (floorEntry == null || offset + length > floorEntry.getValue()) {
-      return false;
-    }
-    long floorOffset = floorEntry.getKey();
-    CachedRange cached = ranges.getIfPresent(RangeKey.create(itemId, floorOffset));
-    if (cached == null) {
-      itemOffsets.remove(floorOffset);
-      return false;
-    }
-    return true;
-  }
-
   /**
-   * Returns the {@link CachedRange} (in-flight or resident) that completely covers {@code [offset,
-   * offset + length)}, or {@code Optional.empty()} if no single cached range covers it.
+   * Returns the smallest {@link CachedRange} (in-flight or resident) that completely covers {@code
+   * [offset, offset + length)}, or {@code Optional.empty()} if no single cached range covers it.
    */
   public Optional<CachedRange> getRangeCovering(GcsItemId itemId, long offset, int length) {
     checkNotNull(itemId, "itemId cannot be null");
-    return findRange(itemId, rangeIndexByItem.get(itemId), offset, length);
+    return findSmallestCovering(itemId, rangeIndexByItem.get(itemId), offset, length);
   }
 
   /**
    * Copies cached bytes for {@code itemId} starting at {@code position} into {@code dst}, records
    * cache hit or miss telemetry, and returns the number of bytes served (or {@code 0} on a miss).
    */
-  public int serveFromCache(
-      GcsItemId itemId, long position, ByteBuffer dst, boolean recordMiss, boolean evictConsumed) {
-    int servedBytes = copyInto(itemId, position, dst, evictConsumed);
+  public int serveFromCache(GcsItemId itemId, long position, ByteBuffer dst, boolean recordMiss) {
+    int servedBytes = copyInto(itemId, position, dst);
     if (servedBytes == 0) {
       recordCacheMiss(recordMiss);
       return 0;
@@ -230,10 +206,11 @@ public final class PrefetchBufferCache {
   }
 
   /**
-   * Returns a future that allocates the target buffer once via {@code allocate} and copies the
-   * cached bytes covering {@code [offset, offset + length)} into it across one or more contiguous
-   * cached ranges, or {@code Optional.empty()} if the window is not completely covered. Any covered
-   * segment is evicted once all of its bytes have been consumed.
+   * Returns a future holding the cached bytes covering {@code [offset, offset + length)}, or {@code
+   * Optional.empty()} if the window is not completely covered. A window matching one cached range
+   * exactly reuses its buffer; otherwise the bytes are copied once into a buffer from {@code
+   * allocate}, stitching contiguous ranges if needed. Any covered range is evicted once all of its
+   * bytes have been consumed.
    */
   Optional<CompletableFuture<ByteBuffer>> copyIntoAsync(
       GcsItemId itemId, long offset, int length, IntFunction<ByteBuffer> allocate) {
@@ -253,15 +230,16 @@ public final class PrefetchBufferCache {
 
   private Optional<ImmutableList<CachedRange>> collectContiguousRanges(
       GcsItemId itemId, long offset, int length) {
-    ConcurrentSkipListMap<Long, Long> itemOffsets = rangeIndexByItem.get(itemId);
-    if (itemOffsets == null || length <= 0) {
+    ConcurrentSkipListSet<RangeKey> itemKeys = rangeIndexByItem.get(itemId);
+    if (itemKeys == null || length <= 0) {
       return Optional.empty();
     }
     ImmutableList.Builder<CachedRange> segments = ImmutableList.builder();
     long cursor = offset;
     long targetEnd = offset + length;
     while (cursor < targetEnd) {
-      Optional<CachedRange> segment = findRange(itemId, itemOffsets, cursor, 1);
+      Optional<CachedRange> segment =
+          selectRange(itemId, itemKeys, cursor, (int) (targetEnd - cursor));
       if (!segment.isPresent()) {
         return Optional.empty();
       }
@@ -277,7 +255,7 @@ public final class PrefetchBufferCache {
     for (CachedRange segment : segments) {
       int sliceLength = (int) (Math.min(segment.getEndOffset(), endOffset) - cursor);
       recordBytesServed(segment, sliceLength);
-      if (segment.recordBytesConsumed(sliceLength)) {
+      if (segment.recordBytesConsumed(cursor, sliceLength)) {
         removeRange(itemId, segment);
       }
       cursor += sliceLength;
@@ -322,26 +300,23 @@ public final class PrefetchBufferCache {
    * covers {@code position}. A range is evicted once all of its bytes have been consumed.
    */
   int copyInto(GcsItemId itemId, long position, ByteBuffer dst) {
-    return copyInto(itemId, position, dst, /* evictConsumed= */ true);
-  }
-
-  private int copyInto(GcsItemId itemId, long position, ByteBuffer dst, boolean evictConsumed) {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(dst, "dst cannot be null");
     int totalCopied = 0;
     while (dst.hasRemaining()) {
       long currentPos = position + totalCopied;
-      Optional<CachedRange> covering = getRangeCovering(itemId, currentPos, 1);
-      if (!covering.isPresent()) {
+      Optional<CachedRange> selected =
+          selectRange(itemId, rangeIndexByItem.get(itemId), currentPos, dst.remaining());
+      if (!selected.isPresent()) {
         break;
       }
-      CachedRange range = covering.get();
+      CachedRange range = selected.get();
       int copied = range.copyInto(currentPos, dst);
       if (copied == 0) {
         break;
       }
       recordBytesServed(range, copied);
-      if (evictConsumed && range.recordBytesConsumed(copied)) {
+      if (range.recordBytesConsumed(currentPos, copied)) {
         removeRange(itemId, range);
       }
       totalCopied += copied;
@@ -415,23 +390,24 @@ public final class PrefetchBufferCache {
   }
 
   private void evictAllForItem(GcsItemId itemId) {
-    ConcurrentSkipListMap<Long, Long> itemOffsets = rangeIndexByItem.remove(itemId);
-    if (itemOffsets == null) {
+    ConcurrentSkipListSet<RangeKey> itemKeys = rangeIndexByItem.remove(itemId);
+    if (itemKeys == null) {
       return;
     }
-    for (Long startOffset : itemOffsets.keySet()) {
-      ranges.invalidate(RangeKey.create(itemId, startOffset));
+    for (RangeKey key : itemKeys) {
+      ranges.invalidate(key);
     }
   }
 
   /**
-   * Evicts the cached range of {@code itemId} starting at {@code startOffset} if it is still backed
-   * by {@code future}, so a stream only evicts the entries it registered.
+   * Evicts the cached range {@code [startOffset, endOffset)} of {@code itemId} if it is still
+   * backed by {@code future}, so a stream only evicts the entries it registered.
    */
-  public void evictRange(GcsItemId itemId, long startOffset, CompletableFuture<ByteBuffer> future) {
+  public void evictRange(
+      GcsItemId itemId, long startOffset, long endOffset, CompletableFuture<ByteBuffer> future) {
     checkNotNull(itemId, "itemId cannot be null");
     checkNotNull(future, "future cannot be null");
-    CachedRange cached = ranges.getIfPresent(RangeKey.create(itemId, startOffset));
+    CachedRange cached = ranges.getIfPresent(RangeKey.create(itemId, startOffset, endOffset));
     if (cached != null && cached.getFuture() == future) {
       removeRange(itemId, cached);
     }
@@ -443,46 +419,91 @@ public final class PrefetchBufferCache {
     rangeIndexByItem.clear();
   }
 
-  private Optional<CachedRange> findRange(
-      GcsItemId itemId,
-      @Nullable ConcurrentSkipListMap<Long, Long> itemOffsets,
-      long offset,
-      int length) {
-    if (itemOffsets == null || length < 0) {
-      return Optional.empty();
+  /**
+   * Returns the smallest range covering {@code [offset, offset + length)}, or else the range
+   * covering {@code offset} that reaches furthest, so a stitched read uses as few segments as
+   * possible.
+   */
+  private Optional<CachedRange> selectRange(
+      GcsItemId itemId, @Nullable NavigableSet<RangeKey> itemKeys, long offset, int length) {
+    Optional<CachedRange> smallestCovering = findSmallestCovering(itemId, itemKeys, offset, length);
+    if (smallestCovering.isPresent()) {
+      return smallestCovering;
     }
-    Map.Entry<Long, Long> floorEntry = itemOffsets.floorEntry(offset);
-    if (floorEntry == null || offset + length > floorEntry.getValue()) {
-      return Optional.empty();
-    }
-    long startOffset = floorEntry.getKey();
-    CachedRange cached = ranges.getIfPresent(RangeKey.create(itemId, startOffset));
-    if (cached == null) {
-      forgetOffset(itemId, startOffset);
-      return Optional.empty();
-    }
-    return Optional.of(cached);
+    return findFurthestReaching(itemId, itemKeys, offset);
   }
 
-  private void removeRange(GcsItemId itemId, CachedRange cachedRange) {
-    long startOffset = cachedRange.getStartOffset();
-    ranges.asMap().remove(RangeKey.create(itemId, startOffset), cachedRange);
-    forgetOffset(itemId, startOffset);
+  private Optional<CachedRange> findSmallestCovering(
+      GcsItemId itemId, @Nullable NavigableSet<RangeKey> itemKeys, long offset, int length) {
+    if (itemKeys == null || length < 0) {
+      return Optional.empty();
+    }
+    long endOffset = offset + length;
+    CachedRange smallest = null;
+    for (RangeKey key : candidateKeys(itemId, itemKeys, offset, endOffset)) {
+      boolean smaller = smallest == null || key.getLength() < smallest.getLength();
+      if (key.getEndOffset() >= endOffset && smaller) {
+        CachedRange cached = ranges.getIfPresent(key);
+        smallest = cached != null ? cached : smallest;
+      }
+    }
+    return Optional.ofNullable(smallest);
+  }
+
+  private Optional<CachedRange> findFurthestReaching(
+      GcsItemId itemId, @Nullable NavigableSet<RangeKey> itemKeys, long offset) {
+    if (itemKeys == null) {
+      return Optional.empty();
+    }
+    CachedRange furthest = null;
+    for (RangeKey key : candidateKeys(itemId, itemKeys, offset, offset + 1)) {
+      boolean further = furthest == null || key.getEndOffset() > furthest.getEndOffset();
+      if (key.getEndOffset() > offset && further) {
+        CachedRange cached = ranges.getIfPresent(key);
+        furthest = cached != null ? cached : furthest;
+      }
+    }
+    return Optional.ofNullable(furthest);
   }
 
   /**
-   * Drops {@code startOffset} from the offset index of {@code itemId} when no range remains at that
-   * key, and removes the item's entry once it holds no offsets so that closed objects do not leak
-   * map entries.
+   * Returns the keys starting at or before {@code offset} that are long enough to reach {@code
+   * endOffset}, nearest first. No range is longer than {@link #maxRangeLength}, which bounds the
+   * scan.
    */
-  private void forgetOffset(GcsItemId itemId, long startOffset) {
+  private List<RangeKey> candidateKeys(
+      GcsItemId itemId, NavigableSet<RangeKey> itemKeys, long offset, long endOffset) {
+    long earliestStart = endOffset - maxRangeLength.get();
+    List<RangeKey> candidates = new ArrayList<>();
+    for (RangeKey key :
+        itemKeys.headSet(RangeKey.create(itemId, offset, Long.MAX_VALUE), true).descendingSet()) {
+      if (key.getStartOffset() < earliestStart) {
+        break;
+      }
+      candidates.add(key);
+    }
+    return candidates;
+  }
+
+  private void removeRange(GcsItemId itemId, CachedRange cachedRange) {
+    RangeKey key =
+        RangeKey.create(itemId, cachedRange.getStartOffset(), cachedRange.getEndOffset());
+    ranges.asMap().remove(key, cachedRange);
+    forgetKey(key);
+  }
+
+  /**
+   * Drops {@code key} from the index of its item when no range remains at that key, and removes the
+   * item's entry once it holds no keys so that closed objects do not leak map entries.
+   */
+  private void forgetKey(RangeKey key) {
     rangeIndexByItem.computeIfPresent(
-        itemId,
-        (id, itemOffsets) -> {
-          if (ranges.getIfPresent(RangeKey.create(id, startOffset)) == null) {
-            itemOffsets.remove(startOffset);
+        key.getItemId(),
+        (id, itemKeys) -> {
+          if (ranges.getIfPresent(key) == null) {
+            itemKeys.remove(key);
           }
-          return itemOffsets.isEmpty() ? null : itemOffsets;
+          return itemKeys.isEmpty() ? null : itemKeys;
         });
   }
 
@@ -504,7 +525,7 @@ public final class PrefetchBufferCache {
     }
   }
 
-  /** Identifies a cached range by object and start offset. */
+  /** Identifies a cached range by object, start offset, and end offset. */
   @AutoValue
   abstract static class RangeKey {
 
@@ -512,8 +533,14 @@ public final class PrefetchBufferCache {
 
     abstract long getStartOffset();
 
-    static RangeKey create(GcsItemId itemId, long startOffset) {
-      return new AutoValue_PrefetchBufferCache_RangeKey(itemId, startOffset);
+    abstract long getEndOffset();
+
+    final long getLength() {
+      return getEndOffset() - getStartOffset();
+    }
+
+    static RangeKey create(GcsItemId itemId, long startOffset, long endOffset) {
+      return new AutoValue_PrefetchBufferCache_RangeKey(itemId, startOffset, endOffset);
     }
   }
 }

@@ -208,17 +208,34 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
-  void registerRange_largerRangeShadowsSubRange_removesSubRangeAndServesLargerRange() {
+  void getRangeCovering_nestedRanges_returnsSmallestCoveringRange() {
     PrefetchBufferCache cache = newCache();
     registerCompleted(cache, itemId("object"), SECOND_RANGE_OFFSET, SECOND_RANGE);
-    registerCompleted(cache, itemId("object"), 6, SECOND_RANGE);
-
     registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
 
     assertThat(cache.getRangeCovering(itemId("object"), SECOND_RANGE_OFFSET, 4).get().getLength())
-        .isEqualTo(COMBINED_RANGES.length);
-    assertThat(cache.getRangeCovering(itemId("object"), 6, 4).get().getLength())
         .isEqualTo(SECOND_RANGE.length);
+  }
+
+  @Test
+  void getRangeCovering_windowLargerThanNestedRange_returnsEnclosingRange() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), SECOND_RANGE_OFFSET, SECOND_RANGE);
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
+
+    assertThat(cache.getRangeCovering(itemId("object"), 2, 4).get().getLength())
+        .isEqualTo(COMBINED_RANGES.length);
+  }
+
+  @Test
+  void registerRange_largerRangeWithSameStart_keepsSmallerRange() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
+
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 4).get().getLength())
+        .isEqualTo(FIRST_RANGE.length);
   }
 
   @Test
@@ -330,28 +347,65 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
-  void serveFromCache_evictConsumedFalse_keepsExhaustedRangeForSubsequentVectoredStitch()
-      throws Exception {
+  void copyIntoAsync_windowMatchesLargerOfNestedRanges_reusesItsBuffer() throws Exception {
     PrefetchBufferCache cache = newCache();
-    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+    ByteBuffer combined = bufferOf(COMBINED_RANGES);
     registerCompleted(cache, itemId("object"), SECOND_RANGE_OFFSET, SECOND_RANGE);
+    cache.registerRange(
+        itemId("object"),
+        FIRST_RANGE_OFFSET,
+        COMBINED_RANGES.length,
+        CompletableFuture.completedFuture(combined));
 
-    int served =
-        cache.serveFromCache(
-            itemId("object"),
-            FIRST_RANGE_OFFSET,
-            ByteBuffer.allocate(FIRST_RANGE.length),
-            /* recordMiss= */ true,
-            /* evictConsumed= */ false);
-    ByteBuffer stitched =
+    ByteBuffer populated =
         cache
             .copyIntoAsync(
                 itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES.length, ByteBuffer::allocate)
             .get()
             .get();
 
-    assertThat(served).isEqualTo(FIRST_RANGE.length);
-    assertThat(remainingBytes(stitched)).isEqualTo(COMBINED_RANGES);
+    assertThat(populated.array()).isSameInstanceAs(combined.array());
+  }
+
+  @Test
+  void copyInto_windowMatchesSmallerOfNestedRanges_evictsOnlySmallerRange() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), SECOND_RANGE_OFFSET, SECOND_RANGE);
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
+
+    int unusedCopiedBytes =
+        cache.copyInto(
+            itemId("object"), SECOND_RANGE_OFFSET, ByteBuffer.allocate(SECOND_RANGE.length));
+
+    assertThat(cache.getRangeCovering(itemId("object"), SECOND_RANGE_OFFSET, 4).get().getLength())
+        .isEqualTo(COMBINED_RANGES.length);
+  }
+
+  @Test
+  void copyIntoAsync_acrossAdjacentRangesWithNestedRange_skipsNestedRange() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), 1, new byte[] {2});
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, FIRST_RANGE);
+    registerCompleted(cache, itemId("object"), SECOND_RANGE_OFFSET, SECOND_RANGE);
+
+    var unusedFuture =
+        cache.copyIntoAsync(
+            itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES.length, ByteBuffer::allocate);
+
+    assertThat(cache.getRangeCovering(itemId("object"), 1, 1).get().getLength()).isEqualTo(1);
+  }
+
+  @Test
+  void copyInto_overlappingReads_keepsRangeUntilEveryByteIsRead() {
+    PrefetchBufferCache cache = newCache();
+    registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
+    int unusedHeadBytes =
+        cache.copyInto(itemId("object"), FIRST_RANGE_OFFSET, ByteBuffer.allocate(4));
+
+    int unusedOverlappingBytes =
+        cache.copyInto(itemId("object"), FIRST_RANGE_OFFSET, ByteBuffer.allocate(6));
+
+    assertThat(cache.getRangeCovering(itemId("object"), 6, 2)).isPresent();
   }
 
   @Test
@@ -400,19 +454,14 @@ class PrefetchBufferCacheTest {
     registerCompleted(cache, itemId("object"), FIRST_RANGE_OFFSET, COMBINED_RANGES);
     int unusedHeadBytes =
         cache.serveFromCache(
-            itemId("object"),
-            FIRST_RANGE_OFFSET,
-            ByteBuffer.allocate(4),
-            /* recordMiss= */ true,
-            /* evictConsumed= */ false);
+            itemId("object"), FIRST_RANGE_OFFSET, ByteBuffer.allocate(4), /* recordMiss= */ true);
 
     int unusedAllBytes =
         cache.serveFromCache(
             itemId("object"),
             FIRST_RANGE_OFFSET,
             ByteBuffer.allocate(COMBINED_RANGES.length),
-            /* recordMiss= */ true,
-            /* evictConsumed= */ true);
+            /* recordMiss= */ true);
 
     assertThat(listener.getTotal(Metric.PREFETCH_BYTES_CONSUMED)).isEqualTo(COMBINED_RANGES.length);
   }
@@ -567,7 +616,7 @@ class PrefetchBufferCacheTest {
     CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
     cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, future);
 
-    cache.evictRange(itemId("object"), FIRST_RANGE_OFFSET, future);
+    cache.evictRange(itemId("object"), FIRST_RANGE_OFFSET, 4, future);
 
     assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 4)).isEmpty();
   }
@@ -577,7 +626,7 @@ class PrefetchBufferCacheTest {
     PrefetchBufferCache cache = newCache();
     cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, new CompletableFuture<>());
 
-    cache.evictRange(itemId("object"), FIRST_RANGE_OFFSET, new CompletableFuture<>());
+    cache.evictRange(itemId("object"), FIRST_RANGE_OFFSET, 4, new CompletableFuture<>());
 
     assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 4)).isPresent();
   }

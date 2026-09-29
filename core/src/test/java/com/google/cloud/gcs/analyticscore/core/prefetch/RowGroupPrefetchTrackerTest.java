@@ -87,7 +87,7 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void onSingleRead_dictionaryPageReadWithLearnedColumns_schedulesLaterDictAndSplitDataRanges() {
+  void onSingleRead_dictionaryPageReadWithLearnedColumns_schedulesLaterDictAndMergedDataRanges() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "category");
     List<Range<Long>> scheduledRanges = new ArrayList<>();
@@ -95,11 +95,7 @@ class RowGroupPrefetchTrackerTest {
     tracker.onSingleRead(150, 8, scheduledRanges::addAll);
 
     assertThat(scheduledRanges)
-        .containsExactly(
-            Range.closedOpen(450L, 470L),
-            Range.closedOpen(100L, 150L),
-            Range.closedOpen(150L, 170L),
-            Range.closedOpen(170L, 200L))
+        .containsExactly(Range.closedOpen(450L, 470L), Range.closedOpen(100L, 200L))
         .inOrder();
   }
 
@@ -217,8 +213,7 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void
-      onSingleRead_singleRowGroupWithLearnedDataAndDictionaryColumn_splitsDictionaryAndDataRanges() {
+  void onSingleRead_singleRowGroupWithLearnedDataAndDictionaryColumn_schedulesDictionaryAndChunk() {
     ParquetFileLayout singleRowGroupLayout =
         layout(rowGroup(0, dictionaryEncodedColumnChunk("category", 150, 50, 170)));
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "category");
@@ -235,10 +230,7 @@ class RowGroupPrefetchTrackerTest {
     singleRowGroupTracker.onSingleRead(900, 16, scheduledRanges::addAll);
 
     assertThat(scheduledRanges)
-        .containsExactly(
-            Range.closedOpen(150L, 170L),
-            Range.closedOpen(150L, 170L),
-            Range.closedOpen(170L, 200L))
+        .containsExactly(Range.closedOpen(150L, 170L), Range.closedOpen(150L, 200L))
         .inOrder();
   }
 

@@ -20,6 +20,9 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auto.value.AutoValue;
+import com.google.common.collect.Range;
+import com.google.common.collect.RangeSet;
+import com.google.common.collect.TreeRangeSet;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -36,7 +39,7 @@ import javax.annotation.Nullable;
 @AutoValue
 public abstract class CachedRange {
 
-  private final AtomicInteger consumedBytes = new AtomicInteger();
+  private final RangeSet<Long> consumedRanges = TreeRangeSet.create();
   private final AtomicInteger servedBytes = new AtomicInteger();
   private Runnable promotionAction = CachedRange::noOpPromotion;
 
@@ -95,11 +98,12 @@ public abstract class CachedRange {
   }
 
   /**
-   * Records {@code bytes} as consumed from this range and returns {@code true} once the total
-   * consumed bytes reach {@link #getLength()}.
+   * Records {@code [offset, offset + length)} as consumed and returns {@code true} once every byte
+   * of this range has been consumed at least once. Bytes read more than once count only once.
    */
-  boolean recordBytesConsumed(int bytes) {
-    return consumedBytes.addAndGet(bytes) >= getLength();
+  synchronized boolean recordBytesConsumed(long offset, int length) {
+    consumedRanges.add(Range.closedOpen(offset, offset + length));
+    return consumedRanges.encloses(Range.closedOpen(getStartOffset(), getEndOffset()));
   }
 
   /**

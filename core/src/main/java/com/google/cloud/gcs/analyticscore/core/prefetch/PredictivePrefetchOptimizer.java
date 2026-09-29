@@ -97,9 +97,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       fileSize = source.size();
     }
     ensureTrackerLoaded();
-    boolean evictConsumed = tracker == null || tracker.touchesDataPages(position, dst.remaining());
-    int servedBytes =
-        bufferCache.serveFromCache(itemId, position, dst, tracker != null, evictConsumed);
+    int servedBytes = bufferCache.serveFromCache(itemId, position, dst, tracker != null);
     // A miss is observed in afterRead once the foreground read completes, so speculation never
     // competes with the read the caller is blocked on.
     if (tracker != null && servedBytes > 0) {

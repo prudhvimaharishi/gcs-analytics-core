@@ -993,7 +993,7 @@ class PredictivePrefetchOptimizerTest {
 
   @Test
   void
-      afterRead_singleRowGroupWithFilterAndDataColumn_servesDictionaryWithoutWaitingOnDataAndStitchesChunk()
+      afterRead_singleRowGroupWithFilterAndDataColumn_servesDictionaryWithoutWaitingOnDataAndServesChunk()
           throws Exception {
     int fingerprint = layout.getSchemaFingerprint();
     cacheManager
@@ -1011,7 +1011,7 @@ class PredictivePrefetchOptimizerTest {
 
     optimizer.afterRead(content.length - 16, 16, channel);
 
-    // Complete only the 4 KB dictionary request while leaving the data-page range in flight.
+    // Complete only the dictionary request while leaving the whole-chunk range in flight.
     GcsObjectRange dictPrefetch =
         channel.getRequestedRanges().stream()
             .filter(r -> r.getOffset() == dictOffset && r.getLength() == dictLength)
@@ -1027,7 +1027,7 @@ class PredictivePrefetchOptimizerTest {
     assertThat(servedDictBytes).isEqualTo(dictLength);
     assertThat(dictBuffer.array()).isEqualTo(sliceOfContent(dictOffset, dictLength));
 
-    // Now complete the data-page range and verify readVectored over the full chunk stitches both.
+    // Now complete the whole-chunk range and verify readVectored over the chunk is served from it.
     channel.completeDeferredRanges();
     GcsObjectRange fullChunkRange = rangeOverChunk(categoryChunk);
     List<GcsObjectRange> unserved =

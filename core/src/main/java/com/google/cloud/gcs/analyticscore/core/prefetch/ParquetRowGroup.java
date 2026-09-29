@@ -98,53 +98,29 @@ abstract class ParquetRowGroup {
   }
 
   /**
-   * Returns the sorted, coalesced byte ranges of this row group: dictionary page ranges for {@code
-   * dictionaryColumns} and data ranges for {@code dataColumns} (data-page ranges for columns also
-   * in {@code dictionaryColumns}, or whole column chunks otherwise). Dictionary ranges and data
-   * ranges are coalesced separately within {@code maxBlockSizeBytes} so a small dictionary page is
-   * never merged into an adjacent data download.
+   * Returns the sorted byte ranges of the whole column chunks of {@code columns}, dictionary pages
+   * included, merging touching chunks while the merged span stays within {@code maxBlockSizeBytes}.
    */
   final ImmutableList<Range<Long>> getCoalescedColumnRanges(
-      Set<String> dataColumns, Set<String> dictionaryColumns, long maxBlockSizeBytes) {
-    List<Range<Long>> dictionaryRanges = collectDictionaryRanges(dictionaryColumns);
-    List<Range<Long>> dataRanges = collectDataRanges(dataColumns, dictionaryColumns);
-    List<Range<Long>> combinedRanges = new ArrayList<>();
-    combinedRanges.addAll(coalesceConnectedRanges(dictionaryRanges, maxBlockSizeBytes));
-    combinedRanges.addAll(coalesceConnectedRanges(dataRanges, maxBlockSizeBytes));
-    combinedRanges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return ImmutableList.copyOf(combinedRanges);
+      Set<String> columns, long maxBlockSizeBytes) {
+    List<Range<Long>> ranges = new ArrayList<>();
+    for (String columnPath : columns) {
+      getColumnChunk(columnPath).map(ParquetColumnChunk::getByteRange).ifPresent(ranges::add);
+    }
+    ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
+    return coalesceConnectedRanges(ranges, maxBlockSizeBytes);
   }
 
-  private List<Range<Long>> collectDictionaryRanges(Set<String> dictionaryColumns) {
+  /** Returns the sorted dictionary page byte ranges of the dictionary-encoded {@code columns}. */
+  final ImmutableList<Range<Long>> getDictionaryPageRanges(Set<String> columns) {
     List<Range<Long>> ranges = new ArrayList<>();
-    for (String columnPath : dictionaryColumns) {
+    for (String columnPath : columns) {
       getColumnChunk(columnPath)
           .flatMap(ParquetColumnChunk::getDictionaryPageRange)
           .ifPresent(ranges::add);
     }
     ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return ranges;
-  }
-
-  private List<Range<Long>> collectDataRanges(
-      Set<String> dataColumns, Set<String> dictionaryColumns) {
-    List<Range<Long>> ranges = new ArrayList<>();
-    for (String columnPath : dataColumns) {
-      Optional<ParquetColumnChunk> maybeChunk = getColumnChunk(columnPath);
-      if (!maybeChunk.isPresent()) {
-        continue;
-      }
-      ParquetColumnChunk chunk = maybeChunk.get();
-      if (dictionaryColumns.contains(columnPath) && chunk.getDictionaryPageRange().isPresent()) {
-        if (chunk.getDataPageOffset() < chunk.getEndOffset()) {
-          ranges.add(chunk.getDataPageRange());
-        }
-      } else {
-        ranges.add(chunk.getByteRange());
-      }
-    }
-    ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return ranges;
+    return ImmutableList.copyOf(ranges);
   }
 
   private static ImmutableList<Range<Long>> coalesceConnectedRanges(

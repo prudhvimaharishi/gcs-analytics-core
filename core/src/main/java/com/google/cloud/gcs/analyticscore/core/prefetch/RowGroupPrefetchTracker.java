@@ -72,16 +72,6 @@ final class RowGroupPrefetchTracker {
   }
 
   /**
-   * Returns whether {@code [position, position + length)} overlaps any column chunk's data pages.
-   */
-  boolean touchesDataPages(long position, int length) {
-    return layout
-        .findRowGroupAt(position)
-        .map(rowGroup -> !rowGroup.findDataColumnsInRange(position, position + length).isEmpty())
-        .orElse(false);
-  }
-
-  /**
    * Observes a single-buffer read at {@code [position, position + length)} and invokes {@code
    * scheduleRanges} with any speculative byte ranges triggered by the read.
    */
@@ -158,12 +148,7 @@ final class RowGroupPrefetchTracker {
     if (prefetchedRowGroups.contains(rowGroupIndex)) {
       return;
     }
-    int fingerprint = layout.getSchemaFingerprint();
-    ImmutableSet<String> dataColumns = accessHistory.getDataColumns(fingerprint);
-    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
-    ImmutableList<Range<Long>> coalescedRanges =
-        collectRowGroupRanges(
-            rowGroupIndex, dataColumns, Sets.intersection(dataColumns, dictionaryColumns));
+    ImmutableList<Range<Long>> coalescedRanges = collectDataRanges(rowGroupIndex);
     if (!coalescedRanges.isEmpty() && scheduleRanges.test(coalescedRanges)) {
       prefetchedRowGroups.add(rowGroupIndex);
     }
@@ -304,11 +289,12 @@ final class RowGroupPrefetchTracker {
     ImmutableList.Builder<Range<Long>> dictionaryRanges = ImmutableList.builder();
     int rowGroupCount = layout.getRowGroups().size();
     for (int index = startRowGroupIndex; index < rowGroupCount; index++) {
-      dictionaryRanges.addAll(
-          collectRowGroupRanges(
-              index,
-              ImmutableSet.of(),
-              Sets.difference(dictionaryColumns, filterTracker.getDictionaryColumnsRead(index))));
+      Set<String> unreadColumns =
+          Sets.difference(dictionaryColumns, filterTracker.getDictionaryColumnsRead(index));
+      layout
+          .getRowGroup(index)
+          .ifPresent(
+              rowGroup -> dictionaryRanges.addAll(rowGroup.getDictionaryPageRanges(unreadColumns)));
     }
     ImmutableList<Range<Long>> ranges = dictionaryRanges.build();
     if (ranges.isEmpty() || scheduleRanges.test(ranges)) {
@@ -320,17 +306,13 @@ final class RowGroupPrefetchTracker {
       int rowGroupIndex,
       long currentReadEnd,
       Predicate<ImmutableList<Range<Long>>> scheduleRanges) {
-    int fingerprint = layout.getSchemaFingerprint();
-    ImmutableSet<String> dataColumns = accessHistory.getDataColumns(fingerprint);
-    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
-    List<Range<Long>> ranges =
-        new ArrayList<>(
-            collectRowGroupRanges(
-                rowGroupIndex, dataColumns, Sets.intersection(dataColumns, dictionaryColumns)));
+    List<Range<Long>> ranges = new ArrayList<>(collectDataRanges(rowGroupIndex));
     ranges.removeIf(range -> range.lowerEndpoint() < currentReadEnd);
     if (!ranges.isEmpty()) {
       boolean unused = scheduleRanges.test(ImmutableList.copyOf(ranges));
     }
+    ImmutableSet<String> dictionaryColumns =
+        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
     OptionalInt nextIndex =
         filterTracker.findNextSurvivingRowGroup(layout, rowGroupIndex, dictionaryColumns);
     if (nextIndex.isPresent() && shouldSpeculateNextRowGroup(nextIndex.getAsInt())) {
@@ -338,14 +320,14 @@ final class RowGroupPrefetchTracker {
     }
   }
 
-  private ImmutableList<Range<Long>> collectRowGroupRanges(
-      int rowGroupIndex, Set<String> dataColumns, Set<String> dictionaryColumns) {
+  /**
+   * Returns the merged whole column chunks of the learned data columns in {@code rowGroupIndex}.
+   */
+  private ImmutableList<Range<Long>> collectDataRanges(int rowGroupIndex) {
+    ImmutableSet<String> dataColumns = accessHistory.getDataColumns(layout.getSchemaFingerprint());
     return layout
         .getRowGroup(rowGroupIndex)
-        .map(
-            rowGroup ->
-                rowGroup.getCoalescedColumnRanges(
-                    dataColumns, dictionaryColumns, maxBlockSizeBytes))
+        .map(rowGroup -> rowGroup.getCoalescedColumnRanges(dataColumns, maxBlockSizeBytes))
         .orElse(ImmutableList.of());
   }
 
