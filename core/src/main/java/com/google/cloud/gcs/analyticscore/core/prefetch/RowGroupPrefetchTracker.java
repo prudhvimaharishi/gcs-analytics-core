@@ -72,6 +72,39 @@ final class RowGroupPrefetchTracker {
   }
 
   /**
+   * Observes a read at {@code [position, position + length)} before blocking on dictionary bytes.
+   * If the read touches only dictionary pages, records the dictionary access and schedules any
+   * triggered speculative ranges immediately.
+   *
+   * @return {@code true} if the read was a dictionary-only read and was handled
+   */
+  boolean onBeforeRead(
+      long position, int length, Predicate<ImmutableList<Range<Long>>> scheduleRanges) {
+    if (length <= 0) {
+      return false;
+    }
+    Optional<ParquetRowGroup> maybeRowGroup = layout.findRowGroupAt(position);
+    if (!maybeRowGroup.isPresent()) {
+      return false;
+    }
+    ParquetRowGroup rowGroup = maybeRowGroup.get();
+    long endOffset = position + length;
+    if (!rowGroup.findDataColumnsInRange(position, endOffset).isEmpty()) {
+      return false;
+    }
+    ImmutableSet<String> dictionaryColumns =
+        rowGroup.findDictionaryColumnsInRange(position, endOffset);
+    if (dictionaryColumns.isEmpty()) {
+      return false;
+    }
+    firstRowGroupPrefetched = true;
+    lastObservedDataPageRange = null;
+    recordDictionaryColumns(rowGroup.getIndex(), dictionaryColumns);
+    onDictionaryPageRead(rowGroup, scheduleRanges);
+    return true;
+  }
+
+  /**
    * Observes a single-buffer read at {@code [position, position + length)} and invokes {@code
    * scheduleRanges} with any speculative byte ranges triggered by the read.
    */
@@ -181,16 +214,22 @@ final class RowGroupPrefetchTracker {
     for (String columnPath : touchedDataColumns) {
       accessHistory.recordDataAccess(fingerprint, columnPath);
     }
-    for (String columnPath :
-        findDictionaryOnlyColumns(rowGroup, startOffset, endOffset, touchedDataColumns)) {
-      accessHistory.recordDictionaryAccess(fingerprint, columnPath);
-      filterTracker.recordDictionaryRead(rowGroup.getIndex(), columnPath);
-    }
+    recordDictionaryColumns(
+        rowGroup.getIndex(),
+        findDictionaryOnlyColumns(rowGroup, startOffset, endOffset, touchedDataColumns));
     if (!touchedDataColumns.isEmpty()) {
       onDataPageRead(rowGroup.getIndex());
       return true;
     }
     return false;
+  }
+
+  private void recordDictionaryColumns(int rowGroupIndex, Set<String> columnPaths) {
+    int fingerprint = layout.getSchemaFingerprint();
+    for (String columnPath : columnPaths) {
+      accessHistory.recordDictionaryAccess(fingerprint, columnPath);
+      filterTracker.recordDictionaryRead(rowGroupIndex, columnPath);
+    }
   }
 
   /**
@@ -229,10 +268,6 @@ final class RowGroupPrefetchTracker {
     ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
     if (!dictionaryColumns.isEmpty()) {
       speculateDictionaryPagesFrom(0, scheduleRanges);
-      if (layout.getRowGroups().size() == 1
-          && accessHistory.shouldSpeculateOnDictionary(fingerprint)) {
-        prefetchRowGroup(0, scheduleRanges);
-      }
       return;
     }
     if (isSplitMultiRowGroupFile()) {

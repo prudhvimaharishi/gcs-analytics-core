@@ -63,6 +63,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private PrefetchBufferCache bufferCache;
   private PrefetchScheduler scheduler;
   private long fileSize = -1;
+  private long lastPreReadPosition = -1;
   private volatile boolean closed;
   @Nullable private RowGroupPrefetchTracker tracker;
 
@@ -97,14 +98,35 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       fileSize = source.size();
     }
     ensureTrackerLoaded();
+    lastPreReadPosition = -1;
+    int requestedLength = dst.remaining();
+    boolean coveredInCache =
+        tracker != null
+            && requestedLength > 0
+            && bufferCache.getRangeCovering(itemId, position, 1).isPresent();
+    boolean handledBeforeRead =
+        coveredInCache
+            && tracker.onBeforeRead(
+                position, requestedLength, ranges -> scheduler.schedule(source, ranges, fileSize));
     int servedBytes = bufferCache.serveFromCache(itemId, position, dst, tracker != null);
-    // A miss is observed in afterRead once the foreground read completes, so speculation never
-    // competes with the read the caller is blocked on.
-    if (tracker != null && servedBytes > 0) {
-      tracker.onSingleRead(
-          position, servedBytes, ranges -> scheduler.schedule(source, ranges, fileSize));
+    if (tracker == null) {
+      return servedBytes;
     }
-    return servedBytes;
+    // A data-page miss is observed in afterRead once the foreground read completes, whereas a
+    // dictionary read triggers data prefetch before blocking on dictionary bytes.
+    if (servedBytes > 0) {
+      if (!handledBeforeRead) {
+        tracker.onSingleRead(
+            position, servedBytes, ranges -> scheduler.schedule(source, ranges, fileSize));
+      }
+      return servedBytes;
+    }
+    if (handledBeforeRead
+        || tracker.onBeforeRead(
+            position, requestedLength, ranges -> scheduler.schedule(source, ranges, fileSize))) {
+      lastPreReadPosition = position;
+    }
+    return 0;
   }
 
   @Override
@@ -114,6 +136,10 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
       fileSize = source.size();
     }
     ensureTrackerLoaded();
+    if (position == lastPreReadPosition) {
+      lastPreReadPosition = -1;
+      return;
+    }
     if (tracker != null) {
       tracker.onSingleRead(
           position, bytesRead, ranges -> scheduler.schedule(source, ranges, fileSize));

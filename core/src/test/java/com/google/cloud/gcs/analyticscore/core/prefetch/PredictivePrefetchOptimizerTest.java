@@ -993,7 +993,7 @@ class PredictivePrefetchOptimizerTest {
 
   @Test
   void
-      afterRead_singleRowGroupWithFilterAndDataColumn_servesDictionaryWithoutWaitingOnDataAndServesChunk()
+      afterRead_singleRowGroupWithFilterAndDataColumn_schedulesOnlyDictionaryThenPrefetchesChunkOnDictionaryRead()
           throws Exception {
     int fingerprint = layout.getSchemaFingerprint();
     cacheManager
@@ -1011,21 +1011,22 @@ class PredictivePrefetchOptimizerTest {
 
     optimizer.afterRead(content.length - 16, 16, channel);
 
-    // Complete only the dictionary request while leaving the whole-chunk range in flight.
-    GcsObjectRange dictPrefetch =
-        channel.getRequestedRanges().stream()
-            .filter(r -> r.getOffset() == dictOffset && r.getLength() == dictLength)
-            .findFirst()
-            .get();
+    assertThat(channel.getRequestedRanges()).hasSize(1);
+    GcsObjectRange dictPrefetch = channel.getRequestedRanges().get(0);
+    assertThat(dictPrefetch.getOffset()).isEqualTo(dictOffset);
+    assertThat(dictPrefetch.getLength()).isEqualTo(dictLength);
     dictPrefetch
         .getByteBufferFuture()
         .complete(ByteBuffer.wrap(sliceOfContent(dictOffset, dictLength)));
 
+    // Reading the dictionary triggers the whole-chunk prefetch before serving the dictionary,
+    // and serves the dictionary without waiting on the deferred whole-chunk download.
     ByteBuffer dictBuffer = ByteBuffer.allocate(dictLength);
     int servedDictBytes = optimizer.read(dictOffset, dictBuffer, channel);
 
     assertThat(servedDictBytes).isEqualTo(dictLength);
     assertThat(dictBuffer.array()).isEqualTo(sliceOfContent(dictOffset, dictLength));
+    assertThat(channel.getRequestedRanges()).hasSize(2);
 
     // Now complete the whole-chunk range and verify readVectored over the chunk is served from it.
     channel.completeDeferredRanges();
@@ -1036,6 +1037,28 @@ class PredictivePrefetchOptimizerTest {
     assertThat(unserved).isEmpty();
     assertThat(fullChunkRange.getByteBufferFuture().get(5, TimeUnit.SECONDS).array())
         .isEqualTo(sliceOfContent(categoryChunk.getStartOffset(), chunkLength(categoryChunk)));
+  }
+
+  @Test
+  void read_uncachedDictionaryWhenColumnIsAlsoDataColumn_returnsZeroWithoutWaitingOnDataChunk()
+      throws IOException {
+    int fingerprint = layout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    long dictOffset = categoryChunk.getDictionaryPageOffset().getAsLong();
+    channel.deferVectoredCompletion();
+
+    int servedBytes = optimizer.read(dictOffset, ByteBuffer.allocate(8), channel);
+
+    assertThat(servedBytes).isEqualTo(0);
+    assertThat(channel.getRequestedOffsets()).containsExactly(categoryChunk.getStartOffset());
   }
 
   /**

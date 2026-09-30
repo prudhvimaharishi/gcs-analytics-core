@@ -213,7 +213,7 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void onSingleRead_singleRowGroupWithLearnedDataAndDictionaryColumn_schedulesDictionaryAndChunk() {
+  void onSingleRead_singleRowGroupWithLearnedDataAndDictionaryColumn_schedulesDictionaryOnly() {
     ParquetFileLayout singleRowGroupLayout =
         layout(rowGroup(0, dictionaryEncodedColumnChunk("category", 150, 50, 170)));
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "category");
@@ -229,9 +229,31 @@ class RowGroupPrefetchTrackerTest {
 
     singleRowGroupTracker.onSingleRead(900, 16, scheduledRanges::addAll);
 
-    assertThat(scheduledRanges)
-        .containsExactly(Range.closedOpen(150L, 170L), Range.closedOpen(150L, 200L))
-        .inOrder();
+    assertThat(scheduledRanges).containsExactly(Range.closedOpen(150L, 170L));
+  }
+
+  @Test
+  void onBeforeRead_dictionaryPageReadWithLearnedColumns_schedulesDataRangesAndReturnsTrue() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
+    tracker.onSingleRead(900, 16, ranges -> true);
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    boolean handled = tracker.onBeforeRead(150, 8, scheduledRanges::addAll);
+
+    assertThat(handled).isTrue();
+    assertThat(scheduledRanges).containsExactly(Range.closedOpen(100L, 150L));
+  }
+
+  @Test
+  void onBeforeRead_dataPageRead_schedulesNothingAndReturnsFalse() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    boolean handled = tracker.onBeforeRead(100, 16, scheduledRanges::addAll);
+
+    assertThat(handled).isFalse();
+    assertThat(scheduledRanges).isEmpty();
   }
 
   @Test
