@@ -207,6 +207,54 @@ class RowGroupFilterTrackerTest {
     assertThat(nextIndex).isEqualTo(OptionalInt.of(1));
   }
 
+  @Test
+  void
+      findNextSurvivingRowGroup_candidateBeyondMaxDictionaryIndexWithUnreadDictionary_returnsEmpty() {
+    ParquetFileLayout layout = createStatusLayout(9);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    for (int index = 0; index <= 4; index++) {
+      tracker.recordDictionaryRead(index, FILTER_COLUMN);
+    }
+    tracker.recordDataRead(4);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 4, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEmpty();
+  }
+
+  @Test
+  void
+      findNextSurvivingRowGroup_plainRowGroupAfterSkippedCandidateBeyondMaxDictionaryIndex_returnsEmpty() {
+    ParquetFileLayout layout = createStatusLayout(9, /* plainEncodedIndices...= */ 6);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    for (int index = 0; index <= 4; index++) {
+      tracker.recordDictionaryRead(index, FILTER_COLUMN);
+    }
+    tracker.recordDataRead(4);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 4, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEmpty();
+  }
+
+  @Test
+  void
+      findNextSurvivingRowGroup_plainRowGroupImmediatelyAfterMaxDictionaryIndex_returnsPlainRowGroup() {
+    ParquetFileLayout layout = createStatusLayout(9, /* plainEncodedIndices...= */ 4);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    for (int index = 0; index <= 3; index++) {
+      tracker.recordDictionaryRead(index, FILTER_COLUMN);
+    }
+    tracker.recordDataRead(3);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 3, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEqualTo(OptionalInt.of(4));
+  }
+
   /**
    * Builds a layout with one {@code status} column per row group, dictionary encoded except in
    * {@code plainEncodedIndices}.

@@ -146,8 +146,10 @@ final class RowGroupFilterTracker {
     int maxDictIndex = dictionaryTouchedIndices.isEmpty() ? -1 : dictionaryTouchedIndices.last();
 
     for (int candidate = afterIndex + 1; candidate < rowGroupCount; candidate++) {
-      if (isSkippedByUpfrontDictionarySweep(
-          layout, candidate, afterIndex, maxDictIndex, activeFilterColumns)) {
+      if (isSkippedByUpfrontDictionarySweep(layout, candidate, afterIndex, activeFilterColumns)) {
+        if (candidate > maxDictIndex) {
+          return OptionalInt.empty();
+        }
         continue;
       }
       return OptionalInt.of(candidate);
@@ -161,12 +163,8 @@ final class RowGroupFilterTracker {
    * not have read a dictionary there and may still read its data pages.
    */
   private boolean isSkippedByUpfrontDictionarySweep(
-      ParquetFileLayout layout,
-      int candidate,
-      int afterIndex,
-      int maxDictIndex,
-      Set<String> activeFilterColumns) {
-    if (maxDictIndex <= afterIndex || candidate > maxDictIndex) {
+      ParquetFileLayout layout, int candidate, int afterIndex, Set<String> activeFilterColumns) {
+    if (dictionaryTouchedIndices.isEmpty()) {
       return false;
     }
     Set<String> expectedColumns =
