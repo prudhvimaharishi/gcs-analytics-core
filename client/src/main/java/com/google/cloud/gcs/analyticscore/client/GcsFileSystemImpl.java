@@ -80,9 +80,6 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this(createCredentials(fileSystemOptions), fileSystemOptions);
   }
 
-  // TODO: Preserve the default behavior when analytics-core.auth.type is not explicitly provided
-  // by checking Application Default Credentials and falling back to NoCredentials if unavailable,
-  // so public buckets remain accessible without credentials.
   private static Credentials createCredentials(GcsFileSystemOptions fileSystemOptions) {
     checkNotNull(fileSystemOptions, "fileSystemOptions should not be null");
     try {

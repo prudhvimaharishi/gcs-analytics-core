@@ -72,7 +72,7 @@ public final class GcsCredentialsFactory {
    */
   public static Credentials createCredentials(GcsAuthOptions options) throws IOException {
     checkNotNull(options, "options cannot be null");
-    if (options.getAuthType() == AuthType.UNAUTHENTICATED) {
+    if (options.getAuthType().orElse(null) == AuthType.UNAUTHENTICATED) {
       return NoCredentials.getInstance();
     }
 
@@ -103,8 +103,9 @@ public final class GcsCredentialsFactory {
    */
   @VisibleForTesting
   static TrustStoreSource tokenTrustStoreSource(GcsAuthOptions options) {
+    AuthType effectiveAuthType = options.getAuthType().orElse(AuthType.APPLICATION_DEFAULT);
     return options.getTokenServerUri().isPresent()
-            && TOKEN_SERVER_URI_AUTH_TYPES.contains(options.getAuthType())
+            && TOKEN_SERVER_URI_AUTH_TYPES.contains(effectiveAuthType)
         ? TrustStoreSource.SYSTEM_DEFAULT
         : TrustStoreSource.GOOGLE_BUNDLED;
   }
@@ -115,7 +116,19 @@ public final class GcsCredentialsFactory {
       HttpTransportFactory tokenTransportFactory,
       HttpTransportFactory impersonationTransportFactory)
       throws IOException {
-    GoogleCredentials credentials = createCredentialsForAuthType(options, tokenTransportFactory);
+    GoogleCredentials credentials;
+    try {
+      credentials = createCredentialsForAuthType(options, tokenTransportFactory);
+    } catch (IOException e) {
+      if (options.getAuthType().isPresent()
+          || options.getImpersonationServiceAccount().isPresent()) {
+        throw e;
+      }
+      LOG.debug(
+          "Application Default Credentials are not available; falling back to NoCredentials.", e);
+      return NoCredentials.getInstance();
+    }
+
     GoogleCredentials scopedCredentials =
         options
             .getTokenServerUri()
@@ -131,7 +144,8 @@ public final class GcsCredentialsFactory {
 
   private static GoogleCredentials createCredentialsForAuthType(
       GcsAuthOptions options, HttpTransportFactory transportFactory) throws IOException {
-    switch (options.getAuthType()) {
+    AuthType authType = options.getAuthType().orElse(AuthType.APPLICATION_DEFAULT);
+    switch (authType) {
       case APPLICATION_DEFAULT:
         return GoogleCredentials.getApplicationDefault(transportFactory);
       case COMPUTE_ENGINE:
@@ -148,8 +162,7 @@ public final class GcsCredentialsFactory {
         break;
     }
     throw new VerifyException(
-        "Unauthenticated access is resolved before an auth type is looked up: "
-            + options.getAuthType());
+        "Unauthenticated access is resolved before an auth type is looked up: " + authType);
   }
 
   private static GoogleCredentials createServiceAccountCredentials(
