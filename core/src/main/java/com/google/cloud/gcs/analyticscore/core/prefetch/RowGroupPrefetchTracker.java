@@ -261,19 +261,9 @@ final class RowGroupPrefetchTracker {
       return;
     }
     firstRowGroupPrefetched = true;
-    int fingerprint = layout.getSchemaFingerprint();
-    if (!accessHistory.shouldSpeculateAtFooter(fingerprint)) {
-      return;
-    }
-    ImmutableSet<String> dictionaryColumns = accessHistory.getDictionaryColumns(fingerprint);
-    if (!dictionaryColumns.isEmpty()) {
+    if (accessHistory.shouldSpeculateAtFooter(layout.getSchemaFingerprint())) {
       speculateDictionaryPagesFrom(0, scheduleRanges);
-      return;
     }
-    if (isSplitMultiRowGroupFile()) {
-      return;
-    }
-    prefetchRowGroup(0, scheduleRanges);
   }
 
   private void onDictionaryPageRead(

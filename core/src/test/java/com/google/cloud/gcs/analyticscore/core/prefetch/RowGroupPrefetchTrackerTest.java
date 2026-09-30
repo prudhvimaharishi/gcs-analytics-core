@@ -189,13 +189,13 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void onSingleRead_positionOutsideAllRowGroupsWithLearnedDataColumn_prefetchesFirstRowGroup() {
+  void onSingleRead_positionOutsideAllRowGroupsWithLearnedDataColumn_schedulesNothing() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
     List<Range<Long>> scheduledRanges = new ArrayList<>();
 
     tracker.onSingleRead(900, 16, scheduledRanges::addAll);
 
-    assertThat(scheduledRanges).containsExactly(Range.closedOpen(100L, 150L));
+    assertThat(scheduledRanges).isEmpty();
   }
 
   @Test
@@ -343,12 +343,23 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void pollPendingNextRowGroup_withoutPriorDataRead_prefetchesFirstRowGroupAndReturnsEmpty() {
+  void pollPendingNextRowGroup_withoutPriorDataRead_schedulesNothingWhenOnlyDataColumnLearned() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
     List<Range<Long>> scheduledRanges = new ArrayList<>();
 
     assertThat(tracker.pollPendingNextRowGroup(scheduledRanges::addAll)).isEmpty();
-    assertThat(scheduledRanges).containsExactly(Range.closedOpen(100L, 150L));
+    assertThat(scheduledRanges).isEmpty();
+  }
+
+  @Test
+  void pollPendingNextRowGroup_withoutPriorDataRead_prefetchesDictionariesAndReturnsEmpty() {
+    accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    assertThat(tracker.pollPendingNextRowGroup(scheduledRanges::addAll)).isEmpty();
+    assertThat(scheduledRanges)
+        .containsExactly(Range.closedOpen(150L, 170L), Range.closedOpen(450L, 470L))
+        .inOrder();
   }
 
   @Test

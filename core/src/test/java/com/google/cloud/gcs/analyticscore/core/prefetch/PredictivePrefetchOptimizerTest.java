@@ -376,7 +376,7 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void afterRead_outsideRowGroupsWithLearnedSchema_prefetchesTheFirstRowGroup() throws IOException {
+  void afterRead_outsideRowGroupsWithOnlyLearnedDataColumn_schedulesNothing() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     readThroughChannel(optimizer, idChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
     FakeVectoredSeekableByteChannel newChannel = new FakeVectoredSeekableByteChannel(content);
@@ -385,7 +385,7 @@ class PredictivePrefetchOptimizerTest {
     newOptimizer.afterRead(content.length - 16, 16, newChannel);
     newOptimizer.onClose();
 
-    assertThat(newChannel.getRequestedOffsets()).contains(idChunk.getStartOffset());
+    assertThat(newChannel.getRequestedOffsets()).isEmpty();
   }
 
   @Test
@@ -1089,15 +1089,25 @@ class PredictivePrefetchOptimizerTest {
   }
 
   /**
-   * Learns {@code id} as a data column and reads the footer so the optimizer prefetches the whole
-   * {@code id} chunk of the first row group, then returns that chunk.
+   * Learns {@code id} as a data column and reads the {@code category} dictionary page so the
+   * optimizer prefetches the whole {@code id} chunk of the first row group, then returns that
+   * chunk.
    */
   private ParquetColumnChunk prefetchIdChunk() throws IOException {
+    int fingerprint = layout.getSchemaFingerprint();
     cacheManager
         .getSchemaAccessHistory()
         .get()
-        .recordDataAccess(layout.getSchemaFingerprint(), ParquetTestFiles.ID_COLUMN);
-    optimizer.afterRead(content.length - 16, 16, channel);
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    long categoryDictOffset =
+        columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN)
+            .getDictionaryPageOffset()
+            .getAsLong();
+    readThroughChannel(optimizer, categoryDictOffset, ByteBuffer.allocate(8), channel);
     return columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
   }
 
@@ -1303,16 +1313,25 @@ class PredictivePrefetchOptimizerTest {
     optimizer =
         createOptimizer(
             GcsPrefetchOptions.builder().setEnabled(true).setBlockSizeBytes(idChunkLength).build());
+    int fingerprint = layout.getSchemaFingerprint();
     cacheManager
         .getSchemaAccessHistory()
         .get()
-        .recordDataAccess(layout.getSchemaFingerprint(), ParquetTestFiles.CATEGORY_COLUMN);
+        .recordDataAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
     cacheManager
         .getSchemaAccessHistory()
         .get()
-        .recordDataAccess(layout.getSchemaFingerprint(), ParquetTestFiles.ID_COLUMN);
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
 
-    optimizer.afterRead(content.length - 16, 16, channel);
+    readThroughChannel(
+        optimizer,
+        categoryChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
 
     assertThat(channel.getRequestedOffsets())
         .containsExactly(idChunk.getStartOffset(), categoryChunk.getStartOffset());
@@ -1326,15 +1345,24 @@ class PredictivePrefetchOptimizerTest {
     optimizer =
         createOptimizer(
             GcsPrefetchOptions.builder().setEnabled(true).setBlockSizeBytes(idChunkLength).build());
+    int fingerprint = layout.getSchemaFingerprint();
     cacheManager
         .getSchemaAccessHistory()
         .get()
-        .recordDataAccess(layout.getSchemaFingerprint(), ParquetTestFiles.CATEGORY_COLUMN);
+        .recordDataAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
     cacheManager
         .getSchemaAccessHistory()
         .get()
-        .recordDataAccess(layout.getSchemaFingerprint(), ParquetTestFiles.ID_COLUMN);
-    optimizer.afterRead(content.length - 16, 16, channel);
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    readThroughChannel(
+        optimizer,
+        categoryChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
     long combinedStart = idChunk.getStartOffset();
     int combinedLength = (int) (categoryChunk.getEndOffset() - combinedStart);
     GcsObjectRange coalescedRange =
