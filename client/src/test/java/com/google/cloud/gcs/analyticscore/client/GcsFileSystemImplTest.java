@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
+import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.NoCredentials;
 import com.google.cloud.gcs.analyticscore.client.auth.AuthType;
 import com.google.cloud.gcs.analyticscore.client.auth.GcsAuthOptions;
@@ -60,6 +61,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -71,15 +73,11 @@ class GcsFileSystemImplTest {
   private static final String TEST_OBJECT = "test-dir/test-object.txt";
   private static final GcsClientOptions TEST_GCS_CLIENT_OPTIONS =
       GcsClientOptions.builder().setProjectId(TEST_PROJECT).build();
-  private static final GcsAuthOptions TEST_GCS_AUTH_OPTIONS =
-      GcsAuthOptions.builder().setAuthType(AuthType.UNAUTHENTICATED).build();
   private static final GcsFileSystemOptions TEST_GCS_FILESYSTEM_OPTIONS =
       testOptionsBuilder().build();
 
   private static GcsFileSystemOptions.Builder testOptionsBuilder() {
-    return GcsFileSystemOptions.builder()
-        .setGcsClientOptions(TEST_GCS_CLIENT_OPTIONS)
-        .setGcsAuthOptions(TEST_GCS_AUTH_OPTIONS);
+    return GcsFileSystemOptions.builder().setGcsClientOptions(TEST_GCS_CLIENT_OPTIONS);
   }
 
   @Mock private GcsClient mockClient;
@@ -118,10 +116,7 @@ class GcsFileSystemImplTest {
     GcsClientOptions clientOptions =
         GcsClientOptions.builder().setProjectId("test-project-default").build();
     GcsFileSystemOptions fileSystemOptions =
-        GcsFileSystemOptions.builder()
-            .setGcsClientOptions(clientOptions)
-            .setGcsAuthOptions(TEST_GCS_AUTH_OPTIONS)
-            .build();
+        GcsFileSystemOptions.builder().setGcsClientOptions(clientOptions).build();
 
     try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(fileSystemOptions)) {
       GcsClientImpl gcsClient = (GcsClientImpl) gcsFileSystem.getGcsClient();
@@ -723,7 +718,29 @@ class GcsFileSystemImplTest {
       assertThat(gcsClientImpl.storage.getOptions().getCredentials())
           .isEqualTo(NoCredentials.getInstance());
       assertThat(gcsFileSystem.getFileSystemOptions().getGcsAuthOptions().getAuthType())
-          .isEqualTo(AuthType.UNAUTHENTICATED);
+          .hasValue(AuthType.UNAUTHENTICATED);
+    }
+  }
+
+  @Test
+  void constructor_withDefaultAuthOptionsAndAdcUnavailable_fallsBackToNoCredentials() {
+    GcsFileSystemOptions options =
+        GcsFileSystemOptions.builder().setGcsClientOptions(TEST_GCS_CLIENT_OPTIONS).build();
+
+    try (MockedStatic<GoogleCredentials> mockedGoogleCredentials =
+        mockStatic(GoogleCredentials.class, withSettings().defaultAnswer(CALLS_REAL_METHODS))) {
+      mockedGoogleCredentials
+          .when(() -> GoogleCredentials.getApplicationDefault(any()))
+          .thenThrow(new IOException("ADC not available"));
+
+      try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(options)) {
+        GcsClientImpl gcsClientImpl = (GcsClientImpl) gcsFileSystem.getGcsClient();
+
+        assertThat(gcsFileSystem.getFileSystemOptions().getGcsAuthOptions().getAuthType())
+            .isEmpty();
+        assertThat(gcsClientImpl.storage.getOptions().getCredentials())
+            .isEqualTo(NoCredentials.getInstance());
+      }
     }
   }
 
@@ -739,7 +756,7 @@ class GcsFileSystemImplTest {
     try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(options)) {
       GcsClientImpl gcsClientImpl = (GcsClientImpl) gcsFileSystem.getGcsClient();
 
-      assertThat(options.getGcsAuthOptions().getAuthType()).isEqualTo(AuthType.UNAUTHENTICATED);
+      assertThat(options.getGcsAuthOptions().getAuthType()).hasValue(AuthType.UNAUTHENTICATED);
       assertThat(gcsClientImpl.storage.getOptions().getCredentials())
           .isEqualTo(NoCredentials.getInstance());
     }

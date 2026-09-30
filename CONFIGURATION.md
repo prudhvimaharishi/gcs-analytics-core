@@ -28,7 +28,7 @@ These properties configure standard Google Cloud authentication, OAuth2 token re
 
 | Property | Description | Default Value |
 | :--- | :--- | :--- |
-| `analytics-core.auth.type` | Google Cloud authentication type. Supported values: `APPLICATION_DEFAULT`, `COMPUTE_ENGINE`, `SERVICE_ACCOUNT_JSON_KEYFILE`, `WORKLOAD_IDENTITY_FEDERATION`, `USER_CREDENTIALS`, `UNAUTHENTICATED`. | `APPLICATION_DEFAULT` |
+| `analytics-core.auth.type` | Google Cloud authentication type. Supported values: `APPLICATION_DEFAULT`, `COMPUTE_ENGINE`, `SERVICE_ACCOUNT_JSON_KEYFILE`, `WORKLOAD_IDENTITY_FEDERATION`, `USER_CREDENTIALS`, `UNAUTHENTICATED`. When not set, attempts `APPLICATION_DEFAULT` and falls back to `UNAUTHENTICATED` if unavailable. | - |
 | `analytics-core.auth.service-account-json-keyfile` | Path to a Service Account JSON keyfile. Required when `analytics-core.auth.type` is `SERVICE_ACCOUNT_JSON_KEYFILE`. | - |
 | `analytics-core.auth.workload-identity-federation.credential-config-file` | Path to a Workload Identity Federation credential configuration JSON file. Required when `analytics-core.auth.type` is `WORKLOAD_IDENTITY_FEDERATION`. | - |
 | `analytics-core.auth.client-id` | OAuth2 client ID. Required when `analytics-core.auth.type` is `USER_CREDENTIALS`. | - |
