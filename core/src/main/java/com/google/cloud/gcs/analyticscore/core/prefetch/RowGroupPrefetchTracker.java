@@ -43,8 +43,6 @@ import javax.annotation.Nullable;
  */
 final class RowGroupPrefetchTracker {
 
-  private static final long SPLIT_BOUNDARY_ROW_GROUP_BYTES = 64L * 1024 * 1024;
-
   private final ParquetFileLayout layout;
   private final SchemaAccessHistory accessHistory;
   private final long maxBlockSizeBytes;
@@ -171,9 +169,7 @@ final class RowGroupPrefetchTracker {
     firstRowGroupPrefetched = true;
     int targetIndex = pendingSpeculationRowGroupIndex;
     pendingSpeculationRowGroupIndex = -1;
-    return shouldSpeculateNextRowGroup(targetIndex)
-        ? OptionalInt.of(targetIndex)
-        : OptionalInt.empty();
+    return OptionalInt.of(targetIndex);
   }
 
   /** Schedules the learned data columns of {@code rowGroupIndex}. */
@@ -354,7 +350,7 @@ final class RowGroupPrefetchTracker {
         accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
     OptionalInt nextIndex =
         filterTracker.findNextSurvivingRowGroup(layout, rowGroupIndex, dictionaryColumns);
-    if (nextIndex.isPresent() && shouldSpeculateNextRowGroup(nextIndex.getAsInt())) {
+    if (nextIndex.isPresent()) {
       prefetchRowGroup(nextIndex.getAsInt(), scheduleRanges);
     }
   }
@@ -368,26 +364,6 @@ final class RowGroupPrefetchTracker {
         .getRowGroup(rowGroupIndex)
         .map(rowGroup -> rowGroup.getCoalescedColumnRanges(dataColumns, maxBlockSizeBytes))
         .orElse(ImmutableList.of());
-  }
-
-  /**
-   * Returns whether {@code targetIndex} may be prefetched as the next row group. A row group whose
-   * dictionary pages this stream has read was visited by the engine and so belongs to this task's
-   * split; otherwise the row groups of a split-sized file are assumed to belong to other tasks.
-   */
-  private boolean shouldSpeculateNextRowGroup(int targetIndex) {
-    if (targetIndex < 0 || targetIndex >= layout.getRowGroups().size()) {
-      return false;
-    }
-    return !filterTracker.getDictionaryColumnsRead(targetIndex).isEmpty()
-        || !isSplitMultiRowGroupFile();
-  }
-
-  private boolean isSplitMultiRowGroupFile() {
-    List<ParquetRowGroup> rowGroups = layout.getRowGroups();
-    return rowGroups.size() > 1
-        && rowGroups.get(0).getEndOffset() - rowGroups.get(0).getStartOffset()
-            >= SPLIT_BOUNDARY_ROW_GROUP_BYTES;
   }
 
   private boolean isWithinLastDataPageRange(long position, int length) {

@@ -140,10 +140,13 @@ final class RowGroupFilterTracker {
       ParquetFileLayout layout, int afterIndex, Set<String> knownDictionaryColumns) {
     checkNotNull(layout, "layout cannot be null");
     checkNotNull(knownDictionaryColumns, "knownDictionaryColumns cannot be null");
+    if (dictionaryTouchedIndices.isEmpty()) {
+      return OptionalInt.empty();
+    }
 
     Set<String> activeFilterColumns = getActiveFilterColumns(knownDictionaryColumns);
     int rowGroupCount = layout.getRowGroups().size();
-    int maxDictIndex = dictionaryTouchedIndices.isEmpty() ? -1 : dictionaryTouchedIndices.last();
+    int maxDictIndex = dictionaryTouchedIndices.last();
 
     for (int candidate = afterIndex + 1; candidate < rowGroupCount; candidate++) {
       if (isSkippedByUpfrontDictionarySweep(layout, candidate, afterIndex, activeFilterColumns)) {
@@ -164,9 +167,6 @@ final class RowGroupFilterTracker {
    */
   private boolean isSkippedByUpfrontDictionarySweep(
       ParquetFileLayout layout, int candidate, int afterIndex, Set<String> activeFilterColumns) {
-    if (dictionaryTouchedIndices.isEmpty()) {
-      return false;
-    }
     Set<String> expectedColumns =
         dictionaryColumnsByRowGroup.getOrDefault(afterIndex, Collections.emptySet());
     if (expectedColumns.isEmpty()) {

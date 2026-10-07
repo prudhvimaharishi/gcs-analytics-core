@@ -126,14 +126,14 @@ class RowGroupFilterTrackerTest {
   }
 
   @Test
-  void findNextSurvivingRowGroup_noFilterActivity_returnsAdjacentRowGroup() {
+  void findNextSurvivingRowGroup_noFilterActivity_returnsEmpty() {
     ParquetFileLayout layout = createStatusLayout(2);
     RowGroupFilterTracker tracker = new RowGroupFilterTracker();
     tracker.recordDataRead(0);
 
     OptionalInt nextIndex = tracker.findNextSurvivingRowGroup(layout, 0, ImmutableSet.of());
 
-    assertThat(nextIndex).isEqualTo(OptionalInt.of(1));
+    assertThat(nextIndex).isEmpty();
   }
 
   @Test

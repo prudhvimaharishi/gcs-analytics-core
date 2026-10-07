@@ -38,7 +38,6 @@ class RowGroupPrefetchTrackerTest {
 
   private static final int SCHEMA_FINGERPRINT = 7;
   private static final long MAX_BLOCK_SIZE_BYTES = 1024;
-  private static final long SPLIT_SIZE_BYTES = 64L * 1024 * 1024;
 
   private ParquetFileLayout fileLayout;
   private SchemaAccessHistory accessHistory;
@@ -282,8 +281,21 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void onSingleRead_dataPageRead_prefetchesRemainingCurrentRowGroupAndNextRowGroupColumns() {
+  void onSingleRead_dataPageReadWithoutDictionarySweep_prefetchesOnlyRemainingCurrentRowGroup() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "value");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.onSingleRead(100, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).containsExactly(Range.closedOpen(250L, 300L));
+  }
+
+  @Test
+  void
+      onSingleRead_dataPageReadAfterDictionarySweep_prefetchesRemainingCurrentAndNextRowGroupColumns() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "value");
+    tracker.onSingleRead(150, 8, ranges -> true);
+    tracker.onSingleRead(450, 8, ranges -> true);
     List<Range<Long>> scheduledRanges = new ArrayList<>();
 
     tracker.onSingleRead(100, 16, scheduledRanges::addAll);
@@ -303,29 +315,7 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
-  void onSingleRead_splitMultiRowGroupFile_skipsFirstRowGroupAndNextRowGroupSpeculation() {
-    ParquetFileLayout splitLayout =
-        layout(
-            rowGroup(0, columnChunk("id", 0, SPLIT_SIZE_BYTES)),
-            rowGroup(1, columnChunk("id", SPLIT_SIZE_BYTES, SPLIT_SIZE_BYTES)));
-    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
-    RowGroupPrefetchTracker splitTracker =
-        new RowGroupPrefetchTracker(
-            splitLayout,
-            accessHistory,
-            MAX_BLOCK_SIZE_BYTES,
-            DictionaryTrigger.LAST_DICT_READ,
-            (start, end) -> {});
-    List<Range<Long>> scheduledRanges = new ArrayList<>();
-
-    splitTracker.onSingleRead(SPLIT_SIZE_BYTES * 2, 16, scheduledRanges::addAll);
-    splitTracker.onSingleRead(0, 16, scheduledRanges::addAll);
-
-    assertThat(scheduledRanges).isEmpty();
-  }
-
-  @Test
-  void onVectoredRead_rangeInsideRowGroup_recordsDataColumnAndNextRowGroupTarget() {
+  void onVectoredRead_rangeInsideRowGroupWithoutDictionarySweep_recordsDataColumnOnly() {
     GcsObjectRange range =
         GcsObjectRange.builder()
             .setOffset(100)
@@ -336,7 +326,7 @@ class RowGroupPrefetchTrackerTest {
     tracker.onVectoredRead(ImmutableList.of(range));
 
     assertThat(accessHistory.getDataColumns(SCHEMA_FINGERPRINT)).containsExactly("id");
-    assertThat(tracker.pollPendingNextRowGroup(ranges -> true)).hasValue(1);
+    assertThat(tracker.pollPendingNextRowGroup(ranges -> true)).isEmpty();
   }
 
   @Test
@@ -365,30 +355,6 @@ class RowGroupPrefetchTrackerTest {
     sweepTracker.onVectoredRead(ImmutableList.of(chunkRead));
 
     assertThat(sweepTracker.pollPendingNextRowGroup(ranges -> true)).hasValue(1);
-  }
-
-  @Test
-  void onVectoredRead_splitMultiRowGroupFileAfterDictionarySweep_returnsNextRowGroup() {
-    long secondRowGroupStart = SPLIT_SIZE_BYTES + 100;
-    RowGroupPrefetchTracker splitTracker =
-        new RowGroupPrefetchTracker(
-            layout(splitSizedRowGroup(0, 0), splitSizedRowGroup(1, secondRowGroupStart)),
-            accessHistory,
-            MAX_BLOCK_SIZE_BYTES,
-            DictionaryTrigger.LAST_DICT_READ,
-            (start, end) -> {});
-    splitTracker.onSingleRead(0, 8, ranges -> true);
-    splitTracker.onSingleRead(secondRowGroupStart, 8, ranges -> true);
-    GcsObjectRange chunkRead =
-        GcsObjectRange.builder()
-            .setOffset(100)
-            .setLength(16)
-            .setByteBufferFuture(new CompletableFuture<>())
-            .build();
-
-    splitTracker.onVectoredRead(ImmutableList.of(chunkRead));
-
-    assertThat(splitTracker.pollPendingNextRowGroup(ranges -> true)).hasValue(1);
   }
 
   @Test
@@ -502,12 +468,5 @@ class RowGroupPrefetchTrackerTest {
         columnChunk("id", startOffset, 50),
         dictionaryEncodedColumnChunk("name", startOffset + 50, 50, startOffset + 70),
         dictionaryEncodedColumnChunk("category", startOffset + 100, 50, startOffset + 120));
-  }
-
-  private static ParquetRowGroup splitSizedRowGroup(int index, long startOffset) {
-    return rowGroup(
-        index,
-        dictionaryEncodedColumnChunk("category", startOffset, 100, startOffset + 20),
-        columnChunk("id", startOffset + 100, SPLIT_SIZE_BYTES));
   }
 }

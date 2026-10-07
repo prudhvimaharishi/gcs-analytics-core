@@ -364,6 +364,7 @@ class PredictivePrefetchOptimizerTest {
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
     optimizer = createOptimizer(/* enabled= */ true);
+    readDictionariesOfFirstRowGroups(multiRowGroupLayout, 2);
     ParquetColumnChunk firstIdChunk =
         columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk secondIdChunk =
@@ -494,6 +495,7 @@ class PredictivePrefetchOptimizerTest {
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
     optimizer = createOptimizer(/* enabled= */ true);
+    readDictionariesOfFirstRowGroups(multiRowGroupLayout, 2);
     ParquetColumnChunk firstIdChunk =
         columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk secondIdChunk =
@@ -511,6 +513,7 @@ class PredictivePrefetchOptimizerTest {
   void afterReadVectored_rowGroupsRequestedInReverseOrder_doesNotRejectTheEarlierRowGroup()
       throws IOException {
     ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    readDictionariesOfFirstRowGroups(multiRowGroupLayout, 3);
     ParquetColumnChunk rg0IdChunk = columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk rg1IdChunk = columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk rg2IdChunk = columnChunk(multiRowGroupLayout, 2, ParquetTestFiles.ID_COLUMN);
@@ -588,6 +591,7 @@ class PredictivePrefetchOptimizerTest {
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
     optimizer = createOptimizer(/* enabled= */ true);
+    readDictionariesOfFirstRowGroups(multiRowGroupLayout, 2);
     ParquetColumnChunk rg0FirstChunk =
         columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk rg0SecondChunk =
@@ -1177,6 +1181,7 @@ class PredictivePrefetchOptimizerTest {
     ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
     channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
     optimizer = createOptimizer(/* enabled= */ true);
+    readDictionariesOfFirstRowGroups(multiRowGroupLayout, 2);
     ParquetColumnChunk rg0Id = columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk rg1Id = columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.ID_COLUMN);
     GcsObjectRange rg0Range = rangeOverChunk(rg0Id);
@@ -1447,6 +1452,7 @@ class PredictivePrefetchOptimizerTest {
         .recordDataAccess(fingerprint, ParquetTestFiles.VALUE_COLUMN);
     ParquetColumnChunk rg0IdChunk = columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk rg1IdChunk = columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.ID_COLUMN);
+    readDictionariesOfFirstRowGroups(multiRowGroupLayout, 2);
     readThroughChannel(optimizer, rg0IdChunk.getDataPageOffset(), ByteBuffer.allocate(8), channel);
 
     readThroughChannel(optimizer, rg1IdChunk.getDataPageOffset(), ByteBuffer.allocate(8), channel);
