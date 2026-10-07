@@ -356,10 +356,17 @@ final class RowGroupPrefetchTracker {
         .orElse(ImmutableList.of());
   }
 
+  /**
+   * Returns whether {@code targetIndex} may be prefetched as the next row group. A row group whose
+   * dictionary pages this stream has read was visited by the engine and so belongs to this task's
+   * split; otherwise the row groups of a split-sized file are assumed to belong to other tasks.
+   */
   private boolean shouldSpeculateNextRowGroup(int targetIndex) {
-    return targetIndex >= 0
-        && targetIndex < layout.getRowGroups().size()
-        && !isSplitMultiRowGroupFile();
+    if (targetIndex < 0 || targetIndex >= layout.getRowGroups().size()) {
+      return false;
+    }
+    return !filterTracker.getDictionaryColumnsRead(targetIndex).isEmpty()
+        || !isSplitMultiRowGroupFile();
   }
 
   private boolean isSplitMultiRowGroupFile() {

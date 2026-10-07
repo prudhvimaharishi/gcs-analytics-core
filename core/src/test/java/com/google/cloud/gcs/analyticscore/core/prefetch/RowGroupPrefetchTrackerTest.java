@@ -343,6 +343,30 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
+  void onVectoredRead_splitMultiRowGroupFileAfterDictionarySweep_returnsNextRowGroup() {
+    long secondRowGroupStart = SPLIT_SIZE_BYTES + 100;
+    RowGroupPrefetchTracker splitTracker =
+        new RowGroupPrefetchTracker(
+            layout(splitSizedRowGroup(0, 0), splitSizedRowGroup(1, secondRowGroupStart)),
+            accessHistory,
+            MAX_BLOCK_SIZE_BYTES,
+            DictionaryTrigger.LAST_DICT_READ,
+            (start, end) -> {});
+    splitTracker.onSingleRead(0, 8, ranges -> true);
+    splitTracker.onSingleRead(secondRowGroupStart, 8, ranges -> true);
+    GcsObjectRange chunkRead =
+        GcsObjectRange.builder()
+            .setOffset(100)
+            .setLength(16)
+            .setByteBufferFuture(new CompletableFuture<>())
+            .build();
+
+    splitTracker.onVectoredRead(ImmutableList.of(chunkRead));
+
+    assertThat(splitTracker.pollPendingNextRowGroup(ranges -> true)).hasValue(1);
+  }
+
+  @Test
   void pollPendingNextRowGroup_withoutPriorDataRead_schedulesNothingWhenOnlyDataColumnLearned() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
     List<Range<Long>> scheduledRanges = new ArrayList<>();
@@ -444,5 +468,12 @@ class RowGroupPrefetchTrackerTest {
         columnChunk("id", startOffset, 50),
         dictionaryEncodedColumnChunk("name", startOffset + 50, 50, startOffset + 70),
         dictionaryEncodedColumnChunk("category", startOffset + 100, 50, startOffset + 120));
+  }
+
+  private static ParquetRowGroup splitSizedRowGroup(int index, long startOffset) {
+    return rowGroup(
+        index,
+        dictionaryEncodedColumnChunk("category", startOffset, 100, startOffset + 20),
+        columnChunk("id", startOffset + 100, SPLIT_SIZE_BYTES));
   }
 }
