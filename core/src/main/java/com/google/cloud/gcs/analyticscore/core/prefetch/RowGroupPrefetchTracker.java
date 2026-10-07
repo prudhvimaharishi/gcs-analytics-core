@@ -261,9 +261,23 @@ final class RowGroupPrefetchTracker {
       return;
     }
     firstRowGroupPrefetched = true;
-    if (accessHistory.shouldSpeculateAtFooter(layout.getSchemaFingerprint())) {
+    if (!accessHistory.shouldSpeculateAtFooter(layout.getSchemaFingerprint())) {
+      return;
+    }
+    if (isUnfilteredSingleRowGroupFile()) {
+      prefetchRowGroup(0, scheduleRanges);
+    } else {
       speculateDictionaryPagesFrom(0, scheduleRanges);
     }
+  }
+
+  /**
+   * Returns whether the file has a single row group and no dictionary columns are learned, so the
+   * reader goes straight from the footer to that row group's data.
+   */
+  private boolean isUnfilteredSingleRowGroupFile() {
+    return layout.getRowGroups().size() == 1
+        && accessHistory.getDictionaryColumns(layout.getSchemaFingerprint()).isEmpty();
   }
 
   private void onDictionaryPageRead(

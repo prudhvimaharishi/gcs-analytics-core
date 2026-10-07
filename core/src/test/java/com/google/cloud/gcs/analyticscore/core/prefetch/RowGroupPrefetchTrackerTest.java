@@ -233,6 +233,31 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
+  void onSingleRead_singleRowGroupWithOnlyLearnedDataColumn_prefetchesRowGroupData() {
+    RowGroupPrefetchTracker singleRowGroupTracker =
+        createTracker(layout(rowGroup(0, columnChunk("id", 100, 50))));
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    singleRowGroupTracker.onSingleRead(900, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).containsExactly(Range.closedOpen(100L, 150L));
+  }
+
+  @Test
+  void onSingleRead_singleRowGroupWithOnlyLearnedDataColumnAndFooterGateClosed_schedulesNothing() {
+    RowGroupPrefetchTracker singleRowGroupTracker =
+        createTracker(layout(rowGroup(0, columnChunk("id", 100, 50))));
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    recordOutcomes(FileFilterOutcome.FOOTER_REJECTED, FileFilterOutcome.FOOTER_REJECTED);
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    singleRowGroupTracker.onSingleRead(900, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).isEmpty();
+  }
+
+  @Test
   void onBeforeRead_dictionaryPageReadWithLearnedColumns_schedulesDataRangesAndReturnsTrue() {
     accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
     accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
@@ -460,6 +485,15 @@ class RowGroupPrefetchTrackerTest {
     for (FileFilterOutcome outcome : outcomes) {
       accessHistory.recordFileOutcome(SCHEMA_FINGERPRINT, outcome);
     }
+  }
+
+  private RowGroupPrefetchTracker createTracker(ParquetFileLayout layout) {
+    return new RowGroupPrefetchTracker(
+        layout,
+        accessHistory,
+        MAX_BLOCK_SIZE_BYTES,
+        DictionaryTrigger.LAST_DICT_READ,
+        (start, end) -> {});
   }
 
   private static ParquetRowGroup sweptRowGroup(int index, long startOffset) {

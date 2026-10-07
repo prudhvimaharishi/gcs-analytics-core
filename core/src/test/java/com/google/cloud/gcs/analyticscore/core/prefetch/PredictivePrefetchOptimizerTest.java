@@ -376,7 +376,8 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void afterRead_outsideRowGroupsWithOnlyLearnedDataColumn_schedulesNothing() throws IOException {
+  void afterRead_outsideRowGroupsWithOnlyLearnedDataColumn_prefetchesTheSingleRowGroup()
+      throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     readThroughChannel(optimizer, idChunk.getDataPageOffset(), ByteBuffer.allocate(16), channel);
     FakeVectoredSeekableByteChannel newChannel = new FakeVectoredSeekableByteChannel(content);
@@ -385,7 +386,7 @@ class PredictivePrefetchOptimizerTest {
     newOptimizer.afterRead(content.length - 16, 16, newChannel);
     newOptimizer.onClose();
 
-    assertThat(newChannel.getRequestedOffsets()).isEmpty();
+    assertThat(newChannel.getRequestedOffsets()).containsExactly(idChunk.getStartOffset());
   }
 
   @Test
