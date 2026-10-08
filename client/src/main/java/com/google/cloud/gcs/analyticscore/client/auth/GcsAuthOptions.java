@@ -68,6 +68,13 @@ public abstract class GcsAuthOptions {
    */
   public abstract Optional<AuthType> getAuthType();
 
+  /**
+   * Returns the configured authentication type, or {@link AuthType#APPLICATION_DEFAULT} if unset.
+   */
+  AuthType effectiveAuthType() {
+    return getAuthType().orElse(AuthType.APPLICATION_DEFAULT);
+  }
+
   public abstract Optional<String> getServiceAccountJsonKeyfile();
 
   public abstract Optional<String> getWorkloadIdentityCredentialConfigFile();
@@ -311,7 +318,7 @@ public abstract class GcsAuthOptions {
     }
 
     private static void validateRequiredFields(GcsAuthOptions options, String prefix) {
-      AuthType authType = options.getAuthType().orElse(AuthType.APPLICATION_DEFAULT);
+      AuthType authType = options.effectiveAuthType();
       switch (authType) {
         case SERVICE_ACCOUNT_JSON_KEYFILE:
           checkRequiredField(
