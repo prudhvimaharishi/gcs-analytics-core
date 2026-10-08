@@ -194,6 +194,20 @@ class GcsAuthOptionsTest {
   }
 
   @Test
+  void effectiveAuthType_whenUnset_returnsApplicationDefault() {
+    GcsAuthOptions options = GcsAuthOptions.builder().build();
+
+    assertThat(options.effectiveAuthType()).isEqualTo(AuthType.APPLICATION_DEFAULT);
+  }
+
+  @Test
+  void effectiveAuthType_whenSet_returnsConfiguredType() {
+    GcsAuthOptions options = GcsAuthOptions.builder().setAuthType(AuthType.UNAUTHENTICATED).build();
+
+    assertThat(options.effectiveAuthType()).isEqualTo(AuthType.UNAUTHENTICATED);
+  }
+
+  @Test
   void createFromOptions_bareAuthKeysWithoutNamespace_areIgnored() {
     Map<String, String> map =
         ImmutableMap.of("auth.type", "SERVICE_ACCOUNT_JSON_KEYFILE", "auth.client-id", "client-id");

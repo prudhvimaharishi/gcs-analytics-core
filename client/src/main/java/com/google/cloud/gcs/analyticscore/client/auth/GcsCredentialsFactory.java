@@ -72,7 +72,7 @@ public final class GcsCredentialsFactory {
    */
   public static Credentials createCredentials(GcsAuthOptions options) throws IOException {
     checkNotNull(options, "options cannot be null");
-    if (options.getAuthType().orElse(null) == AuthType.UNAUTHENTICATED) {
+    if (options.effectiveAuthType() == AuthType.UNAUTHENTICATED) {
       return NoCredentials.getInstance();
     }
 
@@ -103,9 +103,8 @@ public final class GcsCredentialsFactory {
    */
   @VisibleForTesting
   static TrustStoreSource tokenTrustStoreSource(GcsAuthOptions options) {
-    AuthType effectiveAuthType = options.getAuthType().orElse(AuthType.APPLICATION_DEFAULT);
     return options.getTokenServerUri().isPresent()
-            && TOKEN_SERVER_URI_AUTH_TYPES.contains(effectiveAuthType)
+            && TOKEN_SERVER_URI_AUTH_TYPES.contains(options.effectiveAuthType())
         ? TrustStoreSource.SYSTEM_DEFAULT
         : TrustStoreSource.GOOGLE_BUNDLED;
   }
@@ -144,7 +143,7 @@ public final class GcsCredentialsFactory {
 
   private static GoogleCredentials createCredentialsForAuthType(
       GcsAuthOptions options, HttpTransportFactory transportFactory) throws IOException {
-    AuthType authType = options.getAuthType().orElse(AuthType.APPLICATION_DEFAULT);
+    AuthType authType = options.effectiveAuthType();
     switch (authType) {
       case APPLICATION_DEFAULT:
         return GoogleCredentials.getApplicationDefault(transportFactory);
