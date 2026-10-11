@@ -44,6 +44,8 @@ These parameters fine-tune the low-level data streaming behavior. They allow you
 | `analytics-core.read.thread.count` | Number of threads for parallel read operations like vectored IO. | `16` |
 | `analytics-core.read.vectored.range.merge-gap.max-bytes` | Maximum gap (in bytes) between ranges to merge in vectored reads. | `4096` (4 KB) |
 | `analytics-core.read.vectored.range.merged-size.max-bytes` | Maximum size (in bytes) of a merged range in vectored reads. | `8388608` (8 MB) |
+| `analytics-core.read.split.enabled` | Controls whether reads larger than `analytics-core.read.split.threshold-bytes` are fetched as parallel part requests that fill the same buffer. Applies to vectored reads and to regular reads when the object size is known. | `false` |
+| `analytics-core.read.split.threshold-bytes` | Reads larger than this (in bytes) are split into near-equal parts of at most this size. Must be at least 1 MB. | `8388608` (8 MB) |
 | `analytics-core.read.inplace-seek-limit-bytes` | In-place seek limit (in bytes). | `131072` (128 KB) |
 | `analytics-core.read.file-access-pattern` | File access pattern. Supported values: `RANDOM`, `SEQUENTIAL`, `AUTO_SEQUENTIAL`, `AUTO_RANDOM`. | `AUTO_SEQUENTIAL` |
 | `analytics-core.adaptive-read.sequential-read-threshold` | Threshold for number of sequential reads to switch to sequential mode. | `3` |

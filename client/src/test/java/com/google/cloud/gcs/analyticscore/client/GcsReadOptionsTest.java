@@ -49,11 +49,14 @@ class GcsReadOptionsTest {
             .put("gcs.analytics-core.adaptive-read.sequential-read-threshold", "5")
             .put("gcs.analytics-core.random-read.min-request-size", "65536")
             .put("gcs.analytics-core.read.bidi.timeout-seconds", "30")
+            .put("gcs.analytics-core.read.split.enabled", "true")
+            .put("gcs.analytics-core.read.split.threshold-bytes", "16777216")
             .build();
     String prefix = "gcs.";
 
     GcsReadOptions readOptions = GcsReadOptions.createFromOptions(properties, prefix);
     GcsVectoredReadOptions vectoredReadOptions = readOptions.getGcsVectoredReadOptions();
+    GcsSplitReadOptions splitReadOptions = readOptions.getGcsSplitReadOptions();
 
     assertThat(readOptions.getChunkSize()).isEqualTo(Optional.of(8192));
     assertThat(readOptions.getDecryptionKey()).isEqualTo(Optional.of("test-key"));
@@ -76,6 +79,8 @@ class GcsReadOptionsTest {
     assertThat(readOptions.getFileAccessPattern()).isEqualTo(FileAccessPattern.AUTO_SEQUENTIAL);
     assertThat(vectoredReadOptions.getMaxMergeGap()).isEqualTo(1024);
     assertThat(vectoredReadOptions.getMaxMergeSize()).isEqualTo(2048);
+    assertThat(splitReadOptions.isEnabled()).isTrue();
+    assertThat(splitReadOptions.getThresholdBytes()).isEqualTo(16 * MB);
   }
 
   @Test
@@ -100,6 +105,8 @@ class GcsReadOptionsTest {
     assertThat(readOptions.getRandomReadMinRequestSize()).isEqualTo(128 * KB);
     assertThat(vectoredReadOptions.getMaxMergeGap()).isEqualTo(4 * KB);
     assertThat(vectoredReadOptions.getMaxMergeSize()).isEqualTo(8 * MB);
+    assertThat(readOptions.getGcsSplitReadOptions().isEnabled()).isFalse();
+    assertThat(readOptions.getGcsSplitReadOptions().getThresholdBytes()).isEqualTo(8 * MB);
   }
 
   @ParameterizedTest
@@ -112,6 +119,7 @@ class GcsReadOptionsTest {
         "gcs.analytics-core.adaptive-read.sequential-read-threshold",
         "gcs.analytics-core.random-read.min-request-size",
         "gcs.analytics-core.read.bidi.timeout-seconds",
+        "gcs.analytics-core.read.split.threshold-bytes",
       })
   void createFromOptions_integerValuesGreaterThanIntegerMax_throwsIllegalArgumentException(
       String propertyKey) {

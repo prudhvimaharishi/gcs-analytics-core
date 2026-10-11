@@ -22,6 +22,7 @@ import com.google.cloud.gcs.analyticscore.client.GcsReadChannelMetadataExtractor
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Attribute;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
+import com.google.cloud.gcs.analyticscore.common.telemetry.MetricsRecorder;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Operation;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.cloud.storage.Storage;
@@ -36,6 +37,7 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SeekableByteChannel;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
@@ -54,6 +56,8 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   protected Supplier<ExecutorService> executorServiceSupplier;
   private static final ImmutableMap<String, String> COMMON_ATTRIBUTES =
       ImmutableMap.of(Attribute.CLASS_NAME.name(), GcsReadChannel.class.getName());
+  // Regular reads are measured by the stream that owns this channel, so their parts record nothing.
+  private static final MetricsRecorder NO_OP_RECORDER = (metric, value, attributes) -> {};
   protected final Telemetry telemetry;
   private final ReadStrategy strategy;
   private volatile boolean isGcsReadChannelOpen = true;
@@ -141,6 +145,10 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     if (dst.remaining() == 0) {
       return 0;
     }
+    int splitReadLength = getSplitReadLength(dst.remaining());
+    if (splitReadLength > 0) {
+      return readInParts(dst, splitReadLength);
+    }
     int totalBytesRead = 0;
     while (dst.hasRemaining()) {
       int bytesRead = readNextChunk(dst);
@@ -151,6 +159,49 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     }
 
     return totalBytesRead;
+  }
+
+  /**
+   * Returns how many bytes of a read of {@code requestedLength} bytes to fetch as parallel parts,
+   * or 0 if the read is not split. Splitting needs the object size, so no part asks for bytes past
+   * the end of the object.
+   */
+  private int getSplitReadLength(int requestedLength) {
+    if (itemInfo == null) {
+      return 0;
+    }
+    long bytesLeft = itemInfo.getSize() - gcsReadChannelPosition;
+    if (bytesLeft <= 0) {
+      return 0;
+    }
+    int length = (int) Math.min(requestedLength, bytesLeft);
+    return shouldSplit(length) ? length : 0;
+  }
+
+  /**
+   * Reads {@code length} bytes into {@code dst} as parallel part requests. The parts use their own
+   * connections and leave the read strategy untouched, so its position always matches its own
+   * connection.
+   */
+  private int readInParts(ByteBuffer dst, int length) throws IOException {
+    ExecutorService executorService = executorServiceSupplier.get();
+    checkNotNull(executorService, "Thread pool must not be null");
+    ByteBuffer target = dst.duplicate();
+    target.limit(target.position() + length);
+    recordSplitParts(length);
+    try {
+      new SplitRangeReader(
+              executorService,
+              (offset, window) -> readPart(offset, window, NO_OP_RECORDER),
+              getSplitThresholdBytes())
+          .read(gcsReadChannelPosition, target);
+    } catch (IOException | RuntimeException e) {
+      rethrowAsFileNotFoundIf404(e);
+      throw e;
+    }
+    dst.position(dst.position() + length);
+    gcsReadChannelPosition += length;
+    return length;
   }
 
   private int readNextChunk(ByteBuffer dst) throws IOException {
@@ -269,6 +320,10 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
             vectoredReadOptions.getMaxMergeSize());
 
     for (GcsObjectCombinedRange combinedRange : combinedRanges) {
+      if (shouldSplit(combinedRange.getLength())) {
+        readCombinedRangeInParts(executorService, combinedRange, allocate, operation);
+        continue;
+      }
       var unused =
           executorService.submit(
               () -> {
@@ -297,17 +352,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
                       "Buffer allocation returned null for combinedObjectRange: %s",
                       combinedObjectRange));
             }
-            int numOfBytesRead = 0;
-            while (dataBuffer.hasRemaining()) {
-              int bytesRead = channel.read(dataBuffer);
-              extractMetadataAfterRead(readStrategy);
-              if (bytesRead < 0) {
-                // EOF reached.
-                break;
-              }
-              recorder.record(Metric.READ_BYTES, bytesRead, Collections.emptyMap());
-              numOfBytesRead += bytesRead;
-            }
+            int numOfBytesRead = readIntoBuffer(channel, readStrategy, dataBuffer, recorder);
             if (numOfBytesRead < combinedObjectRange.getLength()) {
               throw new EOFException(
                   String.format(
@@ -325,12 +370,104 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
                   combinedObjectRange, underlyingRange, numOfBytesRead, dataBuffer);
             }
           } catch (Exception e) {
-            completeWithException(
-                combinedObjectRange,
-                isNotFoundStorageException(e) ? createFileNotFoundException(e) : e);
+            completeWithException(combinedObjectRange, toReadFailure(e));
           }
           return null;
         });
+  }
+
+  /**
+   * Reads a combined range as parallel part requests that fill one buffer, then completes its
+   * underlying ranges with slices of that buffer.
+   */
+  private void readCombinedRangeInParts(
+      ExecutorService executorService,
+      GcsObjectCombinedRange combinedRange,
+      IntFunction<ByteBuffer> allocate,
+      Operation operation) {
+    recordSplitParts(combinedRange.getLength());
+    SplitRangeReader splitRangeReader =
+        new SplitRangeReader(
+            executorService,
+            (offset, window) ->
+                telemetry.measure(
+                    operation,
+                    recorder -> {
+                      readPart(offset, window, recorder);
+                      return null;
+                    }),
+            getSplitThresholdBytes());
+    CompletableFuture<ByteBuffer> unused =
+        splitRangeReader
+            .readAsync(combinedRange.getOffset(), combinedRange.getLength(), allocate)
+            .whenComplete(
+                (dataBuffer, failure) -> {
+                  if (failure != null) {
+                    completeWithException(combinedRange, toReadFailure(failure));
+                    return;
+                  }
+                  for (GcsObjectRange underlyingRange : combinedRange.getUnderlyingRanges()) {
+                    underlyingRange
+                        .getByteBufferFuture()
+                        .complete(
+                            VectoredIoUtil.fetchUnderlyingRangeData(
+                                dataBuffer, combinedRange, underlyingRange));
+                  }
+                });
+  }
+
+  /**
+   * Reads object bytes {@code [offset, offset + window.remaining())} into {@code window} through
+   * one bounded request.
+   */
+  private void readPart(long offset, ByteBuffer window, MetricsRecorder recorder)
+      throws IOException {
+    validatePosition(offset);
+    int length = window.remaining();
+    ReadStrategy readStrategy = new RandomReadStrategy(storage, itemId, readOptions, itemInfo);
+    try (ReadChannel channel = readStrategy.getReadChannel(offset, length)) {
+      int numOfBytesRead = readIntoBuffer(channel, readStrategy, window, recorder);
+      if (numOfBytesRead < length) {
+        throw new EOFException(
+            String.format(
+                "EOF reached while reading part, offset: %d, item: %s, numRead: %d, expected: %d",
+                offset, itemId, numOfBytesRead, length));
+      }
+    }
+  }
+
+  /** Reads from {@code channel} until {@code buffer} is full or the channel ends. */
+  private int readIntoBuffer(
+      ReadChannel channel, ReadStrategy readStrategy, ByteBuffer buffer, MetricsRecorder recorder)
+      throws IOException {
+    int numOfBytesRead = 0;
+    while (buffer.hasRemaining()) {
+      int bytesRead = channel.read(buffer);
+      extractMetadataAfterRead(readStrategy);
+      if (bytesRead < 0) {
+        // EOF reached.
+        break;
+      }
+      recorder.record(Metric.READ_BYTES, bytesRead, Collections.emptyMap());
+      numOfBytesRead += bytesRead;
+    }
+    return numOfBytesRead;
+  }
+
+  private boolean shouldSplit(int length) {
+    GcsSplitReadOptions splitReadOptions = readOptions.getGcsSplitReadOptions();
+    return splitReadOptions.isEnabled() && length > splitReadOptions.getThresholdBytes();
+  }
+
+  private int getSplitThresholdBytes() {
+    return readOptions.getGcsSplitReadOptions().getThresholdBytes();
+  }
+
+  private void recordSplitParts(int length) {
+    telemetry.recordMetric(
+        Metric.READ_SPLIT_PARTS,
+        RangeSplitter.partCount(length, getSplitThresholdBytes()),
+        COMMON_ATTRIBUTES);
   }
 
   private void populateGcsObjectRangeFromCombinedObjectRange(
@@ -372,7 +509,11 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
     }
   }
 
-  private static boolean isNotFoundStorageException(Exception e) {
+  private Throwable toReadFailure(Throwable failure) {
+    return isNotFoundStorageException(failure) ? createFileNotFoundException(failure) : failure;
+  }
+
+  private static boolean isNotFoundStorageException(Throwable e) {
     if (e instanceof FileNotFoundException) {
       return false;
     }
@@ -381,7 +522,7 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
         .orElse(false);
   }
 
-  private FileNotFoundException createFileNotFoundException(Exception cause) {
+  private FileNotFoundException createFileNotFoundException(Throwable cause) {
     FileNotFoundException notFound = GcsExceptionUtil.createFileNotFoundException(itemId);
     notFound.addSuppressed(cause);
     return notFound;
