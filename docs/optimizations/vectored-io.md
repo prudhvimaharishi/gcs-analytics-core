@@ -8,6 +8,9 @@ Query engines (like Spark) processing columnar formats (like Parquet or ORC) oft
 ### Range Merging Optimization
 To further minimize the number of separate HTTP requests made to GCS, the library analyzes the submitted ranges before dispatching them. If multiple requested ranges are physically close to each other or overlapping in the file, it "merges" them into a single, larger HTTP GET request. The larger response is then unpacked into the individual buffers requested by the application.
 
+### Range Splitting
+A single GCS connection delivers a large range slowly, so when splitting is enabled, a range larger than the split threshold is fetched as several near-equal parts in parallel. Every part writes straight into its own slice of the one buffer allocated for the range, so splitting adds no buffers and no copies. Merging decides which ranges share a buffer, and splitting decides how many requests fill it. For example, with the default 8 MB threshold, a 30 MB range is fetched as 4 parallel 7.5 MB requests into one 30 MB buffer. Regular (non-vectored) reads larger than the threshold are split the same way, directly into the caller's buffer, when the object size is known.
+
 ### Sequential vs. Vectored I/O Flow
 
 ```mermaid

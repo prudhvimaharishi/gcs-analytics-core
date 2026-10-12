@@ -85,6 +85,8 @@ public abstract class GcsReadOptions {
 
   public abstract GcsVectoredReadOptions getGcsVectoredReadOptions();
 
+  public abstract GcsSplitReadOptions getGcsSplitReadOptions();
+
   public abstract Builder toBuilder();
 
   public abstract int getInplaceSeekLimit();
@@ -99,6 +101,7 @@ public abstract class GcsReadOptions {
   public static Builder builder() {
     return new AutoValue_GcsReadOptions.Builder()
         .setGcsVectoredReadOptions(GcsVectoredReadOptions.builder().build())
+        .setGcsSplitReadOptions(GcsSplitReadOptions.builder().build())
         .setFooterPrefetchEnabled(DEFAULT_FOOTER_PREFETCH_ENABLED)
         .setFooterPrefetchSizeSmallFile(DEFAULT_SMALL_FILE_FOOTER_PREFETCH_SIZE)
         .setFooterPrefetchSizeLargeFile(DEFAULT_LARGE_FILE_FOOTER_PREFETCH_SIZE)
@@ -175,6 +178,8 @@ public abstract class GcsReadOptions {
 
     optionsBuilder.setGcsVectoredReadOptions(
         GcsVectoredReadOptions.createFromOptions(analyticsCoreOptions, prefix));
+    optionsBuilder.setGcsSplitReadOptions(
+        GcsSplitReadOptions.createFromOptions(analyticsCoreOptions, prefix));
 
     return optionsBuilder.build();
   }
@@ -190,6 +195,8 @@ public abstract class GcsReadOptions {
     public abstract Builder setUserProjectId(String userProjectId);
 
     public abstract Builder setGcsVectoredReadOptions(GcsVectoredReadOptions vectoredReadOptions);
+
+    public abstract Builder setGcsSplitReadOptions(GcsSplitReadOptions splitReadOptions);
 
     public abstract Builder setFooterPrefetchEnabled(boolean footerPrefetchEnabled);
 
