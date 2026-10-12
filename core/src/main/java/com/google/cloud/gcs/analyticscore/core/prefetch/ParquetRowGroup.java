@@ -99,16 +99,15 @@ abstract class ParquetRowGroup {
 
   /**
    * Returns the sorted byte ranges of the whole column chunks of {@code columns}, dictionary pages
-   * included, merging touching chunks while the merged span stays within {@code maxBlockSizeBytes}.
+   * included, merging touching chunks into contiguous spans.
    */
-  final ImmutableList<Range<Long>> getCoalescedColumnRanges(
-      Set<String> columns, long maxBlockSizeBytes) {
+  final ImmutableList<Range<Long>> getCoalescedColumnRanges(Set<String> columns) {
     List<Range<Long>> ranges = new ArrayList<>();
     for (String columnPath : columns) {
       getColumnChunk(columnPath).map(ParquetColumnChunk::getByteRange).ifPresent(ranges::add);
     }
     ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return coalesceConnectedRanges(ranges, maxBlockSizeBytes);
+    return coalesceConnectedRanges(ranges);
   }
 
   /** Returns the sorted dictionary page byte ranges of the dictionary-encoded {@code columns}. */
@@ -124,7 +123,7 @@ abstract class ParquetRowGroup {
   }
 
   private static ImmutableList<Range<Long>> coalesceConnectedRanges(
-      List<Range<Long>> sortedRanges, long maxBlockSizeBytes) {
+      List<Range<Long>> sortedRanges) {
     if (sortedRanges.isEmpty()) {
       return ImmutableList.of();
     }
@@ -133,7 +132,7 @@ abstract class ParquetRowGroup {
     for (int i = 1; i < sortedRanges.size(); i++) {
       Range<Long> next = sortedRanges.get(i);
       if (current.isConnected(next)
-          && next.upperEndpoint() - current.lowerEndpoint() <= maxBlockSizeBytes) {
+          && next.upperEndpoint() - current.lowerEndpoint() <= Integer.MAX_VALUE) {
         current = current.span(next);
       } else {
         coalesced.add(current);

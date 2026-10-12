@@ -37,7 +37,6 @@ import org.junit.jupiter.api.Test;
 class RowGroupPrefetchTrackerTest {
 
   private static final int SCHEMA_FINGERPRINT = 7;
-  private static final long MAX_BLOCK_SIZE_BYTES = 1024;
 
   private ParquetFileLayout fileLayout;
   private SchemaAccessHistory accessHistory;
@@ -63,7 +62,6 @@ class RowGroupPrefetchTrackerTest {
         new RowGroupPrefetchTracker(
             fileLayout,
             accessHistory,
-            MAX_BLOCK_SIZE_BYTES,
             DictionaryTrigger.LAST_DICT_READ,
             (start, end) -> cancelledWindows.add(Range.closedOpen(start, end)));
   }
@@ -221,7 +219,6 @@ class RowGroupPrefetchTrackerTest {
         new RowGroupPrefetchTracker(
             singleRowGroupLayout,
             accessHistory,
-            MAX_BLOCK_SIZE_BYTES,
             DictionaryTrigger.LAST_DICT_READ,
             (start, end) -> {});
     List<Range<Long>> scheduledRanges = new ArrayList<>();
@@ -339,7 +336,6 @@ class RowGroupPrefetchTrackerTest {
                 sweptRowGroup(2, 500),
                 sweptRowGroup(3, 700)),
             accessHistory,
-            MAX_BLOCK_SIZE_BYTES,
             DictionaryTrigger.LAST_DICT_READ,
             (start, end) -> {});
     for (long categoryDictionaryOffset : new long[] {200, 400, 600, 800}) {
@@ -455,11 +451,7 @@ class RowGroupPrefetchTrackerTest {
 
   private RowGroupPrefetchTracker createTracker(ParquetFileLayout layout) {
     return new RowGroupPrefetchTracker(
-        layout,
-        accessHistory,
-        MAX_BLOCK_SIZE_BYTES,
-        DictionaryTrigger.LAST_DICT_READ,
-        (start, end) -> {});
+        layout, accessHistory, DictionaryTrigger.LAST_DICT_READ, (start, end) -> {});
   }
 
   private static ParquetRowGroup sweptRowGroup(int index, long startOffset) {

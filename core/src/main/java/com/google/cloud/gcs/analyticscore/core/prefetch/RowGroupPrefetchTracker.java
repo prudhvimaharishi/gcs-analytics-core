@@ -45,7 +45,6 @@ final class RowGroupPrefetchTracker {
 
   private final ParquetFileLayout layout;
   private final SchemaAccessHistory accessHistory;
-  private final long maxBlockSizeBytes;
   private final DictionaryTrigger dictionaryTrigger;
   private final BiConsumer<Long, Long> cancelRangeWindow;
   private final RowGroupFilterTracker filterTracker = new RowGroupFilterTracker();
@@ -59,12 +58,10 @@ final class RowGroupPrefetchTracker {
   RowGroupPrefetchTracker(
       ParquetFileLayout layout,
       SchemaAccessHistory accessHistory,
-      long maxBlockSizeBytes,
       DictionaryTrigger dictionaryTrigger,
       BiConsumer<Long, Long> cancelRangeWindow) {
     this.layout = checkNotNull(layout, "layout cannot be null");
     this.accessHistory = checkNotNull(accessHistory, "accessHistory cannot be null");
-    this.maxBlockSizeBytes = maxBlockSizeBytes;
     this.dictionaryTrigger = checkNotNull(dictionaryTrigger, "dictionaryTrigger cannot be null");
     this.cancelRangeWindow = checkNotNull(cancelRangeWindow, "cancelRangeWindow cannot be null");
   }
@@ -362,7 +359,7 @@ final class RowGroupPrefetchTracker {
     ImmutableSet<String> dataColumns = accessHistory.getDataColumns(layout.getSchemaFingerprint());
     return layout
         .getRowGroup(rowGroupIndex)
-        .map(rowGroup -> rowGroup.getCoalescedColumnRanges(dataColumns, maxBlockSizeBytes))
+        .map(rowGroup -> rowGroup.getCoalescedColumnRanges(dataColumns))
         .orElse(ImmutableList.of());
   }
 

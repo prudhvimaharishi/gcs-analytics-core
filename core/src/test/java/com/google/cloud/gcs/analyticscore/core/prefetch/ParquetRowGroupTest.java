@@ -155,9 +155,7 @@ public class ParquetRowGroupTest {
             columnChunk("category", 150, 50),
             columnChunk("value", 250, 50));
 
-    assertThat(
-            group.getCoalescedColumnRanges(
-                ImmutableSet.of("value", "id", "category", "absent"), /* maxBlockSizeBytes= */ 500))
+    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("value", "id", "category", "absent")))
         .containsExactly(Range.closedOpen(100L, 200L), Range.closedOpen(250L, 300L))
         .inOrder();
   }
@@ -166,9 +164,7 @@ public class ParquetRowGroupTest {
   void getCoalescedColumnRanges_dictionaryEncodedColumn_returnsWholeChunkIncludingDictionaryPage() {
     ParquetRowGroup group = rowGroup(0, dictionaryEncodedColumnChunk("category", 150, 50, 170));
 
-    assertThat(
-            group.getCoalescedColumnRanges(
-                ImmutableSet.of("category"), /* maxBlockSizeBytes= */ 500))
+    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("category")))
         .containsExactly(Range.closedOpen(150L, 200L));
   }
 
@@ -181,31 +177,15 @@ public class ParquetRowGroupTest {
             dictionaryEncodedColumnChunk("category", 150, 50, 170),
             columnChunk("value", 200, 50));
 
-    assertThat(
-            group.getCoalescedColumnRanges(
-                ImmutableSet.of("id", "category", "value"), /* maxBlockSizeBytes= */ 500))
+    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("id", "category", "value")))
         .containsExactly(Range.closedOpen(100L, 250L));
-  }
-
-  @Test
-  void getCoalescedColumnRanges_touchingColumnsExceedMaxBlockSize_keepsSeparateRanges() {
-    ParquetRowGroup group =
-        rowGroup(0, columnChunk("id", 100, 50), columnChunk("category", 150, 50));
-
-    assertThat(
-            group.getCoalescedColumnRanges(
-                ImmutableSet.of("id", "category"), /* maxBlockSizeBytes= */ 50))
-        .containsExactly(Range.closedOpen(100L, 150L), Range.closedOpen(150L, 200L))
-        .inOrder();
   }
 
   @Test
   void getCoalescedColumnRanges_noMatchingColumns_returnsEmptyList() {
     ParquetRowGroup group = rowGroup(0, columnChunk("id", 100, 50));
 
-    assertThat(
-            group.getCoalescedColumnRanges(ImmutableSet.of("absent"), /* maxBlockSizeBytes= */ 500))
-        .isEmpty();
+    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("absent"))).isEmpty();
   }
 
   @Test

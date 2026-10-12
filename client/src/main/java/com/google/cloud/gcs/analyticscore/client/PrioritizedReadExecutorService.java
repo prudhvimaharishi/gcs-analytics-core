@@ -21,9 +21,9 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -48,11 +48,11 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
   private final int maxLowPriorityConcurrency;
   private final AtomicLong sequenceGenerator = new AtomicLong();
   private final Object lock = new Object();
-  private final Queue<PrioritizedTask> deferredLowPriorityQueue = new ArrayDeque<>();
+  private final Queue<PrioritizedTask> deferredLowPriorityQueue = new PriorityQueue<>();
   private int activeLowPrioritySlots = 0;
 
   PrioritizedReadExecutorService(int threadCount) {
-    this(threadCount, Math.max(1, (threadCount * 5) / 8));
+    this(threadCount, Math.max(1, threadCount / 2));
   }
 
   PrioritizedReadExecutorService(int threadCount, int maxLowPriorityConcurrency) {
@@ -138,11 +138,34 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
         activeLowPrioritySlots++;
         task.dispatchedToPool = true;
         super.execute(task);
+      } else if (preemptLargerQueuedLowPriorityTaskLocked(task)) {
+        task.dispatchedToPool = true;
+        super.execute(task);
       } else {
         deferredLowPriorityQueue.add(task);
       }
     }
     return task;
+  }
+
+  private boolean preemptLargerQueuedLowPriorityTaskLocked(PrioritizedTask candidate) {
+    PrioritizedTask largestQueuedLowTask = null;
+    for (Runnable queued : getQueue()) {
+      if (queued instanceof PrioritizedTask) {
+        PrioritizedTask queuedTask = (PrioritizedTask) queued;
+        if (queuedTask.countsAsLowPriority
+            && candidate.compareTo(queuedTask) < 0
+            && (largestQueuedLowTask == null || largestQueuedLowTask.compareTo(queuedTask) < 0)) {
+          largestQueuedLowTask = queuedTask;
+        }
+      }
+    }
+    if (largestQueuedLowTask != null && getQueue().remove(largestQueuedLowTask)) {
+      largestQueuedLowTask.dispatchedToPool = false;
+      deferredLowPriorityQueue.add(largestQueuedLowTask);
+      return true;
+    }
+    return false;
   }
 
   private void promote(PrioritizedTask task) {
@@ -249,6 +272,7 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     private final Runnable command;
     private final long sequenceNumber;
     private final List<GcsObjectRange> underlyingRanges;
+    private final long totalBytes;
     private volatile int priority;
     private boolean countsAsLowPriority;
     private boolean dispatchedToPool;
@@ -264,6 +288,7 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
       this.sequenceNumber = sequenceNumber;
       this.countsAsLowPriority = countsAsLowPriority;
       this.underlyingRanges = underlyingRanges;
+      this.totalBytes = computeTotalBytes(underlyingRanges);
     }
 
     @Override
@@ -278,9 +303,24 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
     @Override
     public int compareTo(PrioritizedTask other) {
       int priorityDiff = Integer.compare(this.priority, other.priority);
-      return priorityDiff != 0
-          ? priorityDiff
-          : Long.compare(this.sequenceNumber, other.sequenceNumber);
+      if (priorityDiff != 0) {
+        return priorityDiff;
+      }
+      if (this.priority == PRIORITY_LOW) {
+        int sizeDiff = Long.compare(this.totalBytes, other.totalBytes);
+        if (sizeDiff != 0) {
+          return sizeDiff;
+        }
+      }
+      return Long.compare(this.sequenceNumber, other.sequenceNumber);
+    }
+
+    private long computeTotalBytes(List<GcsObjectRange> ranges) {
+      long total = 0;
+      for (GcsObjectRange range : ranges) {
+        total += range.getLength();
+      }
+      return total;
     }
   }
 }

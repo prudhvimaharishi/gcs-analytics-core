@@ -88,7 +88,8 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
             .orElseThrow(() -> new IllegalStateException(PREFETCH_DISABLED_IN_CACHE_MANAGER));
     this.itemId = itemId;
     this.cacheManager = cacheManager;
-    this.scheduler = new PrefetchScheduler(itemId, bufferCache);
+    this.scheduler =
+        new PrefetchScheduler(itemId, bufferCache, prefetchOptions.getBlockSizeBytes());
   }
 
   @Override
@@ -223,7 +224,6 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
                     new RowGroupPrefetchTracker(
                         layout,
                         cacheManager.getSchemaAccessHistory().get(),
-                        prefetchOptions.getBlockSizeBytes(),
                         prefetchOptions.getDictionaryTrigger(),
                         scheduler::cancelRangeWindow));
   }

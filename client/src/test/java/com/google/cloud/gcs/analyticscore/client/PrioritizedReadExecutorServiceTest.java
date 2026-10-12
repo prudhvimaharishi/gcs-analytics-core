@@ -377,10 +377,116 @@ class PrioritizedReadExecutorServiceTest {
     assertThat(lowFinished.await(5, TimeUnit.SECONDS)).isTrue();
   }
 
+  @Test
+  void submitLowPriority_deferredTasksWithDifferentSizes_runsSmallestRangeFirst() throws Exception {
+    executor =
+        new PrioritizedReadExecutorService(
+            /* threadCount= */ 1, /* maxLowPriorityConcurrency= */ 1);
+    CountDownLatch lowBlocker = new CountDownLatch(1);
+    CountDownLatch firstLowStarted = new CountDownLatch(1);
+    CountDownLatch done = new CountDownLatch(3);
+    List<String> executionOrder = Collections.synchronizedList(new ArrayList<>());
+    var unusedFirst =
+        executor.submitLowPriority(
+            () -> {
+              firstLowStarted.countDown();
+              awaitQuietly(lowBlocker);
+            });
+    assertThat(firstLowStarted.await(5, TimeUnit.SECONDS)).isTrue();
+    executor.submitLowPriority(
+        () -> {
+          executionOrder.add("8MB-data");
+          done.countDown();
+        },
+        ImmutableList.of(createRangeWithLength(8 * 1024 * 1024)));
+    executor.submitLowPriority(
+        () -> {
+          executionOrder.add("4KB-dict-1");
+          done.countDown();
+        },
+        ImmutableList.of(createRangeWithLength(4 * 1024)));
+    executor.submitLowPriority(
+        () -> {
+          executionOrder.add("4KB-dict-2");
+          done.countDown();
+        },
+        ImmutableList.of(createRangeWithLength(4 * 1024)));
+
+    lowBlocker.countDown();
+
+    assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(executionOrder).containsExactly("4KB-dict-1", "4KB-dict-2", "8MB-data").inOrder();
+  }
+
+  @Test
+  void submitLowPriority_dispatchedTasksWithDifferentSizes_runsSmallestRangeFirst()
+      throws Exception {
+    executor =
+        new PrioritizedReadExecutorService(
+            /* threadCount= */ 1, /* maxLowPriorityConcurrency= */ 2);
+    CountDownLatch blocker = new CountDownLatch(1);
+    CountDownLatch started = new CountDownLatch(1);
+    CountDownLatch done = new CountDownLatch(2);
+    List<String> executionOrder = Collections.synchronizedList(new ArrayList<>());
+    executor.execute(
+        () -> {
+          started.countDown();
+          awaitQuietly(blocker);
+        });
+    assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+    executor.submitLowPriority(
+        () -> {
+          executionOrder.add("large");
+          done.countDown();
+        },
+        ImmutableList.of(createRangeWithLength(1024)));
+    executor.submitLowPriority(
+        () -> {
+          executionOrder.add("small");
+          done.countDown();
+        },
+        ImmutableList.of(createRangeWithLength(64)));
+
+    blocker.countDown();
+
+    assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(executionOrder).containsExactly("small", "large").inOrder();
+  }
+
+  @Test
+  void defaultConstructor_capsLowPriorityTasksAtHalfOfThreadCount() throws Exception {
+    executor = new PrioritizedReadExecutorService(/* threadCount= */ 4);
+    CountDownLatch lowBlocker = new CountDownLatch(1);
+    CountDownLatch twoLowStarted = new CountDownLatch(2);
+    CountDownLatch thirdLowStarted = new CountDownLatch(1);
+    var unusedFirst =
+        executor.submitLowPriority(
+            () -> {
+              twoLowStarted.countDown();
+              awaitQuietly(lowBlocker);
+            });
+    var unusedSecond =
+        executor.submitLowPriority(
+            () -> {
+              twoLowStarted.countDown();
+              awaitQuietly(lowBlocker);
+            });
+    assertThat(twoLowStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+    var unusedThird = executor.submitLowPriority(thirdLowStarted::countDown);
+
+    assertThat(thirdLowStarted.await(100, TimeUnit.MILLISECONDS)).isFalse();
+    lowBlocker.countDown();
+  }
+
   private static GcsObjectRange createRange() {
+    return createRangeWithLength(10);
+  }
+
+  private static GcsObjectRange createRangeWithLength(int length) {
     return GcsObjectRange.builder()
         .setOffset(0)
-        .setLength(10)
+        .setLength(length)
         .setByteBufferFuture(new CompletableFuture<>())
         .build();
   }
