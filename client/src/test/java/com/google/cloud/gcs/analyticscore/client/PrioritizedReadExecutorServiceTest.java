@@ -167,6 +167,31 @@ class PrioritizedReadExecutorServiceTest {
   }
 
   @Test
+  void promote_rangeSharedByTwoDeferredTasks_runsBothTasks() throws Exception {
+    executor =
+        new PrioritizedReadExecutorService(
+            /* threadCount= */ 3, /* maxLowPriorityConcurrency= */ 1);
+    CountDownLatch lowBlocker = new CountDownLatch(1);
+    CountDownLatch firstLowStarted = new CountDownLatch(1);
+    CountDownLatch sharedRangeTasksFinished = new CountDownLatch(2);
+    var unusedFirst =
+        executor.submitLowPriority(
+            () -> {
+              firstLowStarted.countDown();
+              awaitQuietly(lowBlocker);
+            });
+    assertThat(firstLowStarted.await(5, TimeUnit.SECONDS)).isTrue();
+    GcsObjectRange sharedRange = createRange();
+    executor.submitLowPriority(sharedRangeTasksFinished::countDown, ImmutableList.of(sharedRange));
+    executor.submitLowPriority(sharedRangeTasksFinished::countDown, ImmutableList.of(sharedRange));
+
+    sharedRange.promote();
+
+    assertThat(sharedRangeTasksFinished.await(5, TimeUnit.SECONDS)).isTrue();
+    lowBlocker.countDown();
+  }
+
+  @Test
   void promote_dispatchedTaskInPoolQueue_runsAheadOfEarlierLowPriorityTask() throws Exception {
     executor =
         new PrioritizedReadExecutorService(

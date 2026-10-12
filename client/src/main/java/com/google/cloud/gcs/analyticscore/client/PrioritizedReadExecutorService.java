@@ -95,13 +95,14 @@ final class PrioritizedReadExecutorService extends ThreadPoolExecutor {
 
   /**
    * Submits a background prefetch task at {@code LOW} priority and wires promotion and cancellation
-   * onto the associated ranges.
+   * onto the associated ranges. Several tasks can share a range, for example the parts of a split
+   * read; promoting the range then promotes all of them.
    */
   void submitLowPriority(Runnable command, List<GcsObjectRange> underlyingRanges) {
     PrioritizedTask task = enqueueLowPriorityTask(command, underlyingRanges);
     Runnable promoter = () -> promote(task);
     for (GcsObjectRange childRange : underlyingRanges) {
-      childRange.setPromotionAction(promoter);
+      childRange.addPromotionAction(promoter);
       CompletableFuture<?> unused =
           childRange
               .getByteBufferFuture()

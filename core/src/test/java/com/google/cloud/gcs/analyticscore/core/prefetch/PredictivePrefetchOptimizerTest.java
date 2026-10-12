@@ -1312,13 +1312,9 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
-  void read_adjacentColumnsExceedingBlockSize_prefetchesEachColumnSeparately() throws IOException {
+  void read_adjacentPrefetchColumns_requestsThemAsOneRange() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
-    int idChunkLength = (int) (idChunk.getEndOffset() - idChunk.getStartOffset());
-    optimizer =
-        createOptimizer(
-            GcsPrefetchOptions.builder().setEnabled(true).setBlockSizeBytes(idChunkLength).build());
     int fingerprint = layout.getSchemaFingerprint();
     cacheManager
         .getSchemaAccessHistory()
@@ -1339,18 +1335,13 @@ class PredictivePrefetchOptimizerTest {
         ByteBuffer.allocate(8),
         channel);
 
-    assertThat(channel.getRequestedOffsets())
-        .containsExactly(idChunk.getStartOffset(), categoryChunk.getStartOffset());
+    assertThat(channel.getRequestedOffsets()).containsExactly(idChunk.getStartOffset());
   }
 
   @Test
-  void readVectored_coalescedRangeAcrossBlockSplitColumns_stitchesFromCache() throws Exception {
+  void readVectored_coalescedRangeAcrossPrefetchedColumns_servesFromCache() throws Exception {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
-    int idChunkLength = (int) (idChunk.getEndOffset() - idChunk.getStartOffset());
-    optimizer =
-        createOptimizer(
-            GcsPrefetchOptions.builder().setEnabled(true).setBlockSizeBytes(idChunkLength).build());
     int fingerprint = layout.getSchemaFingerprint();
     cacheManager
         .getSchemaAccessHistory()

@@ -37,7 +37,9 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SeekableByteChannel;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
@@ -330,34 +332,34 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
             ImmutableList.copyOf(ranges), maxMergeGap, vectoredReadOptions.getMaxMergeSize());
 
     for (GcsObjectCombinedRange combinedRange : combinedRanges) {
-      if (prefetch) {
-        submitPrefetchRead(executorService, combinedRange, allocate, operation);
-      } else if (shouldSplit(combinedRange.getLength())) {
-        readCombinedRangeInParts(executorService, combinedRange, allocate, operation);
+      Executor executor = executorFor(executorService, combinedRange, prefetch);
+      if (shouldSplit(combinedRange.getLength())) {
+        readCombinedRangeInParts(executor, combinedRange, allocate, operation, prefetch);
       } else {
-        var unused =
-            executorService.submit(() -> readCombinedRange(combinedRange, allocate, operation));
+        executor.execute(
+            () ->
+                recordPrefetchBytesLoaded(
+                    prefetch, readCombinedRange(combinedRange, allocate, operation)));
       }
     }
   }
 
-  private void submitPrefetchRead(
-      ExecutorService executorService,
-      GcsObjectCombinedRange combinedRange,
-      IntFunction<ByteBuffer> allocate,
-      Operation operation) {
-    Runnable readTask =
-        () -> recordPrefetchBytesLoaded(readCombinedRange(combinedRange, allocate, operation));
-    if (executorService instanceof PrioritizedReadExecutorService) {
-      ((PrioritizedReadExecutorService) executorService)
-          .submitLowPriority(readTask, combinedRange.getUnderlyingRanges());
-    } else {
-      var unused = executorService.submit(readTask);
+  /**
+   * Returns where reads of {@code combinedRange} run. On the prioritized read pool, foreground
+   * reads run at {@code HIGH} priority and prefetch reads at {@code LOW} priority.
+   */
+  private static Executor executorFor(
+      ExecutorService executorService, GcsObjectCombinedRange combinedRange, boolean prefetch) {
+    if (!prefetch || !(executorService instanceof PrioritizedReadExecutorService)) {
+      return executorService;
     }
+    PrioritizedReadExecutorService prioritizedExecutor =
+        (PrioritizedReadExecutorService) executorService;
+    return task -> prioritizedExecutor.submitLowPriority(task, combinedRange.getUnderlyingRanges());
   }
 
-  private void recordPrefetchBytesLoaded(int bytesRead) {
-    if (bytesRead > 0) {
+  private void recordPrefetchBytesLoaded(boolean prefetch, int bytesRead) {
+    if (prefetch && bytesRead > 0) {
       telemetry.recordMetric(Metric.PREFETCH_BYTES_LOADED, bytesRead, Collections.emptyMap());
     }
   }
@@ -424,25 +426,20 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
   }
 
   /**
-   * Reads a combined range as parallel part requests that fill one buffer, then completes its
-   * underlying ranges with slices of that buffer.
+   * Reads a combined range as parallel part requests on {@code executor} that fill one buffer, then
+   * completes its underlying ranges with slices of that buffer.
    */
   private void readCombinedRangeInParts(
-      ExecutorService executorService,
+      Executor executor,
       GcsObjectCombinedRange combinedRange,
       IntFunction<ByteBuffer> allocate,
-      Operation operation) {
+      Operation operation,
+      boolean prefetch) {
     recordSplitParts(combinedRange.getLength());
     SplitRangeReader splitRangeReader =
         new SplitRangeReader(
-            executorService,
-            (offset, window) ->
-                telemetry.measure(
-                    operation,
-                    recorder -> {
-                      readPart(offset, window, recorder);
-                      return null;
-                    }),
+            executor,
+            (offset, window) -> readPartUnlessDone(combinedRange, offset, window, operation),
             getSplitThresholdBytes());
     CompletableFuture<ByteBuffer> unused =
         splitRangeReader
@@ -460,7 +457,27 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
                             VectoredIoUtil.fetchUnderlyingRangeData(
                                 dataBuffer, combinedRange, underlyingRange));
                   }
+                  recordPrefetchBytesLoaded(prefetch, combinedRange.getLength());
                 });
+  }
+
+  /**
+   * Reads one part of {@code combinedRange} through one bounded request. Throws without a request
+   * when every underlying range is already done, for example canceled, so the remaining parts are
+   * skipped.
+   */
+  private void readPartUnlessDone(
+      GcsObjectCombinedRange combinedRange, long offset, ByteBuffer window, Operation operation)
+      throws IOException {
+    if (allRangesDone(combinedRange)) {
+      throw new CancellationException("Every underlying range is already done: " + combinedRange);
+    }
+    telemetry.measure(
+        operation,
+        recorder -> {
+          readPart(offset, window, recorder);
+          return null;
+        });
   }
 
   /**

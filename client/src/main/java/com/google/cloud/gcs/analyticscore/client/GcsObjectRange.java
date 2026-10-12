@@ -17,15 +17,16 @@ package com.google.cloud.gcs.analyticscore.client;
 
 import com.google.auto.value.AutoValue;
 import java.nio.ByteBuffer;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 /** Represents a byte range from a GCS object range. */
 @AutoValue
 public abstract class GcsObjectRange {
 
-  private final AtomicReference<Runnable> promotionAction = new AtomicReference<>();
+  private final Queue<Runnable> promotionActions = new ConcurrentLinkedQueue<>();
   private final AtomicBoolean promoted = new AtomicBoolean();
 
   // The future that will be completed with the contents of the byte range.
@@ -38,26 +39,26 @@ public abstract class GcsObjectRange {
   public abstract int getLength();
 
   /**
-   * Attaches a callback that promotes a queued low-priority prefetch to foreground priority,
-   * running it right away if {@link #promote()} was already called before the callback was
-   * attached.
+   * Adds a callback that promotes a queued low-priority download of this range to foreground
+   * priority. A range downloaded as several parts gets one callback per part. The callback runs
+   * right away if {@link #promote()} was already called.
    */
-  void setPromotionAction(Runnable action) {
-    promotionAction.set(action);
+  void addPromotionAction(Runnable action) {
+    promotionActions.add(action);
     if (promoted.get()) {
-      runPromotionAction();
+      runPromotionActions();
     }
   }
 
-  /** Promotes the underlying background download to foreground priority if still queued. */
+  /** Promotes every queued background download of this range to foreground priority. */
   public void promote() {
     promoted.set(true);
-    runPromotionAction();
+    runPromotionActions();
   }
 
-  private void runPromotionAction() {
-    Runnable action = promotionAction.getAndSet(null);
-    if (action != null) {
+  private void runPromotionActions() {
+    Runnable action;
+    while ((action = promotionActions.poll()) != null) {
       action.run();
     }
   }

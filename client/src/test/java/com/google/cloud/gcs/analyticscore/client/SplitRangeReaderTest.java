@@ -32,6 +32,7 @@ import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -88,6 +89,22 @@ class SplitRangeReaderTest {
 
     assertThat(requests)
         .containsExactly(Part.create(10, 7), Part.create(17, 7), Part.create(24, 6));
+  }
+
+  @Test
+  void readAsync_runsEveryPartOnGivenExecutor() throws Exception {
+    AtomicInteger executedParts = new AtomicInteger();
+    Executor countingExecutor =
+        part -> {
+          executedParts.incrementAndGet();
+          part.run();
+        };
+    SplitRangeReader reader =
+        new SplitRangeReader(countingExecutor, recordingReader(), MAX_PART_SIZE);
+
+    reader.readAsync(RANGE_OFFSET, RANGE_LENGTH, ByteBuffer::allocate).get();
+
+    assertThat(executedParts.get()).isEqualTo(3);
   }
 
   @Test

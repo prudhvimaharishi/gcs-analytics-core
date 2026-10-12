@@ -44,7 +44,6 @@ These settings control the predictive prefetcher, which learns the column access
 | `analytics-core.prefetch.dictionary-trigger` | Enum | Dictionary page read that triggers prefetching a row group's data pages. `FIRST_DICT_READ` prefetches once any learned filter column's dictionary in the row group is read; `LAST_DICT_READ` waits until all of them are read. Values are case-insensitive and hyphens are accepted. | `LAST_DICT_READ` |
 | `analytics-core.prefetch.buffer.cache.max-size-bytes` | Long | The maximum total capacity (in bytes) of the prefetch buffer cache. | `2147483648` (2 GB) |
 | `analytics-core.prefetch.buffer.cache.ttl-seconds` | Long | How long (in seconds) prefetched bytes are retained in the buffer cache after it was last read or written. | `60` |
-| `analytics-core.prefetch.block.size-bytes` | Integer | The maximum size (in bytes) of a single prefetch request. Adjacent column ranges are merged only while the merged request stays within this size. | `8388608` (8 MB) |
 
 ### Read Performance and I/O Tuning
 

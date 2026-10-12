@@ -25,7 +25,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
@@ -34,7 +34,8 @@ import java.util.function.IntFunction;
 
 /**
  * Reads one byte range of an object as parallel part requests. Every part writes straight into its
- * own slice of a single buffer, so splitting never allocates or copies data buffers.
+ * own slice of a single buffer, so splitting never allocates or copies data buffers. The caller
+ * picks the executor that runs the parts, and with it their priority.
  */
 final class SplitRangeReader {
 
@@ -44,13 +45,13 @@ final class SplitRangeReader {
     void read(long offset, ByteBuffer window) throws IOException;
   }
 
-  private final ExecutorService executorService;
+  private final Executor executor;
   private final PartReader partReader;
   private final int maxPartSize;
 
-  SplitRangeReader(ExecutorService executorService, PartReader partReader, int maxPartSize) {
+  SplitRangeReader(Executor executor, PartReader partReader, int maxPartSize) {
     checkArgument(maxPartSize > 0, "maxPartSize must be positive: %s", maxPartSize);
-    this.executorService = checkNotNull(executorService, "executorService cannot be null");
+    this.executor = checkNotNull(executor, "executor cannot be null");
     this.partReader = checkNotNull(partReader, "partReader cannot be null");
     this.maxPartSize = maxPartSize;
   }
@@ -66,7 +67,7 @@ final class SplitRangeReader {
     BackgroundRead read = new BackgroundRead(offset, length, allocate);
     for (Part part : read.parts) {
       try {
-        var unused = executorService.submit(() -> read.readPart(part));
+        executor.execute(() -> read.readPart(part));
       } catch (RejectedExecutionException e) {
         read.result.completeExceptionally(e);
         break;
@@ -173,7 +174,7 @@ final class SplitRangeReader {
       for (int index = 1; index < parts.size(); index++) {
         int partIndex = index;
         try {
-          var unused = executorService.submit(() -> readPartIfUnclaimed(partIndex));
+          executor.execute(() -> readPartIfUnclaimed(partIndex));
         } catch (RejectedExecutionException e) {
           // The caller takes back every part that was not submitted.
           return;

@@ -25,12 +25,12 @@ import org.junit.jupiter.api.Test;
 class GcsObjectRangeTest {
 
   @Test
-  void setPromotionAction_promotedBeforeAttach_runsTheAction() {
+  void addPromotionAction_promotedBeforeAttach_runsTheAction() {
     GcsObjectRange range = createRange();
     AtomicInteger promotions = new AtomicInteger();
     range.promote();
 
-    range.setPromotionAction(promotions::incrementAndGet);
+    range.addPromotionAction(promotions::incrementAndGet);
 
     assertThat(promotions.get()).isEqualTo(1);
   }
@@ -39,12 +39,24 @@ class GcsObjectRangeTest {
   void promote_actionAttached_runsTheActionOnce() {
     GcsObjectRange range = createRange();
     AtomicInteger promotions = new AtomicInteger();
-    range.setPromotionAction(promotions::incrementAndGet);
+    range.addPromotionAction(promotions::incrementAndGet);
 
     range.promote();
     range.promote();
 
     assertThat(promotions.get()).isEqualTo(1);
+  }
+
+  @Test
+  void promote_twoActionsAttached_runsBoth() {
+    GcsObjectRange range = createRange();
+    AtomicInteger promotions = new AtomicInteger();
+    range.addPromotionAction(promotions::incrementAndGet);
+    range.addPromotionAction(promotions::incrementAndGet);
+
+    range.promote();
+
+    assertThat(promotions.get()).isEqualTo(2);
   }
 
   private static GcsObjectRange createRange() {

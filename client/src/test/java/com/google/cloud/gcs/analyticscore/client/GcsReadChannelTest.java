@@ -1336,6 +1336,128 @@ class GcsReadChannelTest {
   }
 
   @Test
+  void prefetchVectored_splitEnabled_readsLargeRangeAsOneRequestPerPart() throws Exception {
+    GcsItemInfo itemInfo = createItemInfoWith(SPLIT_OBJECT_SIZE);
+    createBinaryBlobInStorage(itemInfo);
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage, itemInfo, SPLIT_READ_OPTIONS, executorServiceSupplier, telemetry);
+    GcsObjectRange range = createRange(0, SPLIT_OBJECT_SIZE);
+    Mockito.clearInvocations(storage);
+
+    gcsReadChannel.prefetchVectored(ImmutableList.of(range), ByteBuffer::allocate);
+    range.getByteBufferFuture().get();
+
+    Mockito.verify(storage, Mockito.times(3))
+        .reader(Mockito.any(BlobId.class), Mockito.any(BlobSourceOption[].class));
+  }
+
+  @Test
+  void prefetchVectored_splitDisabled_readsLargeRangeInOneRequest() throws Exception {
+    GcsItemInfo itemInfo = createItemInfoWith(SPLIT_OBJECT_SIZE);
+    createBinaryBlobInStorage(itemInfo);
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage, itemInfo, TEST_GCS_READ_OPTIONS, executorServiceSupplier, telemetry);
+    GcsObjectRange range = createRange(0, SPLIT_OBJECT_SIZE);
+    Mockito.clearInvocations(storage);
+
+    gcsReadChannel.prefetchVectored(ImmutableList.of(range), ByteBuffer::allocate);
+    range.getByteBufferFuture().get();
+
+    Mockito.verify(storage, Mockito.times(1))
+        .reader(Mockito.any(BlobId.class), Mockito.any(BlobSourceOption[].class));
+  }
+
+  @Test
+  void prefetchVectored_splitEnabled_fillsRangeWithObjectBytes() throws Exception {
+    GcsItemInfo itemInfo = createItemInfoWith(SPLIT_OBJECT_SIZE);
+    byte[] objectData = createBinaryBlobInStorage(itemInfo);
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage, itemInfo, SPLIT_READ_OPTIONS, executorServiceSupplier, telemetry);
+    GcsObjectRange range = createRange(0, SPLIT_OBJECT_SIZE);
+
+    gcsReadChannel.prefetchVectored(ImmutableList.of(range), ByteBuffer::allocate);
+
+    assertThat(remainingBytes(range.getByteBufferFuture().get())).isEqualTo(objectData);
+  }
+
+  @Test
+  void prefetchVectored_splitEnabled_submitsEveryPartAtLowPriority() throws Exception {
+    GcsItemInfo itemInfo = createItemInfoWith(SPLIT_OBJECT_SIZE);
+    createBinaryBlobInStorage(itemInfo);
+    PrioritizedReadExecutorService readPool = Mockito.spy(new PrioritizedReadExecutorService(4));
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage, itemInfo, SPLIT_READ_OPTIONS, Suppliers.ofInstance(readPool), telemetry);
+    GcsObjectRange range = createRange(0, SPLIT_OBJECT_SIZE);
+
+    gcsReadChannel.prefetchVectored(ImmutableList.of(range), ByteBuffer::allocate);
+    range.getByteBufferFuture().get();
+
+    Mockito.verify(readPool, Mockito.times(3))
+        .submitLowPriority(Mockito.any(Runnable.class), Mockito.eq(ImmutableList.of(range)));
+  }
+
+  @Test
+  void readVectored_splitEnabled_submitsNoPartAtLowPriority() throws Exception {
+    GcsItemInfo itemInfo = createItemInfoWith(SPLIT_OBJECT_SIZE);
+    createBinaryBlobInStorage(itemInfo);
+    PrioritizedReadExecutorService readPool = Mockito.spy(new PrioritizedReadExecutorService(4));
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage, itemInfo, SPLIT_READ_OPTIONS, Suppliers.ofInstance(readPool), telemetry);
+    GcsObjectRange range = createRange(0, SPLIT_OBJECT_SIZE);
+
+    gcsReadChannel.readVectored(ImmutableList.of(range), ByteBuffer::allocate);
+    range.getByteBufferFuture().get();
+
+    Mockito.verify(readPool, Mockito.never())
+        .submitLowPriority(Mockito.any(Runnable.class), Mockito.anyList());
+  }
+
+  @Test
+  void prefetchVectored_splitEnabled_rangeAlreadyCanceled_sendsNoRequest() throws Exception {
+    GcsItemInfo itemInfo = createItemInfoWith(SPLIT_OBJECT_SIZE);
+    createBinaryBlobInStorage(itemInfo);
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage,
+            itemInfo,
+            SPLIT_READ_OPTIONS,
+            Suppliers.ofInstance(MoreExecutors.newDirectExecutorService()),
+            telemetry);
+    GcsObjectRange range = createRange(0, SPLIT_OBJECT_SIZE);
+    range.getByteBufferFuture().cancel(/* mayInterruptIfRunning= */ false);
+    Mockito.clearInvocations(storage);
+
+    gcsReadChannel.prefetchVectored(ImmutableList.of(range), ByteBuffer::allocate);
+
+    Mockito.verify(storage, Mockito.never())
+        .reader(Mockito.any(BlobId.class), Mockito.any(BlobSourceOption[].class));
+  }
+
+  @Test
+  void prefetchVectored_splitEnabled_recordsAllBytesLoaded() throws Exception {
+    RecordingOperationListener listener = new RecordingOperationListener();
+    GcsItemInfo itemInfo = createItemInfoWith(SPLIT_OBJECT_SIZE);
+    createBinaryBlobInStorage(itemInfo);
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage,
+            itemInfo,
+            SPLIT_READ_OPTIONS,
+            Suppliers.ofInstance(MoreExecutors.newDirectExecutorService()),
+            new Telemetry(ImmutableList.of(listener)));
+    GcsObjectRange range = createRange(0, SPLIT_OBJECT_SIZE);
+
+    gcsReadChannel.prefetchVectored(ImmutableList.of(range), ByteBuffer::allocate);
+
+    assertThat(listener.getTotal(Metric.PREFETCH_BYTES_LOADED)).isEqualTo((long) SPLIT_OBJECT_SIZE);
+  }
+
+  @Test
   void read_splitEnabled_readsLargeReadAsOneRequestPerPart() throws Exception {
     GcsItemInfo itemInfo = createItemInfoWith(SPLIT_OBJECT_SIZE);
     createBinaryBlobInStorage(itemInfo);

@@ -42,9 +42,9 @@ import javax.annotation.Nullable;
  * prefetching is skipped.
  *
  * <p>Speculation schedules exact column chunk and dictionary page byte ranges rather than fixed
- * blocks, avoiding read amplification on unprojected columns. Touching ranges are merged while the
- * merged span stays within {@link GcsPrefetchOptions#getBlockSizeBytes()}; ranges separated by a
- * gap are fetched separately.
+ * blocks, avoiding read amplification on unprojected columns. Touching ranges are merged into one
+ * range; ranges separated by a gap are fetched separately. Each range goes to the read channel as
+ * one request, which split reads cut into parallel parts when enabled.
  *
  * <p>Instances are bound to a single stream and its reader thread. Deferred row-group speculation
  * and {@link #onClose()} synchronize on the instance so that no speculation is scheduled after the
@@ -88,8 +88,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
             .orElseThrow(() -> new IllegalStateException(PREFETCH_DISABLED_IN_CACHE_MANAGER));
     this.itemId = itemId;
     this.cacheManager = cacheManager;
-    this.scheduler =
-        new PrefetchScheduler(itemId, bufferCache, prefetchOptions.getBlockSizeBytes());
+    this.scheduler = new PrefetchScheduler(itemId, bufferCache);
   }
 
   @Override
