@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import com.google.auth.oauth2.GoogleCredentials;
+import com.google.auth.oauth2.UserCredentials;
 import com.google.cloud.NoCredentials;
 import com.google.cloud.gcs.analyticscore.client.auth.AuthType;
 import com.google.cloud.gcs.analyticscore.client.auth.GcsAuthOptions;
@@ -722,7 +723,11 @@ class GcsFileSystemImplTest {
   void constructor_withUnauthenticatedAuthOption_createsClientWithNoCredentials() {
     GcsAuthOptions authOptions =
         GcsAuthOptions.builder().setAuthType(AuthType.UNAUTHENTICATED).build();
-    GcsFileSystemOptions options = testOptionsBuilder().setGcsAuthOptions(authOptions).build();
+    GcsFileSystemOptions options =
+        GcsFileSystemOptions.builder()
+            .setGcsClientOptions(TEST_GCS_CLIENT_OPTIONS)
+            .setGcsAuthOptions(authOptions)
+            .build();
 
     try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(options)) {
       GcsClientImpl gcsClientImpl = (GcsClientImpl) gcsFileSystem.getGcsClient();
@@ -760,7 +765,10 @@ class GcsFileSystemImplTest {
   void createFromOptions_parsesAuthOptionsAndResolvesCredentials() {
     Map<String, String> properties =
         ImmutableMap.of(
-            "gcs.analytics-core.auth.type", "UNAUTHENTICATED",
+            "gcs.analytics-core.auth.type", "USER_CREDENTIALS",
+            "gcs.analytics-core.auth.client-id", "test-client-id",
+            "gcs.analytics-core.auth.client-secret", "test-client-secret",
+            "gcs.analytics-core.auth.refresh-token", "test-refresh-token",
             "gcs.project-id", "test-project");
 
     GcsFileSystemOptions options = GcsFileSystemOptions.createFromOptions(properties, "gcs.");
@@ -768,9 +776,9 @@ class GcsFileSystemImplTest {
     try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(options)) {
       GcsClientImpl gcsClientImpl = (GcsClientImpl) gcsFileSystem.getGcsClient();
 
-      assertThat(options.getGcsAuthOptions().getAuthType()).hasValue(AuthType.UNAUTHENTICATED);
+      assertThat(options.getGcsAuthOptions().getAuthType()).hasValue(AuthType.USER_CREDENTIALS);
       assertThat(gcsClientImpl.storage.getOptions().getCredentials())
-          .isEqualTo(NoCredentials.getInstance());
+          .isInstanceOf(UserCredentials.class);
     }
   }
 

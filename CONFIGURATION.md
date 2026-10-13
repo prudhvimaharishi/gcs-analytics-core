@@ -28,14 +28,14 @@ These properties configure standard Google Cloud authentication, OAuth2 token re
 
 | Property | Description | Default Value |
 | :--- | :--- | :--- |
-| `analytics-core.auth.type` | Google Cloud authentication type. Supported values: `APPLICATION_DEFAULT`, `COMPUTE_ENGINE`, `SERVICE_ACCOUNT_JSON_KEYFILE`, `WORKLOAD_IDENTITY_FEDERATION`, `USER_CREDENTIALS`, `UNAUTHENTICATED`. When not set, attempts `APPLICATION_DEFAULT` and falls back to `UNAUTHENTICATED` if unavailable, unless `analytics-core.auth.impersonation-service-account` or `analytics-core.auth.token-server-uri` is set. Must be set when using the keyfile, Workload Identity Federation, or user credential properties below. | - |
+| `analytics-core.auth.type` | Google Cloud authentication type. Supported values: `APPLICATION_DEFAULT`, `COMPUTE_ENGINE`, `SERVICE_ACCOUNT_JSON_KEYFILE`, `WORKLOAD_IDENTITY_FEDERATION`, `USER_CREDENTIALS`, `UNAUTHENTICATED`. When not set, attempts `APPLICATION_DEFAULT` and falls back to `UNAUTHENTICATED` if unavailable, unless `analytics-core.auth.impersonation-service-account` or `analytics-core.auth.token-server-uri` is set. Must be set when using the keyfile, Workload Identity Federation, or user credential properties below; once set, properties of other authentication types are ignored. | - |
 | `analytics-core.auth.service-account-json-keyfile` | Path to a Service Account JSON keyfile. Required when `analytics-core.auth.type` is `SERVICE_ACCOUNT_JSON_KEYFILE`. | - |
 | `analytics-core.auth.workload-identity-federation.credential-config-file` | Path to a Workload Identity Federation credential configuration JSON file. Required when `analytics-core.auth.type` is `WORKLOAD_IDENTITY_FEDERATION`. | - |
 | `analytics-core.auth.client-id` | OAuth2 client ID. Required when `analytics-core.auth.type` is `USER_CREDENTIALS`. | - |
 | `analytics-core.auth.client-secret` | OAuth2 client secret. Required when `analytics-core.auth.type` is `USER_CREDENTIALS`. | - |
 | `analytics-core.auth.refresh-token` | OAuth2 refresh token. Required when `analytics-core.auth.type` is `USER_CREDENTIALS`. | - |
 | `analytics-core.auth.impersonation-service-account` | Service account email to impersonate via static service account impersonation. Cannot be used when `analytics-core.auth.type` is `UNAUTHENTICATED`. | - |
-| `analytics-core.auth.token-server-uri` | Custom token server URI used to refresh OAuth2 access tokens. | - |
+| `analytics-core.auth.token-server-uri` | Custom token server URI used to refresh OAuth2 access tokens. Applies to `SERVICE_ACCOUNT_JSON_KEYFILE`, `USER_CREDENTIALS`, and `APPLICATION_DEFAULT` when it resolves to one of those credentials; token requests then use the JVM's default trust store instead of the bundled Google trust store. Ignored for other authentication types. | - |
 
 ### Caching and Prefetching
 
