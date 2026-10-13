@@ -269,11 +269,12 @@ class GcsAuthOptionsTest {
 
   @Test
   void createFromOptions_valuesWithWhitespace_areTrimmed() {
-    Map<String, String> map = ImmutableMap.of("analytics-core.auth.client-id", "  client-id  ");
+    Map<String, String> map =
+        ImmutableMap.of("analytics-core.auth.proxy.address", "  proxy.example.com:8080  ");
 
     GcsAuthOptions options = GcsAuthOptions.createFromOptions(map, "");
 
-    assertThat(options.getClientId()).hasValue("client-id");
+    assertThat(options.getProxyAddress()).hasValue("proxy.example.com:8080");
   }
 
   @ParameterizedTest
@@ -386,6 +387,36 @@ class GcsAuthOptionsTest {
     GcsAuthOptions options = GcsAuthOptions.builder().setAuthType(AuthType.COMPUTE_ENGINE).build();
 
     assertThat(options.getAuthType()).hasValue(AuthType.COMPUTE_ENGINE);
+  }
+
+  @Test
+  void build_serviceAccountKeyfileWithoutAuthType_throwsIllegalArgumentException() {
+    GcsAuthOptions.Builder builder =
+        GcsAuthOptions.builder().setServiceAccountJsonKeyfile("/path/to/key.json");
+
+    assertThrows(IllegalArgumentException.class, builder::build);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "service-account-json-keyfile, SERVICE_ACCOUNT_JSON_KEYFILE",
+    "workload-identity-federation.credential-config-file, WORKLOAD_IDENTITY_FEDERATION",
+    "client-id, USER_CREDENTIALS",
+    "client-secret, USER_CREDENTIALS",
+    "refresh-token, USER_CREDENTIALS"
+  })
+  void createFromOptions_typeSpecificKeyWithoutAuthType_reportsRequiredAuthType(
+      String keySuffix, String requiredAuthType) {
+    String key = "gcs.analytics-core.auth." + keySuffix;
+    Map<String, String> map = ImmutableMap.of(key, "value");
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> GcsAuthOptions.createFromOptions(map, "gcs."));
+
+    assertThat(exception)
+        .hasMessageThat()
+        .isEqualTo(key + " requires gcs.analytics-core.auth.type to be " + requiredAuthType);
   }
 
   @Test

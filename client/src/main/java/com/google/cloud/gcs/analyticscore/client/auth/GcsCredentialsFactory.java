@@ -119,12 +119,14 @@ public final class GcsCredentialsFactory {
     try {
       credentials = createCredentialsForAuthType(options, tokenTransportFactory);
     } catch (IOException e) {
-      if (options.getAuthType().isPresent()
-          || options.getImpersonationServiceAccount().isPresent()) {
+      if (!options.allowsUnauthenticatedFallback()) {
         throw e;
       }
-      LOG.debug(
-          "Application Default Credentials are not available; falling back to NoCredentials.", e);
+      LOG.warn(
+          "Application Default Credentials are not available, so requests will be"
+              + " unauthenticated. Set analytics-core.auth.type to choose an auth type"
+              + " explicitly. Cause: {}",
+          e.getMessage());
       return NoCredentials.getInstance();
     }
 

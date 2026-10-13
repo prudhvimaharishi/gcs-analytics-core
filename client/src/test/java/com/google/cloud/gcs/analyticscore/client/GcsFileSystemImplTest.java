@@ -77,7 +77,9 @@ class GcsFileSystemImplTest {
       testOptionsBuilder().build();
 
   private static GcsFileSystemOptions.Builder testOptionsBuilder() {
-    return GcsFileSystemOptions.builder().setGcsClientOptions(TEST_GCS_CLIENT_OPTIONS);
+    return GcsFileSystemOptions.builder()
+        .setGcsClientOptions(TEST_GCS_CLIENT_OPTIONS)
+        .setGcsAuthOptions(GcsAuthOptions.builder().setAuthType(AuthType.UNAUTHENTICATED).build());
   }
 
   @Mock private GcsClient mockClient;
@@ -112,11 +114,21 @@ class GcsFileSystemImplTest {
   }
 
   @Test
-  void constructor_withFileSystemOptions_createsClientFromAuthOptions() {
+  void constructor_withCredentialsAndNullOptions_throwsNullPointerException() {
+    NullPointerException exception =
+        assertThrows(
+            NullPointerException.class,
+            () -> new GcsFileSystemImpl(NoCredentials.getInstance(), null));
+
+    assertThat(exception).hasMessageThat().contains("fileSystemOptions should not be null");
+  }
+
+  @Test
+  void constructor_withFileSystemOptions_initializesClientAndComponents() {
     GcsClientOptions clientOptions =
         GcsClientOptions.builder().setProjectId("test-project-default").build();
     GcsFileSystemOptions fileSystemOptions =
-        GcsFileSystemOptions.builder().setGcsClientOptions(clientOptions).build();
+        testOptionsBuilder().setGcsClientOptions(clientOptions).build();
 
     try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(fileSystemOptions)) {
       GcsClientImpl gcsClient = (GcsClientImpl) gcsFileSystem.getGcsClient();

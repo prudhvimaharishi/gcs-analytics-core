@@ -89,8 +89,16 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     }
   }
 
+  /**
+   * Creates a file system that uses {@code credentials} instead of resolving credentials from the
+   * authentication options in {@code fileSystemOptions}.
+   *
+   * @param credentials The credentials for GCS requests.
+   * @param fileSystemOptions The file system options.
+   */
   public GcsFileSystemImpl(Credentials credentials, GcsFileSystemOptions fileSystemOptions) {
     checkNotNull(credentials, "credentials should not be null");
+    checkNotNull(fileSystemOptions, "fileSystemOptions should not be null");
     this.fileSystemOptions = fileSystemOptions;
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();

@@ -407,6 +407,23 @@ class GcsCredentialsFactoryTest {
   }
 
   @Test
+  void createCredentials_authTypeUnsetWithTokenServerUriAndAdcUnavailable_throwsIOException() {
+    GcsAuthOptions options =
+        GcsAuthOptions.builder()
+            .setTokenServerUri(URI.create("https://token.example.com/token"))
+            .build();
+
+    try (MockedStatic<GoogleCredentials> mockedGoogleCredentials =
+        mockStatic(GoogleCredentials.class, withSettings().defaultAnswer(CALLS_REAL_METHODS))) {
+      mockedGoogleCredentials
+          .when(() -> GoogleCredentials.getApplicationDefault(tokenTransportFactory))
+          .thenThrow(new IOException("ADC not available"));
+
+      assertThrows(IOException.class, () -> createCredentials(options));
+    }
+  }
+
+  @Test
   void createCredentials_unauthenticatedWithTransportFactories_throwsVerifyException() {
     GcsAuthOptions options = GcsAuthOptions.builder().setAuthType(AuthType.UNAUTHENTICATED).build();
 
