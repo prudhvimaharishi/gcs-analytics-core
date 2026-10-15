@@ -30,6 +30,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Range;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -319,6 +320,42 @@ class RowGroupPrefetchTrackerTest {
   }
 
   @Test
+  void prefetchRowGroup_rowGroupAlreadyPrefetched_schedulesNothing() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    tracker.prefetchRowGroup(0, ranges -> true);
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.prefetchRowGroup(0, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).isEmpty();
+  }
+
+  @Test
+  void onSingleRead_dataPageReadWithoutDictionarySweep_prefetchesOnlyRemainingCurrentRowGroup() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "value");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.onSingleRead(100, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges).containsExactly(Range.closedOpen(250L, 300L));
+  }
+
+  @Test
+  void
+      onSingleRead_dataPageReadAfterDictionarySweep_prefetchesRemainingCurrentAndNextRowGroupColumns() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "value");
+    tracker.onSingleRead(150, 8, ranges -> true);
+    tracker.onSingleRead(450, 8, ranges -> true);
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    tracker.onSingleRead(100, 16, scheduledRanges::addAll);
+
+    assertThat(scheduledRanges)
+        .containsExactly(Range.closedOpen(250L, 300L), Range.closedOpen(400L, 450L))
+        .inOrder();
+  }
+
+  @Test
   void onSingleRead_enteringLaterRowGroup_cancelsEarlierRowGroupWindow() {
     tracker.onSingleRead(100, 16, ranges -> true);
 
@@ -339,6 +376,68 @@ class RowGroupPrefetchTrackerTest {
     tracker.onVectoredRead(ImmutableList.of(range));
 
     assertThat(accessHistory.getDataColumns(SCHEMA_FINGERPRINT)).containsExactly("id");
+  }
+
+  @Test
+  void pollPendingNextRowGroup_afterDataReadWithoutDictionarySweep_returnsEmpty() {
+    GcsObjectRange range =
+        GcsObjectRange.builder()
+            .setOffset(100)
+            .setLength(50)
+            .setByteBufferFuture(new CompletableFuture<>())
+            .build();
+    tracker.onVectoredRead(ImmutableList.of(range));
+
+    OptionalInt nextRowGroup = tracker.pollPendingNextRowGroup(ranges -> true);
+
+    assertThat(nextRowGroup).isEmpty();
+  }
+
+  @Test
+  void onVectoredRead_chunkReadAfterDictionarySweep_returnsNextRowGroup() {
+    RowGroupPrefetchTracker sweepTracker =
+        new RowGroupPrefetchTracker(
+            layout(
+                sweptRowGroup(0, 100),
+                sweptRowGroup(1, 300),
+                sweptRowGroup(2, 500),
+                sweptRowGroup(3, 700)),
+            accessHistory,
+            DictionaryTrigger.LAST_DICT_READ,
+            (start, end) -> {});
+    for (long categoryDictionaryOffset : new long[] {200, 400, 600, 800}) {
+      sweepTracker.onSingleRead(categoryDictionaryOffset, 20, ranges -> true);
+    }
+    GcsObjectRange chunkRead =
+        GcsObjectRange.builder()
+            .setOffset(100)
+            .setLength(150)
+            .setByteBufferFuture(new CompletableFuture<>())
+            .build();
+
+    sweepTracker.onVectoredRead(ImmutableList.of(chunkRead));
+
+    assertThat(sweepTracker.pollPendingNextRowGroup(ranges -> true)).hasValue(1);
+  }
+
+  @Test
+  void pollPendingNextRowGroup_withoutPriorDataRead_schedulesNothingWhenOnlyDataColumnLearned() {
+    accessHistory.recordDataAccess(SCHEMA_FINGERPRINT, "id");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    assertThat(tracker.pollPendingNextRowGroup(scheduledRanges::addAll)).isEmpty();
+    assertThat(scheduledRanges).isEmpty();
+  }
+
+  @Test
+  void pollPendingNextRowGroup_withoutPriorDataRead_prefetchesDictionariesAndReturnsEmpty() {
+    accessHistory.recordDictionaryAccess(SCHEMA_FINGERPRINT, "category");
+    List<Range<Long>> scheduledRanges = new ArrayList<>();
+
+    assertThat(tracker.pollPendingNextRowGroup(scheduledRanges::addAll)).isEmpty();
+    assertThat(scheduledRanges)
+        .containsExactly(Range.closedOpen(150L, 170L), Range.closedOpen(450L, 470L))
+        .inOrder();
   }
 
   @Test
@@ -456,5 +555,13 @@ class RowGroupPrefetchTrackerTest {
   private RowGroupPrefetchTracker createTracker(ParquetFileLayout layout) {
     return new RowGroupPrefetchTracker(
         layout, accessHistory, DictionaryTrigger.LAST_DICT_READ, (start, end) -> {});
+  }
+
+  private static ParquetRowGroup sweptRowGroup(int index, long startOffset) {
+    return rowGroup(
+        index,
+        columnChunk("id", startOffset, 50),
+        dictionaryEncodedColumnChunk("name", startOffset + 50, 50, startOffset + 70),
+        dictionaryEncodedColumnChunk("category", startOffset + 100, 50, startOffset + 120));
   }
 }

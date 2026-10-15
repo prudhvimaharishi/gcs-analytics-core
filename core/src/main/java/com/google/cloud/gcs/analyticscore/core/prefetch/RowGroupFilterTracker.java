@@ -23,18 +23,30 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
 /**
- * Tracks which dictionary pages and data pages of each row group a single Parquet stream has read.
+ * Tracks row-group filter outcomes within a single Parquet stream to predict which upcoming row
+ * group will actually be read by the query engine.
+ *
+ * <p>Engines such as Apache Iceberg evaluate footer min/max statistics across all row groups at
+ * file open and immediately read the dictionary pages of surviving candidate row groups. A row
+ * group skipped during this upfront dictionary sweep, whose filter columns all have dictionary
+ * pages, is predicted to have failed the min/max check.
+ *
+ * <p>The prediction can be wrong, for example when an earlier row group was rejected by a filter
+ * column this tracker does not know about. A wrong prediction only costs a missed prefetch; it
+ * never changes what the engine reads.
  */
 final class RowGroupFilterTracker {
 
   private final SortedSet<Integer> dictionaryTouchedIndices = new TreeSet<>();
   private final SortedSet<Integer> dataTouchedIndices = new TreeSet<>();
   private final Map<Integer, Set<String>> dictionaryColumnsByRowGroup = new HashMap<>();
+  private final Set<String> filterColumnPaths = new HashSet<>();
 
   /** Records that a dictionary page in {@code rowGroupIndex} was read for {@code columnPath}. */
   void recordDictionaryRead(int rowGroupIndex, String columnPath) {
@@ -46,6 +58,7 @@ final class RowGroupFilterTracker {
     dictionaryColumnsByRowGroup
         .computeIfAbsent(rowGroupIndex, unused -> new HashSet<>())
         .add(columnPath);
+    filterColumnPaths.add(columnPath);
   }
 
   /**
@@ -112,5 +125,69 @@ final class RowGroupFilterTracker {
   /** Records that data pages in {@code rowGroupIndex} were read. */
   void recordDataRead(int rowGroupIndex) {
     dataTouchedIndices.add(rowGroupIndex);
+  }
+
+  /**
+   * Returns the next row group index strictly after {@code afterIndex} that has not been eliminated
+   * by upfront footer pruning, or empty if no remaining row group survives.
+   */
+  OptionalInt findNextSurvivingRowGroup(
+      ParquetFileLayout layout, int afterIndex, Set<String> knownDictionaryColumns) {
+    checkNotNull(layout, "layout cannot be null");
+    checkNotNull(knownDictionaryColumns, "knownDictionaryColumns cannot be null");
+    if (dictionaryTouchedIndices.isEmpty()) {
+      return OptionalInt.empty();
+    }
+
+    Set<String> activeFilterColumns = getActiveFilterColumns(knownDictionaryColumns);
+    int rowGroupCount = layout.getRowGroups().size();
+    int maxDictIndex = dictionaryTouchedIndices.last();
+
+    for (int candidate = afterIndex + 1; candidate < rowGroupCount; candidate++) {
+      if (isSkippedByUpfrontDictionarySweep(layout, candidate, afterIndex, activeFilterColumns)) {
+        if (candidate > maxDictIndex) {
+          return OptionalInt.empty();
+        }
+        continue;
+      }
+      return OptionalInt.of(candidate);
+    }
+    return OptionalInt.empty();
+  }
+
+  /**
+   * Returns whether the engine's dictionary sweep passed over {@code candidate}. A row group where
+   * any filter column has no dictionary page is never treated as skipped, because the engine could
+   * not have read a dictionary there and may still read its data pages.
+   */
+  private boolean isSkippedByUpfrontDictionarySweep(
+      ParquetFileLayout layout, int candidate, int afterIndex, Set<String> activeFilterColumns) {
+    Set<String> expectedColumns =
+        dictionaryColumnsByRowGroup.getOrDefault(afterIndex, Collections.emptySet());
+    if (expectedColumns.isEmpty()) {
+      expectedColumns = activeFilterColumns;
+    }
+    return !hasReadAllDictionaries(layout, candidate, expectedColumns)
+        && allFilterColumnsHaveDictionaryPage(layout, candidate, activeFilterColumns);
+  }
+
+  private boolean allFilterColumnsHaveDictionaryPage(
+      ParquetFileLayout layout, int index, Set<String> activeFilterColumns) {
+    ParquetRowGroup rowGroup = layout.getRowGroups().get(index);
+    for (String columnPath : activeFilterColumns) {
+      if (!rowGroup
+          .getColumnChunk(columnPath)
+          .map(ParquetColumnChunk::hasDictionaryPage)
+          .orElse(false)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private Set<String> getActiveFilterColumns(Set<String> knownDictionaryColumns) {
+    Set<String> activeFilterColumns = new HashSet<>(filterColumnPaths);
+    activeFilterColumns.addAll(knownDictionaryColumns);
+    return activeFilterColumns;
   }
 }

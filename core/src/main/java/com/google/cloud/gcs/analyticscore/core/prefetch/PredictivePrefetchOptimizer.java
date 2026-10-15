@@ -32,6 +32,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.IntFunction;
 import java.util.function.Predicate;
 import javax.annotation.Nullable;
@@ -49,7 +51,9 @@ import javax.annotation.Nullable;
  * range; ranges separated by a gap are fetched separately. Each range goes to the read channel as
  * one request.
  *
- * <p>Instances are bound to a single stream and its reader thread.
+ * <p>Instances are bound to a single stream and its reader thread. Deferred row-group speculation
+ * and {@link #onClose()} synchronize on the instance so that no speculation is scheduled after the
+ * stream closes.
  */
 public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
@@ -65,6 +69,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private PrefetchScheduler scheduler;
   private long fileSize = -1;
   private long lastPreReadPosition = -1;
+  private volatile boolean closed;
   @Nullable private RowGroupPrefetchTracker tracker;
 
   public PredictivePrefetchOptimizer(GcsPrefetchOptions prefetchOptions) {
@@ -150,12 +155,46 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   }
 
   @Override
-  public void onClose() {
+  public void afterReadVectored(List<GcsObjectRange> ranges, VectoredSeekableByteChannel source)
+      throws IOException {
+    ensureTrackerLoaded(source);
+    if (tracker == null) {
+      return;
+    }
+    OptionalInt targetRowGroup = tracker.pollPendingNextRowGroup(scheduleOn(source));
+    if (!targetRowGroup.isPresent()) {
+      return;
+    }
+    int targetIndex = targetRowGroup.getAsInt();
+    CompletableFuture<?>[] rangeFutures =
+        ranges.stream()
+            .map(GcsObjectRange::getByteBufferFuture)
+            .toArray(CompletableFuture<?>[]::new);
+    CompletableFuture<Void> unused =
+        CompletableFuture.allOf(rangeFutures)
+            .whenComplete(
+                (result, error) -> {
+                  if (error == null) {
+                    prefetchRowGroupIfOpen(source, targetIndex);
+                  }
+                });
+  }
+
+  @Override
+  public synchronized void onClose() {
+    closed = true;
     if (tracker != null) {
       tracker.recordOutcomeOnClose();
     }
     if (scheduler != null) {
       scheduler.close();
+    }
+  }
+
+  private synchronized void prefetchRowGroupIfOpen(
+      VectoredSeekableByteChannel source, int rowGroupIndex) {
+    if (!closed) {
+      tracker.prefetchRowGroup(rowGroupIndex, scheduleOn(source));
     }
   }
 

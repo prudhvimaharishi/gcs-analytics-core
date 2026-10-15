@@ -161,6 +161,15 @@ class FormatOptimizerTest {
     assertThat(unservedRanges).isEmpty();
   }
 
+  @Test
+  void afterReadVectored_default_doesNotTouchTheChannel() throws IOException {
+    VectoredSeekableByteChannel channel = mock(VectoredSeekableByteChannel.class);
+
+    new MinimalOptimizer().afterReadVectored(ImmutableList.of(), channel);
+
+    verifyNoInteractions(channel);
+  }
+
   private static GcsObjectRange createRange() {
     return GcsObjectRange.builder()
         .setOffset(0)

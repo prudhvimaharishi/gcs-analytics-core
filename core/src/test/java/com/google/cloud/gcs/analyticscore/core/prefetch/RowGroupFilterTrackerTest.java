@@ -21,6 +21,7 @@ import static com.google.common.truth.Truth.assertThat;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import java.util.Arrays;
+import java.util.OptionalInt;
 import org.junit.jupiter.api.Test;
 
 class RowGroupFilterTrackerTest {
@@ -120,6 +121,165 @@ class RowGroupFilterTrackerTest {
     assertThat(tracker.getLastDataReadIndex()).isEqualTo(2);
   }
 
+  @Test
+  void findNextSurvivingRowGroup_skipsRowGroupNotInUpfrontDictionarySweep() {
+    ParquetFileLayout layout = createStatusLayout(4);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(0, FILTER_COLUMN);
+    tracker.recordDictionaryRead(2, FILTER_COLUMN);
+    tracker.recordDictionaryRead(3, FILTER_COLUMN);
+    tracker.recordDataRead(0);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 0, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEqualTo(OptionalInt.of(2));
+  }
+
+  @Test
+  void findNextSurvivingRowGroup_dictionaryOfCurrentRowGroupNotRead_skipsRowGroupNotInSweep() {
+    ParquetFileLayout layout = createStatusLayout(4);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(2, FILTER_COLUMN);
+    tracker.recordDictionaryRead(3, FILTER_COLUMN);
+    tracker.recordDataRead(0);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 0, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEqualTo(OptionalInt.of(2));
+  }
+
+  @Test
+  void findNextSurvivingRowGroup_noFilterActivity_returnsEmpty() {
+    ParquetFileLayout layout = createStatusLayout(2);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDataRead(0);
+
+    OptionalInt nextIndex = tracker.findNextSurvivingRowGroup(layout, 0, ImmutableSet.of());
+
+    assertThat(nextIndex).isEmpty();
+  }
+
+  @Test
+  void findNextSurvivingRowGroup_rowGroupWithoutDictionaryPage_isNotSkippedBySweep() {
+    ParquetFileLayout layout = createStatusLayout(4, /* plainEncodedIndices...= */ 1);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(0, FILTER_COLUMN);
+    tracker.recordDictionaryRead(2, FILTER_COLUMN);
+    tracker.recordDictionaryRead(3, FILTER_COLUMN);
+    tracker.recordDataRead(0);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 0, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEqualTo(OptionalInt.of(1));
+  }
+
+  @Test
+  void findNextSurvivingRowGroup_knownColumnWithoutDictionaryPage_isNotSkippedBySweep() {
+    ParquetFileLayout layout =
+        createTwoFilterColumnLayout(
+            /* rowGroupCount= */ 3, /* secondColumnPlainIndex= */ OptionalInt.of(1));
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(0, FILTER_COLUMN);
+    tracker.recordDictionaryRead(2, FILTER_COLUMN);
+    tracker.recordDataRead(0);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(
+            layout, 0, ImmutableSet.of(FILTER_COLUMN, SECOND_FILTER_COLUMN));
+
+    assertThat(nextIndex).isEqualTo(OptionalInt.of(1));
+  }
+
+  @Test
+  void findNextSurvivingRowGroup_partialDictionarySweepInMultiColumnFilter_skipsRowGroup() {
+    ParquetFileLayout layout =
+        createTwoFilterColumnLayout(
+            /* rowGroupCount= */ 3, /* secondColumnPlainIndex= */ OptionalInt.empty());
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(0, FILTER_COLUMN);
+    tracker.recordDictionaryRead(0, SECOND_FILTER_COLUMN);
+    tracker.recordDictionaryRead(1, FILTER_COLUMN);
+    tracker.recordDictionaryRead(2, FILTER_COLUMN);
+    tracker.recordDictionaryRead(2, SECOND_FILTER_COLUMN);
+    tracker.recordDataRead(0);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(
+            layout, 0, ImmutableSet.of(FILTER_COLUMN, SECOND_FILTER_COLUMN));
+
+    assertThat(nextIndex).isEqualTo(OptionalInt.of(2));
+  }
+
+  @Test
+  void
+      findNextSurvivingRowGroup_staleKnownFilterColumnNeverReadInCurrentFile_doesNotSkipSurvivingRowGroup() {
+    ParquetFileLayout layout =
+        createTwoFilterColumnLayout(
+            /* rowGroupCount= */ 3, /* secondColumnPlainIndex= */ OptionalInt.empty());
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    tracker.recordDictionaryRead(0, FILTER_COLUMN);
+    tracker.recordDictionaryRead(1, FILTER_COLUMN);
+    tracker.recordDictionaryRead(2, FILTER_COLUMN);
+    tracker.recordDataRead(0);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(
+            layout, 0, ImmutableSet.of(FILTER_COLUMN, SECOND_FILTER_COLUMN));
+
+    assertThat(nextIndex).isEqualTo(OptionalInt.of(1));
+  }
+
+  @Test
+  void
+      findNextSurvivingRowGroup_candidateBeyondMaxDictionaryIndexWithUnreadDictionary_returnsEmpty() {
+    ParquetFileLayout layout = createStatusLayout(9);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    for (int index = 0; index <= 4; index++) {
+      tracker.recordDictionaryRead(index, FILTER_COLUMN);
+    }
+    tracker.recordDataRead(4);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 4, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEmpty();
+  }
+
+  @Test
+  void
+      findNextSurvivingRowGroup_plainRowGroupAfterSkippedCandidateBeyondMaxDictionaryIndex_returnsEmpty() {
+    ParquetFileLayout layout = createStatusLayout(9, /* plainEncodedIndices...= */ 6);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    for (int index = 0; index <= 4; index++) {
+      tracker.recordDictionaryRead(index, FILTER_COLUMN);
+    }
+    tracker.recordDataRead(4);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 4, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEmpty();
+  }
+
+  @Test
+  void
+      findNextSurvivingRowGroup_plainRowGroupImmediatelyAfterMaxDictionaryIndex_returnsPlainRowGroup() {
+    ParquetFileLayout layout = createStatusLayout(9, /* plainEncodedIndices...= */ 4);
+    RowGroupFilterTracker tracker = new RowGroupFilterTracker();
+    for (int index = 0; index <= 3; index++) {
+      tracker.recordDictionaryRead(index, FILTER_COLUMN);
+    }
+    tracker.recordDataRead(3);
+
+    OptionalInt nextIndex =
+        tracker.findNextSurvivingRowGroup(layout, 3, ImmutableSet.of(FILTER_COLUMN));
+
+    assertThat(nextIndex).isEqualTo(OptionalInt.of(4));
+  }
+
   /**
    * Builds a layout with one {@code status} column per row group, dictionary encoded except in
    * {@code plainEncodedIndices}.
@@ -141,6 +301,38 @@ class RowGroupFilterTrackerTest {
       }
       rowGroups.add(
           ParquetRowGroup.builder().setIndex(index).addColumnChunk(chunk.build()).build());
+    }
+    return ParquetFileLayout.create(12345, rowGroups.build());
+  }
+
+  private static ParquetFileLayout createTwoFilterColumnLayout(
+      int rowGroupCount, OptionalInt secondColumnPlainIndex) {
+    ImmutableList.Builder<ParquetRowGroup> rowGroups = ImmutableList.builder();
+    for (int index = 0; index < rowGroupCount; index++) {
+      long baseOffset = index * 2000L;
+      ParquetColumnChunk firstChunk =
+          ParquetColumnChunk.builder()
+              .setColumnPath(FILTER_COLUMN)
+              .setStartOffset(baseOffset)
+              .setDataPageOffset(baseOffset + 100L)
+              .setDictionaryPageOffset(baseOffset)
+              .setCompressedSize(500L)
+              .build();
+      ParquetColumnChunk.Builder secondChunk =
+          ParquetColumnChunk.builder()
+              .setColumnPath(SECOND_FILTER_COLUMN)
+              .setStartOffset(baseOffset + 500L)
+              .setDataPageOffset(baseOffset + 600L)
+              .setCompressedSize(500L);
+      if (secondColumnPlainIndex.orElse(-1) != index) {
+        secondChunk.setDictionaryPageOffset(baseOffset + 500L);
+      }
+      rowGroups.add(
+          ParquetRowGroup.builder()
+              .setIndex(index)
+              .addColumnChunk(firstChunk)
+              .addColumnChunk(secondChunk.build())
+              .build());
     }
     return ParquetFileLayout.create(12345, rowGroups.build());
   }

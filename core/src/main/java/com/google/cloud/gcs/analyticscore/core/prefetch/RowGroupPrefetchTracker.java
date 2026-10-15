@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
@@ -51,6 +52,7 @@ final class RowGroupPrefetchTracker {
   private ImmutableSet<String> prefetchedDictionaryColumns = ImmutableSet.of();
   private boolean firstRowGroupPrefetched;
   private boolean outcomeRecorded;
+  private int pendingSpeculationRowGroupIndex = -1;
   @Nullable private Range<Long> lastObservedDataPageRange;
 
   RowGroupPrefetchTracker(
@@ -114,7 +116,9 @@ final class RowGroupPrefetchTracker {
     ParquetRowGroup rowGroup = maybeRowGroup.get();
     firstRowGroupPrefetched = true;
     long endOffset = position + length;
-    if (!recordColumnsInRange(rowGroup, position, endOffset)) {
+    if (recordColumnsInRange(rowGroup, position, endOffset)) {
+      speculateRowGroups(rowGroup.getIndex(), endOffset, scheduleRanges);
+    } else {
       onDictionaryPageRead(rowGroup, scheduleRanges);
     }
     lastObservedDataPageRange = rowGroup.findDataPageRangeAt(position).orElse(null);
@@ -122,7 +126,8 @@ final class RowGroupPrefetchTracker {
 
   /**
    * Records the columns touched by a vectored read in file order, so that a later row group in the
-   * same call does not cancel the prefetch of an earlier one.
+   * same call cannot mark an earlier one as skipped, and remembers the next surviving row group to
+   * speculate once the foreground read completes.
    */
   void onVectoredRead(List<GcsObjectRange> ranges) {
     int lastRowGroupIndex = -1;
@@ -140,11 +145,35 @@ final class RowGroupPrefetchTracker {
       return;
     }
     firstRowGroupPrefetched = true;
+    pendingSpeculationRowGroupIndex =
+        filterTracker
+            .findNextSurvivingRowGroup(
+                layout,
+                lastRowGroupIndex,
+                accessHistory.getDictionaryColumns(layout.getSchemaFingerprint()))
+            .orElse(-1);
+  }
+
+  /**
+   * Consumes the pending next-row-group index recorded by {@link #onVectoredRead(List)}, or
+   * triggers first-row-group prefetching if the vectored read did not touch any data pages.
+   */
+  OptionalInt pollPendingNextRowGroup(Predicate<ImmutableList<Range<Long>>> scheduleRanges) {
+    if (pendingSpeculationRowGroupIndex < 0) {
+      prefetchFirstRowGroupOnce(scheduleRanges);
+      return OptionalInt.empty();
+    }
+    firstRowGroupPrefetched = true;
+    int targetIndex = pendingSpeculationRowGroupIndex;
+    pendingSpeculationRowGroupIndex = -1;
+    return OptionalInt.of(targetIndex);
   }
 
   /** Schedules the learned data columns of {@code rowGroupIndex}. */
-  private void prefetchRowGroup(
-      int rowGroupIndex, Predicate<ImmutableList<Range<Long>>> scheduleRanges) {
+  void prefetchRowGroup(int rowGroupIndex, Predicate<ImmutableList<Range<Long>>> scheduleRanges) {
+    if (prefetchedRowGroups.contains(rowGroupIndex)) {
+      return;
+    }
     ImmutableList<Range<Long>> coalescedRanges = collectDataRanges(rowGroupIndex);
     if (!coalescedRanges.isEmpty() && scheduleRanges.test(coalescedRanges)) {
       prefetchedRowGroups.add(rowGroupIndex);
@@ -299,6 +328,24 @@ final class RowGroupPrefetchTracker {
     ImmutableList<Range<Long>> ranges = dictionaryRanges.build();
     if (ranges.isEmpty() || scheduleRanges.test(ranges)) {
       prefetchedDictionaryColumns = dictionaryColumns;
+    }
+  }
+
+  private void speculateRowGroups(
+      int rowGroupIndex,
+      long currentReadEnd,
+      Predicate<ImmutableList<Range<Long>>> scheduleRanges) {
+    List<Range<Long>> ranges = new ArrayList<>(collectDataRanges(rowGroupIndex));
+    ranges.removeIf(range -> range.lowerEndpoint() < currentReadEnd);
+    if (!ranges.isEmpty()) {
+      boolean unused = scheduleRanges.test(ImmutableList.copyOf(ranges));
+    }
+    ImmutableSet<String> dictionaryColumns =
+        accessHistory.getDictionaryColumns(layout.getSchemaFingerprint());
+    OptionalInt nextIndex =
+        filterTracker.findNextSurvivingRowGroup(layout, rowGroupIndex, dictionaryColumns);
+    if (nextIndex.isPresent()) {
+      prefetchRowGroup(nextIndex.getAsInt(), scheduleRanges);
     }
   }
 
