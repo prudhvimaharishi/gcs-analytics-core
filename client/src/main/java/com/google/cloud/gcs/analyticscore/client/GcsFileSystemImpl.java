@@ -19,7 +19,6 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auth.Credentials;
-import com.google.cloud.gcs.analyticscore.client.auth.GcsCredentialsFactory;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants;
 import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryOptions;
 import com.google.cloud.gcs.analyticscore.common.telemetry.LoggingTelemetryReporter;
@@ -43,6 +42,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import javax.annotation.Nullable;
 
 public class GcsFileSystemImpl implements GcsFileSystem {
 
@@ -69,6 +70,9 @@ public class GcsFileSystemImpl implements GcsFileSystem {
   private final AnalyticsCacheManager cacheManager;
   private final FlatNamespaceStrategyImpl flatStrategy;
   private final HierarchicalNamespaceStrategyImpl hnsStrategy;
+  @Nullable private final GcsClientCache clientCache;
+  @Nullable private final GcsClientCache.Lease clientLease;
+  private final AtomicBoolean closed = new AtomicBoolean(false);
 
   /**
    * Creates a file system whose credentials are resolved from {@code fileSystemOptions}.
@@ -77,16 +81,10 @@ public class GcsFileSystemImpl implements GcsFileSystem {
    * @throws UncheckedIOException If credentials cannot be resolved from the authentication options.
    */
   public GcsFileSystemImpl(GcsFileSystemOptions fileSystemOptions) {
-    this(createCredentials(fileSystemOptions), fileSystemOptions);
-  }
-
-  private static Credentials createCredentials(GcsFileSystemOptions fileSystemOptions) {
-    checkNotNull(fileSystemOptions, "fileSystemOptions should not be null");
-    try {
-      return GcsCredentialsFactory.createCredentials(fileSystemOptions.getGcsAuthOptions());
-    } catch (IOException e) {
-      throw new UncheckedIOException("Failed to create credentials from auth options", e);
-    }
+    this(
+        checkNotNull(fileSystemOptions, "fileSystemOptions should not be null"),
+        /* credentials= */ null,
+        /* hasExplicitCredentials= */ false);
   }
 
   /**
@@ -97,25 +95,39 @@ public class GcsFileSystemImpl implements GcsFileSystem {
    * @param fileSystemOptions The file system options.
    */
   public GcsFileSystemImpl(Credentials credentials, GcsFileSystemOptions fileSystemOptions) {
-    checkNotNull(credentials, "credentials should not be null");
-    checkNotNull(fileSystemOptions, "fileSystemOptions should not be null");
+    this(
+        checkNotNull(fileSystemOptions, "fileSystemOptions should not be null"),
+        checkNotNull(credentials, "credentials should not be null"),
+        /* hasExplicitCredentials= */ true);
+  }
+
+  private GcsFileSystemImpl(
+      GcsFileSystemOptions fileSystemOptions,
+      @Nullable Credentials credentials,
+      boolean hasExplicitCredentials) {
     this.fileSystemOptions = fileSystemOptions;
-    this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
     this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
     this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
-    this.gcsClient =
+    this.clientCache = GcsClientCache.getInstance();
+    this.clientLease =
         telemetry.measure(
             GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),
             GcsAnalyticsCoreTelemetryConstants.Metric.GCS_CLIENT_CREATE_DURATION,
             Collections.emptyMap(),
             recorder ->
-                new GcsClientImpl(
-                    credentials,
-                    fileSystemOptions.getGcsClientOptions(),
-                    readExecutorServiceSupplier,
-                    telemetry,
-                    fileSystemOptions.getGcsAuthOptions()));
+                hasExplicitCredentials
+                    ? clientCache.acquire(
+                        credentials,
+                        fileSystemOptions,
+                        this::initializeReadExecutionServiceSupplier,
+                        telemetry)
+                    : clientCache.acquire(
+                        fileSystemOptions,
+                        this::initializeReadExecutionServiceSupplier,
+                        telemetry));
+    this.readExecutorServiceSupplier = this.clientLease.readExecutorServiceSupplier();
+    this.gcsClient = this.clientLease.client();
     this.flatStrategy = new FlatNamespaceStrategyImpl(this.gcsClient);
     this.hnsStrategy = new HierarchicalNamespaceStrategyImpl(this.gcsClient);
   }
@@ -141,6 +153,8 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
     this.telemetry = telemetry;
     this.cacheManager = cacheManager;
+    this.clientCache = null;
+    this.clientLease = null;
     this.flatStrategy = new FlatNamespaceStrategyImpl(this.gcsClient);
     this.hnsStrategy = new HierarchicalNamespaceStrategyImpl(this.gcsClient);
   }
@@ -168,6 +182,10 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     checkNotNull(gcsFileInfo, "fileInfo should not be null");
     GcsItemId itemId = UriUtil.getItemIdFromString(gcsFileInfo.getUri().toString());
     checkArgument(itemId.isGcsObject(), "Expected GCS object to be provided. But got: " + itemId);
+    if (gcsClient instanceof GcsClientImpl) {
+      return ((GcsClientImpl) gcsClient)
+          .openReadChannel(gcsFileInfo.getItemInfo(), readOptions, telemetry);
+    }
     return gcsClient.openReadChannel(gcsFileInfo.getItemInfo(), readOptions);
   }
 
@@ -177,6 +195,9 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     checkNotNull(gcsItemId, "gcsItemId should not be null");
     checkArgument(
         gcsItemId.isGcsObject(), "Expected GCS object to be provided. But got: " + gcsItemId);
+    if (gcsClient instanceof GcsClientImpl) {
+      return ((GcsClientImpl) gcsClient).openReadChannel(gcsItemId, readOptions, telemetry);
+    }
     return gcsClient.openReadChannel(gcsItemId, readOptions);
   }
 
@@ -229,8 +250,22 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     return hnsStrategy;
   }
 
+  @VisibleForTesting
+  Supplier<ExecutorService> getReadExecutorServiceSupplier() {
+    return readExecutorServiceSupplier;
+  }
+
   @Override
   public void close() {
+    if (!closed.compareAndSet(false, true)) {
+      return;
+    }
+    if (clientLease != null) {
+      shutdownExecutorService(statusExecutorServiceSupplier.get());
+      clientCache.release(clientLease);
+      telemetry.close();
+      return;
+    }
     ExecutorService readExecutorService = readExecutorServiceSupplier.get();
     ExecutorService statusExecutorService = statusExecutorServiceSupplier.get();
     readExecutorService.shutdown();
@@ -256,6 +291,18 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     }
     gcsClient.close();
     telemetry.close();
+  }
+
+  static void shutdownExecutorService(ExecutorService executorService) {
+    executorService.shutdown();
+    try {
+      if (!executorService.awaitTermination(EXECUTOR_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+        executorService.shutdownNow();
+      }
+    } catch (InterruptedException e) {
+      executorService.shutdownNow();
+      Thread.currentThread().interrupt();
+    }
   }
 
   @Override

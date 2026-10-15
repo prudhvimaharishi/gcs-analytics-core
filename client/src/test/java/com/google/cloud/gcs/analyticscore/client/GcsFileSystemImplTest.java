@@ -91,6 +91,7 @@ class GcsFileSystemImplTest {
 
   @BeforeEach
   void setUp() {
+    GcsClientCache.getInstance().clear();
     gcsFileSystem = new GcsFileSystemImpl(mockClient, TEST_GCS_FILESYSTEM_OPTIONS);
   }
 
@@ -99,6 +100,7 @@ class GcsFileSystemImplTest {
     if (gcsFileSystem != null) {
       gcsFileSystem.close();
     }
+    GcsClientCache.getInstance().clear();
   }
 
   @Test
@@ -839,6 +841,70 @@ class GcsFileSystemImplTest {
         assertThrows(UncheckedIOException.class, () -> new GcsFileSystemImpl(options));
 
     assertThat(exception).hasCauseThat().isInstanceOf(IOException.class);
+  }
+
+  @Test
+  void constructor_multipleInstancesWithSameOptions_sharesCachedGcsClientAndIsolatesScanState() {
+    try (GcsFileSystemImpl fs1 = new GcsFileSystemImpl(TEST_GCS_FILESYSTEM_OPTIONS);
+        GcsFileSystemImpl fs2 = new GcsFileSystemImpl(TEST_GCS_FILESYSTEM_OPTIONS)) {
+      ExecutorService sharedExecutor = fs1.getReadExecutorServiceSupplier().get();
+      fs1.close();
+      // Calling close() a second time on fs1 must be a no-op and not release fs2's lease
+      fs1.close();
+
+      assertThat(
+              ImmutableList.of(
+                  fs1.getGcsClient() == fs2.getGcsClient(),
+                  fs1.getCacheManager() != fs2.getCacheManager(),
+                  fs1.getTelemetry() != fs2.getTelemetry(),
+                  sharedExecutor.isShutdown()))
+          .containsExactly(true, true, true, false)
+          .inOrder();
+    }
+  }
+
+  @Test
+  void open_withGcsClientImpl_usesPerScanTelemetryInstance() throws IOException {
+    GcsItemId itemId =
+        GcsItemId.builder().setBucketName(TEST_BUCKET).setObjectName(TEST_OBJECT).build();
+    GcsItemInfo itemInfo =
+        GcsItemInfo.builder().setItemId(itemId).setSize(16L).setContentGeneration(1L).build();
+    GcsFileInfo fileInfo =
+        GcsFileInfo.builder()
+            .setUri(URI.create("gs://" + TEST_BUCKET + "/" + TEST_OBJECT))
+            .setItemInfo(itemInfo)
+            .setAttributes(Collections.emptyMap())
+            .build();
+    GcsReadOptions readOptions = GcsReadOptions.builder().setUserProjectId(TEST_PROJECT).build();
+
+    try (GcsFileSystemImpl fs1 = new GcsFileSystemImpl(TEST_GCS_FILESYSTEM_OPTIONS);
+        GcsFileSystemImpl fs2 = new GcsFileSystemImpl(TEST_GCS_FILESYSTEM_OPTIONS)) {
+      fs1.close();
+      try (VectoredSeekableByteChannel ch1 = fs2.open(fileInfo, readOptions);
+          VectoredSeekableByteChannel ch2 = fs2.open(itemId, readOptions)) {
+        assertThat(ImmutableList.of(ch1.isOpen(), ch2.isOpen()))
+            .containsExactly(true, true)
+            .inOrder();
+      }
+    }
+  }
+
+  @Test
+  void shutdownExecutorService_whenTimeoutOrInterrupted_callsShutdownNowAndPreservesInterrupt()
+      throws InterruptedException {
+    ExecutorService timeoutExecutor = mock(ExecutorService.class);
+    when(timeoutExecutor.awaitTermination(anyLong(), any(TimeUnit.class))).thenReturn(false);
+    ExecutorService interruptedExecutor = mock(ExecutorService.class);
+    when(interruptedExecutor.awaitTermination(anyLong(), any(TimeUnit.class)))
+        .thenThrow(new InterruptedException());
+
+    GcsFileSystemImpl.shutdownExecutorService(timeoutExecutor);
+    GcsFileSystemImpl.shutdownExecutorService(interruptedExecutor);
+    boolean wasInterrupted = Thread.interrupted();
+
+    verify(timeoutExecutor).shutdownNow();
+    verify(interruptedExecutor).shutdownNow();
+    assertThat(wasInterrupted).isTrue();
   }
 
   @SuppressWarnings("unchecked")

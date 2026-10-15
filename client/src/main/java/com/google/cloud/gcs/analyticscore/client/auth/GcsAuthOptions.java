@@ -72,7 +72,7 @@ public abstract class GcsAuthOptions {
   /**
    * Returns the configured authentication type, or {@link AuthType#APPLICATION_DEFAULT} if unset.
    */
-  AuthType effectiveAuthType() {
+  public AuthType effectiveAuthType() {
     return getAuthType().orElse(AuthType.APPLICATION_DEFAULT);
   }
 
@@ -80,7 +80,7 @@ public abstract class GcsAuthOptions {
    * Returns whether unavailable Application Default Credentials may fall back to unauthenticated
    * access, which is only when no setting asks for authenticated access.
    */
-  boolean allowsUnauthenticatedFallback() {
+  public boolean allowsUnauthenticatedFallback() {
     return getAuthType().isEmpty()
         && getImpersonationServiceAccount().isEmpty()
         && getTokenServerUri().isEmpty();

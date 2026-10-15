@@ -171,6 +171,12 @@ class GcsClientImpl implements GcsClient {
   @Override
   public VectoredSeekableByteChannel openReadChannel(
       GcsItemInfo gcsItemInfo, GcsReadOptions readOptions) throws IOException {
+    return openReadChannel(gcsItemInfo, readOptions, telemetry);
+  }
+
+  VectoredSeekableByteChannel openReadChannel(
+      GcsItemInfo gcsItemInfo, GcsReadOptions readOptions, Telemetry channelTelemetry)
+      throws IOException {
     checkNotNull(gcsItemInfo, "itemInfo should not be null");
     checkNotNull(readOptions, "readOptions should not be null");
     checkArgument(
@@ -179,25 +185,41 @@ class GcsClientImpl implements GcsClient {
 
     if (clientOptions.isBidiEnabled()) {
       return new GcsBidiReadChannel(
-          storage, gcsItemInfo, readOptions, executorServiceSupplier, telemetry);
+          storage, gcsItemInfo, readOptions, executorServiceSupplier, channelTelemetry);
     }
 
     return new GcsReadChannel(
-        storage, gcsItemInfo, readOptions, executorServiceSupplier, telemetry);
+        storage, gcsItemInfo, readOptions, executorServiceSupplier, channelTelemetry);
   }
 
   @Override
   public VectoredSeekableByteChannel openReadChannel(
       GcsItemId gcsItemId, GcsReadOptions readOptions) throws IOException {
+    return openReadChannel(gcsItemId, readOptions, telemetry);
+  }
+
+  VectoredSeekableByteChannel openReadChannel(
+      GcsItemId gcsItemId, GcsReadOptions readOptions, Telemetry channelTelemetry)
+      throws IOException {
     checkNotNull(gcsItemId, "gcsItemId should not be null");
     checkNotNull(readOptions, "readOptions should not be null");
     ItemInfoProvider itemInfoProvider = this::getGcsItemInfo;
     if (clientOptions.isBidiEnabled()) {
       return new GcsBidiReadChannel(
-          storage, gcsItemId, readOptions, executorServiceSupplier, telemetry, itemInfoProvider);
+          storage,
+          gcsItemId,
+          readOptions,
+          executorServiceSupplier,
+          channelTelemetry,
+          itemInfoProvider);
     } else {
       return new GcsReadChannel(
-          storage, gcsItemId, readOptions, executorServiceSupplier, telemetry, itemInfoProvider);
+          storage,
+          gcsItemId,
+          readOptions,
+          executorServiceSupplier,
+          channelTelemetry,
+          itemInfoProvider);
     }
   }
 
