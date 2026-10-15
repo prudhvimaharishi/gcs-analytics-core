@@ -212,6 +212,13 @@ class GcsBidiReadChannel extends GcsReadChannel {
     ranges.forEach(range -> readAndAttachCallback(range, session, allocate));
   }
 
+  /** Reads prefetch ranges through the same bidi read session as foreground vectored reads. */
+  @Override
+  public void prefetchVectored(List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate)
+      throws IOException {
+    readVectored(ranges, allocate);
+  }
+
   @Override
   public void close() throws IOException {
     if (closed) {
