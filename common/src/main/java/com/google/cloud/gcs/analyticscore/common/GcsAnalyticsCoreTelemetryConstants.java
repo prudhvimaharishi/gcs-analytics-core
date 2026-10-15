@@ -25,6 +25,7 @@ public class GcsAnalyticsCoreTelemetryConstants {
     SEEK_DURATION("gcs.analytics-core.client.seek.duration", MetricType.DURATION),
     READ_BYTES("gcs.analytics-core.client.read.size", MetricType.COUNTER),
     READ_DURATION("gcs.analytics-core.client.read.duration", MetricType.DURATION),
+    READ_SPLIT_PARTS("gcs.analytics-core.client.read.split.parts", MetricType.COUNTER),
     OPEN_DURATION("gcs.analytics-core.client.open.duration", MetricType.DURATION),
     READ_CACHE_HIT("gcs.analytics-core.client.read.cache.hits", MetricType.COUNTER),
     READ_CACHE_MISS("gcs.analytics-core.client.read.cache.misses", MetricType.COUNTER),
