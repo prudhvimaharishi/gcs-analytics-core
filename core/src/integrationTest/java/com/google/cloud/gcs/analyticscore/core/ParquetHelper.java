@@ -17,6 +17,7 @@ package com.google.cloud.gcs.analyticscore.core;
 
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.*;
 
+import com.google.cloud.gcs.analyticscore.client.GcsFileSystem;
 import com.google.cloud.gcs.analyticscore.client.GcsFileSystemOptions;
 import com.google.common.collect.ImmutableList;
 import org.apache.hadoop.conf.Configuration;
@@ -102,8 +103,26 @@ public class ParquetHelper {
      */
     public static long readParquetObjectRecords(URI fileUri, String requestedSchema, boolean readVectoredEnabled, GcsFileSystemOptions gcsFileSystemOptions)  {
         logger.info("Reading parquet file:{} with vectoredIOEnabled={}", fileUri, readVectoredEnabled);
+        return readRecords(new TestInputStreamInputFile(fileUri, readVectoredEnabled, gcsFileSystemOptions), requestedSchema);
+    }
+
+    /**
+     * Reads the records from a Parquet file through an existing file system and returns the total
+     * record count.
+     *
+     * @param gcsFileSystem The file system to open the file with.
+     * @param fileUri The URI of the Parquet file.
+     * @param requestedSchema The requested schema to read from the Parquet file.
+     * @param readVectoredEnabled Whether to use vectored read or not.
+     * @return The total number of records in the file.
+     */
+    public static long readParquetObjectRecords(GcsFileSystem gcsFileSystem, URI fileUri, String requestedSchema, boolean readVectoredEnabled)  {
+        logger.info("Reading parquet file:{} with vectoredIOEnabled={}", fileUri, readVectoredEnabled);
+        return readRecords(new TestInputStreamInputFile(fileUri, readVectoredEnabled, gcsFileSystem), requestedSchema);
+    }
+
+    private static long readRecords(InputFile inputFile, String requestedSchema) {
         try {
-            InputFile inputFile = new TestInputStreamInputFile(fileUri, readVectoredEnabled, gcsFileSystemOptions);
             long recordCount = 0;
             Configuration conf = new Configuration();
             if (requestedSchema != null) {

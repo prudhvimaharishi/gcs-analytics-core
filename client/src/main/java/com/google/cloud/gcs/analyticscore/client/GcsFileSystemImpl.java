@@ -103,7 +103,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this.readExecutorServiceSupplier = initializeReadExecutionServiceSupplier();
     this.statusExecutorServiceSupplier = initializeStatusExecutionServiceSupplier();
     this.telemetry = createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions());
-    this.cacheManager = new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions());
+    this.cacheManager = createCacheManager(fileSystemOptions, this.telemetry);
     this.gcsClient =
         telemetry.measure(
             GcsAnalyticsCoreTelemetryConstants.Operation.GCS_CLIENT_CREATE.name(),
@@ -125,8 +125,12 @@ public class GcsFileSystemImpl implements GcsFileSystem {
     this(
         gcsClient,
         fileSystemOptions,
-        createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions()),
-        new AnalyticsCacheManager(fileSystemOptions.getGcsCacheOptions()));
+        createTelemetry(fileSystemOptions.getAnalyticsCoreTelemetryOptions()));
+  }
+
+  private GcsFileSystemImpl(
+      GcsClient gcsClient, GcsFileSystemOptions fileSystemOptions, Telemetry telemetry) {
+    this(gcsClient, fileSystemOptions, telemetry, createCacheManager(fileSystemOptions, telemetry));
   }
 
   @VisibleForTesting
@@ -254,6 +258,7 @@ public class GcsFileSystemImpl implements GcsFileSystem {
       statusExecutorService.shutdownNow();
       Thread.currentThread().interrupt();
     }
+    cacheManager.invalidateAll();
     gcsClient.close();
     telemetry.close();
   }
@@ -282,6 +287,14 @@ public class GcsFileSystemImpl implements GcsFileSystem {
         .getCustomTelemetryOptions()
         .ifPresent(options -> listeners.addAll(options.getOperationListeners()));
     return new Telemetry(listeners.build());
+  }
+
+  private static AnalyticsCacheManager createCacheManager(
+      GcsFileSystemOptions fileSystemOptions, Telemetry telemetry) {
+    return new AnalyticsCacheManager(
+        fileSystemOptions.getGcsCacheOptions(),
+        fileSystemOptions.getGcsClientOptions().getGcsPrefetchOptions(),
+        telemetry);
   }
 
   @VisibleForTesting

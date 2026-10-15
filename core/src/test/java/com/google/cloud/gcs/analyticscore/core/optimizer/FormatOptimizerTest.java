@@ -18,16 +18,23 @@ package com.google.cloud.gcs.analyticscore.core.optimizer;
 
 import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.google.cloud.gcs.analyticscore.client.AnalyticsCacheManager;
+import com.google.cloud.gcs.analyticscore.client.FakeVectoredSeekableByteChannel;
 import com.google.cloud.gcs.analyticscore.client.GcsFileInfo;
 import com.google.cloud.gcs.analyticscore.client.GcsItemId;
 import com.google.cloud.gcs.analyticscore.client.GcsItemInfo;
+import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
 import com.google.cloud.gcs.analyticscore.client.VectoredSeekableByteChannel;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.IntFunction;
 import org.junit.jupiter.api.Test;
 
 class FormatOptimizerTest {
@@ -113,5 +120,69 @@ class FormatOptimizerTest {
 
     // Should not throw
     optimizer.onClose();
+  }
+
+  @Test
+  void afterRead_default_doesNotTouchTheChannel() throws IOException {
+    VectoredSeekableByteChannel channel = mock(VectoredSeekableByteChannel.class);
+
+    new MinimalOptimizer().afterRead(0L, 16, channel);
+
+    verifyNoInteractions(channel);
+  }
+
+  @Test
+  void readVectored_default_returnsAllRanges() throws IOException {
+    List<GcsObjectRange> ranges = ImmutableList.of(createRange());
+
+    List<GcsObjectRange> unservedRanges =
+        new MinimalOptimizer().readVectored(ranges, ByteBuffer::allocate);
+
+    assertThat(unservedRanges).isSameInstanceAs(ranges);
+  }
+
+  @Test
+  void readVectored_withChannel_returnsTheTwoArgumentOverloadResult() throws IOException {
+    FormatOptimizer optimizer =
+        new MinimalOptimizer() {
+          @Override
+          public List<GcsObjectRange> readVectored(
+              List<GcsObjectRange> ranges, IntFunction<ByteBuffer> allocate) {
+            return ImmutableList.of();
+          }
+        };
+
+    List<GcsObjectRange> unservedRanges =
+        optimizer.readVectored(
+            ImmutableList.of(createRange()),
+            ByteBuffer::allocate,
+            new FakeVectoredSeekableByteChannel(new byte[16]));
+
+    assertThat(unservedRanges).isEmpty();
+  }
+
+  private static GcsObjectRange createRange() {
+    return GcsObjectRange.builder()
+        .setOffset(0)
+        .setLength(16)
+        .setByteBufferFuture(new CompletableFuture<>())
+        .build();
+  }
+
+  /** Implements only the abstract methods, so the default methods run as written. */
+  private static class MinimalOptimizer implements FormatOptimizer {
+
+    @Override
+    public boolean isApplicable(GcsItemId itemId) {
+      return true;
+    }
+
+    @Override
+    public void onOpen(GcsItemId itemId, AnalyticsCacheManager cacheManager) {}
+
+    @Override
+    public int read(long position, ByteBuffer dst, VectoredSeekableByteChannel delegate) {
+      return 0;
+    }
   }
 }
