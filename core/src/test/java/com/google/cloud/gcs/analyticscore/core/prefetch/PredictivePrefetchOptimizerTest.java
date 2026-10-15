@@ -26,6 +26,8 @@ import com.google.cloud.gcs.analyticscore.client.GcsItemId;
 import com.google.cloud.gcs.analyticscore.client.GcsItemInfo;
 import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
 import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions;
+import com.google.cloud.gcs.analyticscore.client.GcsPrefetchOptions.DictionaryTrigger;
+import com.google.cloud.gcs.analyticscore.client.SchemaAccessHistory;
 import com.google.cloud.gcs.analyticscore.common.GcsAnalyticsCoreTelemetryConstants.Metric;
 import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
@@ -34,6 +36,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -329,6 +332,21 @@ class PredictivePrefetchOptimizerTest {
   }
 
   @Test
+  void read_emptyDestinationInsideDictionaryPage_recordsNoDictionaryColumn() throws IOException {
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    long insideDictionaryPage = categoryChunk.getDictionaryPageOffset().getAsLong() + 1;
+
+    optimizer.read(insideDictionaryPage, ByteBuffer.allocate(0), channel);
+
+    assertThat(
+            cacheManager
+                .getSchemaAccessHistory()
+                .get()
+                .getDictionaryColumns(layout.getSchemaFingerprint()))
+        .isEmpty();
+  }
+
+  @Test
   void read_alreadyCachedRemainder_schedulesNoAdditionalDuplicateRequests() throws IOException {
     ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
     readThroughChannel(
@@ -502,6 +520,478 @@ class PredictivePrefetchOptimizerTest {
         .contains(ParquetTestFiles.ID_COLUMN);
   }
 
+  @Test
+  void read_dictionaryPageInMultiRowGroupFile_prefetchesLaterDictionariesWithoutLaterDataPages()
+      throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent();
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer = createOptimizer(/* enabled= */ true);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(multiRowGroupLayout.getSchemaFingerprint(), ParquetTestFiles.ID_COLUMN);
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg1DictChunk =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg1DataChunk =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.ID_COLUMN);
+
+    readThroughChannel(
+        optimizer,
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    assertThat(channel.getRequestedOffsets())
+        .contains(rg1DictChunk.getDictionaryPageOffset().getAsLong());
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg1DataChunk.getStartOffset());
+  }
+
+  @Test
+  void read_allKnownDictionariesReadInSmallRowGroup_prefetchesThatRowGroupsDataPages()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+
+    readThroughChannel(
+        optimizer,
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(rg0DataChunk.getStartOffset());
+  }
+
+  @Test
+  void read_dictionariesOfLaterRowGroupWhileEarlierPrefetchPending_doesNotPrefetchItsDataPages()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg1DictChunk =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg1DataChunk =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+    readThroughChannel(
+        optimizer,
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    readThroughChannel(
+        optimizer,
+        rg1DictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg1DataChunk.getStartOffset());
+  }
+
+  @Test
+  void read_dictionarySweepAcrossRowGroups_keepsFirstRowGroupDataPrefetch() throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+
+    readDictionariesOfFirstRowGroups(multiRowGroupLayout, 3);
+
+    assertThat(
+            cacheManager
+                .getPrefetchBufferCache()
+                .get()
+                .getRangeCovering(
+                    ITEM_ID, rg0DataChunk.getStartOffset(), chunkLength(rg0DataChunk)))
+        .isPresent();
+  }
+
+  @Test
+  void read_dataPageOfLaterRowGroupAfterSweep_evictsSkippedRowGroupDataPrefetch()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    ParquetColumnChunk rg1DataChunk =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+    readDictionariesOfFirstRowGroups(multiRowGroupLayout, 3);
+
+    readThroughChannel(
+        optimizer, rg1DataChunk.getDataPageOffset(), ByteBuffer.allocate(8), channel);
+
+    assertThat(
+            cacheManager
+                .getPrefetchBufferCache()
+                .get()
+                .getRangeCovering(
+                    ITEM_ID, rg0DataChunk.getStartOffset(), chunkLength(rg0DataChunk)))
+        .isEmpty();
+  }
+
+  @Test
+  void read_dictionaryTriggerBeforeDataColumnsAreKnown_retriesOnNextDictionaryRead()
+      throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent(FEW_ROW_GROUPS_RECORD_COUNT);
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer = createOptimizer(/* enabled= */ true);
+    int fingerprint = multiRowGroupLayout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    long rg0DictOffset = rg0DictChunk.getDictionaryPageOffset().getAsLong();
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    readThroughChannel(optimizer, rg0DictOffset, ByteBuffer.allocate(8), channel);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+
+    readThroughChannel(optimizer, rg0DictOffset + 8, ByteBuffer.allocate(8), channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(rg0DataChunk.getStartOffset());
+  }
+
+  @Test
+  void read_dictionaryAfterFooterSpeculationQueuedOnlyDictionaries_prefetchesRowGroupDataPages()
+      throws IOException {
+    int fingerprint = layout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk dictChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk dataChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+
+    readThroughChannel(
+        optimizer,
+        dictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(dataChunk.getStartOffset());
+  }
+
+  @Test
+  void read_dictionaryTriggerWithUncachedDictionaryPage_prefetchesTheWholeColumnChunk()
+      throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent(FEW_ROW_GROUPS_RECORD_COUNT);
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer = createOptimizer(/* enabled= */ true);
+    int fingerprint = multiRowGroupLayout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0Chunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+
+    readThroughChannel(
+        optimizer, rg0Chunk.getDictionaryPageOffset().getAsLong(), ByteBuffer.allocate(8), channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(rg0Chunk.getStartOffset());
+  }
+
+  /** Reads the {@code category} dictionary page of each of the first {@code count} row groups. */
+  private void readDictionariesOfFirstRowGroups(ParquetFileLayout fileLayout, int count)
+      throws IOException {
+    for (int index = 0; index < count; index++) {
+      ParquetColumnChunk dictChunk =
+          columnChunk(fileLayout, index, ParquetTestFiles.CATEGORY_COLUMN);
+      readThroughChannel(
+          optimizer,
+          dictChunk.getDictionaryPageOffset().getAsLong(),
+          ByteBuffer.allocate(8),
+          channel);
+    }
+  }
+
+  private static int chunkLength(ParquetColumnChunk chunk) {
+    return (int) (chunk.getEndOffset() - chunk.getStartOffset());
+  }
+
+  @Test
+  void read_dictionaryPageAfterFooterPrefetch_doesNotRefetchConsumedLaterDictionaries()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg1DictChunk =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.CATEGORY_COLUMN);
+    long rg1DictOffset = rg1DictChunk.getDictionaryPageOffset().getAsLong();
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+    GcsObjectRange rg1DictRange =
+        createRange(rg1DictOffset, (int) (rg1DictChunk.getDataPageOffset() - rg1DictOffset));
+    optimizer.readVectored(ImmutableList.of(rg1DictRange), ByteBuffer::allocate, channel);
+
+    readThroughChannel(
+        optimizer,
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    assertThat(Collections.frequency(channel.getRequestedOffsets(), rg1DictOffset)).isEqualTo(1);
+  }
+
+  @Test
+  void read_dictionaryPageAfterDataPageOfSameRowGroup_doesNotPrefetchRowGroupDataPages()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+    readThroughChannel(
+        optimizer, rg0DataChunk.getDataPageOffset(), ByteBuffer.allocate(8), channel);
+
+    readThroughChannel(
+        optimizer,
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg0DataChunk.getStartOffset());
+  }
+
+  @Test
+  void read_firstOfTwoKnownDictionariesWithFirstDictReadTrigger_prefetchesRowGroupDataPages()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout =
+        openFileWithTwoLearnedDictionaryColumns(DictionaryTrigger.FIRST_DICT_READ);
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+
+    readThroughChannel(
+        optimizer,
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(rg0DataChunk.getStartOffset());
+  }
+
+  @Test
+  void read_firstOfTwoKnownDictionariesWithLastDictReadTrigger_doesNotPrefetchRowGroupDataPages()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout =
+        openFileWithTwoLearnedDictionaryColumns(DictionaryTrigger.LAST_DICT_READ);
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+
+    readThroughChannel(
+        optimizer,
+        rg0DictChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        channel);
+
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg0DataChunk.getStartOffset());
+  }
+
+  /**
+   * Opens a small-row-group file whose schema history knows {@code id} as a data column and both
+   * {@code category} and {@code value} as dictionary columns, and returns its layout.
+   */
+  private ParquetFileLayout openFileWithTwoLearnedDictionaryColumns(DictionaryTrigger trigger)
+      throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent(FEW_ROW_GROUPS_RECORD_COUNT);
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer =
+        createOptimizer(
+            GcsPrefetchOptions.builder().setEnabled(true).setDictionaryTrigger(trigger).build());
+    int fingerprint = multiRowGroupLayout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.VALUE_COLUMN);
+    return multiRowGroupLayout;
+  }
+
+  @Test
+  void afterRead_outsideRowGroupsWithLearnedDictionaryColumn_prefetchesDictionaryPagesOnly()
+      throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent();
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer = createOptimizer(/* enabled= */ true);
+    int fingerprint = multiRowGroupLayout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg1DictChunk =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+
+    optimizer.afterRead(multiRowGroupContent.length - 16, 16, channel);
+
+    assertThat(channel.getRequestedOffsets())
+        .containsAtLeast(
+            rg0DictChunk.getDictionaryPageOffset().getAsLong(),
+            rg1DictChunk.getDictionaryPageOffset().getAsLong());
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg0DataChunk.getStartOffset());
+  }
+
+  @Test
+  void
+      afterRead_singleRowGroupWithFilterAndDataColumn_schedulesOnlyDictionaryThenPrefetchesChunkOnDictionaryRead()
+          throws Exception {
+    int fingerprint = layout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    long dictOffset = categoryChunk.getDictionaryPageOffset().getAsLong();
+    int dictLength = (int) (categoryChunk.getDataPageOffset() - dictOffset);
+    channel.deferVectoredCompletion();
+
+    optimizer.afterRead(content.length - 16, 16, channel);
+
+    assertThat(channel.getRequestedRanges()).hasSize(1);
+    GcsObjectRange dictPrefetch = channel.getRequestedRanges().get(0);
+    assertThat(dictPrefetch.getOffset()).isEqualTo(dictOffset);
+    assertThat(dictPrefetch.getLength()).isEqualTo(dictLength);
+    dictPrefetch
+        .getByteBufferFuture()
+        .complete(ByteBuffer.wrap(sliceOfContent(dictOffset, dictLength)));
+
+    // Reading the dictionary triggers the whole-chunk prefetch before serving the dictionary,
+    // and serves the dictionary without waiting on the deferred whole-chunk download.
+    ByteBuffer dictBuffer = ByteBuffer.allocate(dictLength);
+    int servedDictBytes = optimizer.read(dictOffset, dictBuffer, channel);
+
+    assertThat(servedDictBytes).isEqualTo(dictLength);
+    assertThat(dictBuffer.array()).isEqualTo(sliceOfContent(dictOffset, dictLength));
+    assertThat(channel.getRequestedRanges()).hasSize(2);
+
+    // Now complete the whole-chunk range and verify readVectored over the chunk is served from it.
+    channel.completeDeferredRanges();
+    GcsObjectRange fullChunkRange = rangeOverChunk(categoryChunk);
+    List<GcsObjectRange> unserved =
+        optimizer.readVectored(ImmutableList.of(fullChunkRange), ByteBuffer::allocate, channel);
+
+    assertThat(unserved).isEmpty();
+    assertThat(fullChunkRange.getByteBufferFuture().get(5, TimeUnit.SECONDS).array())
+        .isEqualTo(sliceOfContent(categoryChunk.getStartOffset(), chunkLength(categoryChunk)));
+  }
+
+  @Test
+  void read_uncachedDictionaryWhenColumnIsAlsoDataColumn_returnsZeroWithoutWaitingOnDataChunk()
+      throws IOException {
+    int fingerprint = layout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    long dictOffset = categoryChunk.getDictionaryPageOffset().getAsLong();
+    channel.deferVectoredCompletion();
+
+    int servedBytes = optimizer.read(dictOffset, ByteBuffer.allocate(8), channel);
+
+    assertThat(servedBytes).isEqualTo(0);
+    assertThat(channel.getRequestedOffsets()).containsExactly(categoryChunk.getStartOffset());
+  }
+
+  @Test
+  void read_inFlightDictionaryPageFails_attemptsDataPrefetchOnce() throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    ParquetColumnChunk rg0DictChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk rg0DataChunk =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.ID_COLUMN);
+    long dictOffset = rg0DictChunk.getDictionaryPageOffset().getAsLong();
+    CompletableFuture<ByteBuffer> dictionaryPrefetch = new CompletableFuture<>();
+    cacheManager
+        .getPrefetchBufferCache()
+        .get()
+        .registerRange(
+            ITEM_ID,
+            dictOffset,
+            (int) (rg0DictChunk.getDataPageOffset() - dictOffset),
+            dictionaryPrefetch,
+            () -> dictionaryPrefetch.completeExceptionally(new IOException("prefetch failed")));
+    channel.failVectoredReadsWith(new IOException("prefetch failed"));
+
+    readThroughChannel(optimizer, dictOffset, ByteBuffer.allocate(8), channel);
+
+    assertThat(Collections.frequency(channel.getRequestedOffsets(), rg0DataChunk.getStartOffset()))
+        .isEqualTo(1);
+  }
+
+  /**
+   * Opens a small-row-group file whose schema history already knows {@code id} as a data column and
+   * {@code category} as a dictionary column, and returns its layout.
+   */
+  private ParquetFileLayout openMultiRowGroupFileWithLearnedFilterSchema() throws IOException {
+    byte[] multiRowGroupContent = createMultiRowGroupContent(FEW_ROW_GROUPS_RECORD_COUNT);
+    ParquetFileLayout multiRowGroupLayout = parseLayout(multiRowGroupContent);
+    channel = new FakeVectoredSeekableByteChannel(multiRowGroupContent);
+    optimizer = createOptimizer(/* enabled= */ true);
+    int fingerprint = multiRowGroupLayout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    return multiRowGroupLayout;
+  }
+
   /** Leaves a speculative request outstanding and returns the start offset it covers. */
   private long scheduleWithoutCompleting() throws IOException {
     channel.deferVectoredCompletion();
@@ -577,6 +1067,119 @@ class PredictivePrefetchOptimizerTest {
 
   private byte[] sliceOfContent(long offset, int length) {
     return Arrays.copyOfRange(content, (int) offset, (int) offset + length);
+  }
+
+  @Test
+  void afterRead_whenFooterRejectedHistoryDominates_defersPrefetchUntilDictionaryRead()
+      throws IOException {
+    int fingerprint = layout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+
+    for (int i = 0; i < 2; i++) {
+      FakeVectoredSeekableByteChannel rejectedChannel =
+          new FakeVectoredSeekableByteChannel(content);
+      PredictivePrefetchOptimizer rejectedOptimizer = createOptimizer(/* enabled= */ true);
+      rejectedOptimizer.afterRead(content.length - 16, 16, rejectedChannel);
+      rejectedOptimizer.onClose();
+      rejectedChannel.close();
+    }
+    assertThat(cacheManager.getSchemaAccessHistory().get().shouldSpeculateAtFooter(fingerprint))
+        .isFalse();
+
+    FakeVectoredSeekableByteChannel thirdChannel = new FakeVectoredSeekableByteChannel(content);
+    PredictivePrefetchOptimizer thirdOptimizer = createOptimizer(/* enabled= */ true);
+    thirdOptimizer.afterRead(content.length - 16, 16, thirdChannel);
+    assertThat(thirdChannel.getRequestedOffsets()).isEmpty();
+
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+    readThroughChannel(
+        thirdOptimizer,
+        categoryChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        thirdChannel);
+    thirdOptimizer.onClose();
+    thirdChannel.close();
+
+    assertThat(thirdChannel.getRequestedOffsets()).contains(idChunk.getStartOffset());
+  }
+
+  @Test
+  void read_dictionaryPageWithFooterSpeculationDeferred_doesNotRefetchTheDictionaryJustRead()
+      throws IOException {
+    ParquetFileLayout multiRowGroupLayout = openMultiRowGroupFileWithLearnedFilterSchema();
+    int fingerprint = multiRowGroupLayout.getSchemaFingerprint();
+    for (int i = 0; i < 2; i++) {
+      cacheManager
+          .getSchemaAccessHistory()
+          .get()
+          .recordFileOutcome(fingerprint, SchemaAccessHistory.FileFilterOutcome.FOOTER_REJECTED);
+    }
+    long rg0DictOffset =
+        columnChunk(multiRowGroupLayout, 0, ParquetTestFiles.CATEGORY_COLUMN)
+            .getDictionaryPageOffset()
+            .getAsLong();
+    long rg1DictOffset =
+        columnChunk(multiRowGroupLayout, 1, ParquetTestFiles.CATEGORY_COLUMN)
+            .getDictionaryPageOffset()
+            .getAsLong();
+    optimizer.afterRead(channel.size() - 16, 16, channel);
+
+    readThroughChannel(optimizer, rg0DictOffset, ByteBuffer.allocate(8), channel);
+
+    assertThat(channel.getRequestedOffsets()).contains(rg1DictOffset);
+    assertThat(channel.getRequestedOffsets()).doesNotContain(rg0DictOffset);
+  }
+
+  @Test
+  void read_whenDictRejectedHistoryDominates_doesNotSpeculateDataOnDictionaryRead()
+      throws IOException {
+    int fingerprint = layout.getSchemaFingerprint();
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDataAccess(fingerprint, ParquetTestFiles.ID_COLUMN);
+    cacheManager
+        .getSchemaAccessHistory()
+        .get()
+        .recordDictionaryAccess(fingerprint, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk categoryChunk = columnChunk(layout, 0, ParquetTestFiles.CATEGORY_COLUMN);
+    ParquetColumnChunk idChunk = columnChunk(layout, 0, ParquetTestFiles.ID_COLUMN);
+
+    for (int i = 0; i < 2; i++) {
+      FakeVectoredSeekableByteChannel dictRejectedChannel =
+          new FakeVectoredSeekableByteChannel(content);
+      PredictivePrefetchOptimizer dictRejectedOptimizer = createOptimizer(/* enabled= */ true);
+      readThroughChannel(
+          dictRejectedOptimizer,
+          categoryChunk.getDictionaryPageOffset().getAsLong(),
+          ByteBuffer.allocate(8),
+          dictRejectedChannel);
+      dictRejectedOptimizer.onClose();
+      dictRejectedChannel.close();
+    }
+    assertThat(cacheManager.getSchemaAccessHistory().get().shouldSpeculateOnDictionary(fingerprint))
+        .isFalse();
+
+    FakeVectoredSeekableByteChannel thirdChannel = new FakeVectoredSeekableByteChannel(content);
+    PredictivePrefetchOptimizer thirdOptimizer = createOptimizer(/* enabled= */ true);
+    thirdOptimizer.afterRead(content.length - 16, 16, thirdChannel);
+    readThroughChannel(
+        thirdOptimizer,
+        categoryChunk.getDictionaryPageOffset().getAsLong(),
+        ByteBuffer.allocate(8),
+        thirdChannel);
+    thirdOptimizer.onClose();
+    thirdChannel.close();
+
+    assertThat(thirdChannel.getRequestedOffsets()).doesNotContain(idChunk.getStartOffset());
   }
 
   @Test

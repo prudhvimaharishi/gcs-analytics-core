@@ -29,6 +29,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -51,6 +53,8 @@ final class PrefetchScheduler implements AutoCloseable {
   private final PrefetchBufferCache bufferCache;
   private final PrefetchBufferCache.RegisteredStream registeredStream;
   private final ConcurrentSkipListMap<Range<Long>, GcsObjectRange> inFlightRequests =
+      new ConcurrentSkipListMap<>(BY_START_THEN_END);
+  private final ConcurrentSkipListMap<Range<Long>, CompletableFuture<ByteBuffer>> registeredRanges =
       new ConcurrentSkipListMap<>(BY_START_THEN_END);
 
   PrefetchScheduler(GcsItemId itemId, PrefetchBufferCache bufferCache) {
@@ -104,6 +108,7 @@ final class PrefetchScheduler implements AutoCloseable {
       return Optional.empty();
     }
     inFlightRequests.put(key, objectRange);
+    registeredRanges.put(key, fetchFuture);
     CompletableFuture<ByteBuffer> unused =
         fetchFuture.whenComplete((data, error) -> inFlightRequests.remove(key, objectRange));
     return Optional.of(objectRange);
@@ -121,6 +126,43 @@ final class PrefetchScheduler implements AutoCloseable {
     }
     return rangesToFetch.stream()
         .noneMatch(range -> range.getByteBufferFuture().isCompletedExceptionally());
+  }
+
+  /**
+   * Cancels in-flight requests and evicts cached ranges that this scheduler registered starting
+   * inside {@code [startOffset, endOffset)}, leaving ranges registered by other streams untouched.
+   */
+  void cancelRangeWindow(long startOffset, long endOffset) {
+    NavigableMap<Range<Long>, GcsObjectRange> window =
+        startingWithin(inFlightRequests, startOffset, endOffset);
+    for (GcsObjectRange objectRange : window.values()) {
+      objectRange.getByteBufferFuture().cancel(/* mayInterruptIfRunning= */ false);
+    }
+    window.clear();
+    evictRegisteredRanges(startOffset, endOffset);
+  }
+
+  private void evictRegisteredRanges(long startOffset, long endOffset) {
+    NavigableMap<Range<Long>, CompletableFuture<ByteBuffer>> window =
+        startingWithin(registeredRanges, startOffset, endOffset);
+    for (Map.Entry<Range<Long>, CompletableFuture<ByteBuffer>> entry : window.entrySet()) {
+      Range<Long> range = entry.getKey();
+      bufferCache.evictRange(
+          itemId, range.lowerEndpoint(), range.upperEndpoint(), entry.getValue());
+    }
+    window.clear();
+  }
+
+  /**
+   * Returns the view of {@code ranges} whose start offset lies in {@code [startOffset, endOffset)}.
+   */
+  private static <V> NavigableMap<Range<Long>, V> startingWithin(
+      ConcurrentSkipListMap<Range<Long>, V> ranges, long startOffset, long endOffset) {
+    return ranges.subMap(
+        Range.closedOpen(startOffset, startOffset),
+        true,
+        Range.closedOpen(endOffset, endOffset),
+        false);
   }
 
   /** Cancels every outstanding speculative request. */

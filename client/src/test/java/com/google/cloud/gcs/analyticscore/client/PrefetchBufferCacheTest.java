@@ -860,6 +860,39 @@ class PrefetchBufferCacheTest {
   }
 
   @Test
+  void evictRange_registeredFuture_evictsRange() {
+    PrefetchBufferCache cache = newCache();
+    CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
+    cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, future, NO_PROMOTION);
+
+    cache.evictRange(itemId("object"), FIRST_RANGE_OFFSET, 4, future);
+
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 4)).isEmpty();
+  }
+
+  @Test
+  void evictRange_differentFuture_keepsRange() {
+    PrefetchBufferCache cache = newCache();
+    cache.registerRange(
+        itemId("object"), FIRST_RANGE_OFFSET, 4, new CompletableFuture<>(), NO_PROMOTION);
+
+    cache.evictRange(itemId("object"), FIRST_RANGE_OFFSET, 4, new CompletableFuture<>());
+
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 4)).isPresent();
+  }
+
+  @Test
+  void evictRange_differentBounds_keepsRange() {
+    PrefetchBufferCache cache = newCache();
+    CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
+    cache.registerRange(itemId("object"), FIRST_RANGE_OFFSET, 4, future, NO_PROMOTION);
+
+    cache.evictRange(itemId("object"), FIRST_RANGE_OFFSET, 8, future);
+
+    assertThat(cache.getRangeCovering(itemId("object"), FIRST_RANGE_OFFSET, 4)).isPresent();
+  }
+
+  @Test
   void invalidateAll_discardsInFlightRanges() {
     PrefetchBufferCache cache = newCache();
     cache.registerRange(

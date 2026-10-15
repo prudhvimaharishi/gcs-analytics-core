@@ -64,6 +64,7 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   private PrefetchBufferCache bufferCache;
   private PrefetchScheduler scheduler;
   private long fileSize = -1;
+  private long lastPreReadPosition = -1;
   @Nullable private RowGroupPrefetchTracker tracker;
 
   public PredictivePrefetchOptimizer(GcsPrefetchOptions prefetchOptions) {
@@ -94,17 +95,40 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
   public int read(long position, ByteBuffer dst, VectoredSeekableByteChannel source)
       throws IOException {
     ensureTrackerLoaded(source);
+    lastPreReadPosition = -1;
+    int requestedLength = dst.remaining();
+    boolean coveredInCache =
+        tracker != null
+            && requestedLength > 0
+            && bufferCache.getRangeCovering(itemId, position, 1).isPresent();
+    boolean handledBeforeRead =
+        coveredInCache && tracker.onBeforeRead(position, requestedLength, scheduleOn(source));
     int servedBytes = bufferCache.serveFromCache(itemId, position, dst, tracker != null);
-    if (tracker != null && servedBytes > 0) {
-      tracker.onSingleRead(position, servedBytes, scheduleOn(source));
+    if (tracker == null) {
+      return servedBytes;
     }
-    return servedBytes;
+    // A data-page miss is observed in afterRead once the foreground read completes, whereas a
+    // dictionary read triggers data prefetch before blocking on dictionary bytes.
+    if (servedBytes > 0) {
+      if (!handledBeforeRead) {
+        tracker.onSingleRead(position, servedBytes, scheduleOn(source));
+      }
+      return servedBytes;
+    }
+    if (handledBeforeRead || tracker.onBeforeRead(position, requestedLength, scheduleOn(source))) {
+      lastPreReadPosition = position;
+    }
+    return 0;
   }
 
   @Override
   public void afterRead(long position, int bytesRead, VectoredSeekableByteChannel source)
       throws IOException {
     ensureTrackerLoaded(source);
+    if (position == lastPreReadPosition) {
+      lastPreReadPosition = -1;
+      return;
+    }
     if (tracker != null) {
       tracker.onSingleRead(position, bytesRead, scheduleOn(source));
     }
@@ -127,6 +151,9 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
 
   @Override
   public void onClose() {
+    if (tracker != null) {
+      tracker.recordOutcomeOnClose();
+    }
     if (scheduler != null) {
       scheduler.close();
     }
@@ -143,7 +170,11 @@ public final class PredictivePrefetchOptimizer implements FormatOptimizer {
     }
     fileSize = source.size();
     tracker =
-        new RowGroupPrefetchTracker(layout.get(), cacheManager.getSchemaAccessHistory().get());
+        new RowGroupPrefetchTracker(
+            layout.get(),
+            cacheManager.getSchemaAccessHistory().get(),
+            prefetchOptions.getDictionaryTrigger(),
+            scheduler::cancelRangeWindow);
   }
 
   /** Returns a callback that schedules speculative reads of byte ranges on {@code source}. */

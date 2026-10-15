@@ -387,6 +387,20 @@ public final class PrefetchBufferCache {
     }
   }
 
+  /**
+   * Evicts the cached range {@code [startOffset, endOffset)} of {@code itemId} if it is still
+   * backed by {@code future}, so a stream only evicts the entries it registered.
+   */
+  public void evictRange(
+      GcsItemId itemId, long startOffset, long endOffset, CompletableFuture<ByteBuffer> future) {
+    checkNotNull(itemId, "itemId cannot be null");
+    checkNotNull(future, "future cannot be null");
+    CachedRange cached = ranges.getIfPresent(RangeKey.create(itemId, startOffset, endOffset));
+    if (cached != null && cached.getFuture() == future) {
+      removeRange(itemId, cached);
+    }
+  }
+
   /** Discards all cached ranges. */
   public void invalidateAll() {
     ranges.invalidateAll();
