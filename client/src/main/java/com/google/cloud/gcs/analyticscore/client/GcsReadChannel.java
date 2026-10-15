@@ -36,6 +36,7 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SeekableByteChannel;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
@@ -291,11 +292,26 @@ class GcsReadChannel implements VectoredSeekableByteChannel {
             ImmutableList.copyOf(ranges), maxMergeGap, vectoredReadOptions.getMaxMergeSize());
 
     for (GcsObjectCombinedRange combinedRange : combinedRanges) {
-      executorService.execute(
+      Executor executor = executorFor(executorService, combinedRange, prefetch);
+      executor.execute(
           () ->
               recordPrefetchBytesLoaded(
                   prefetch, readCombinedRange(combinedRange, allocate, operation)));
     }
+  }
+
+  /**
+   * Returns where reads of {@code combinedRange} run. On the prioritized read pool, foreground
+   * reads run at {@code HIGH} priority and prefetch reads at {@code LOW} priority.
+   */
+  private static Executor executorFor(
+      ExecutorService executorService, GcsObjectCombinedRange combinedRange, boolean prefetch) {
+    if (!prefetch || !(executorService instanceof PrioritizedReadExecutorService)) {
+      return executorService;
+    }
+    PrioritizedReadExecutorService prioritizedExecutor =
+        (PrioritizedReadExecutorService) executorService;
+    return task -> prioritizedExecutor.submitLowPriority(task, combinedRange.getUnderlyingRanges());
   }
 
   private void recordPrefetchBytesLoaded(boolean prefetch, int bytesRead) {

@@ -17,11 +17,17 @@ package com.google.cloud.gcs.analyticscore.client;
 
 import com.google.auto.value.AutoValue;
 import java.nio.ByteBuffer;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Represents a byte range from a GCS object range. */
 @AutoValue
 public abstract class GcsObjectRange {
+
+  private final Queue<Runnable> promotionActions = new ConcurrentLinkedQueue<>();
+  private final AtomicBoolean promoted = new AtomicBoolean();
 
   // The future that will be completed with the contents of the byte range.
   public abstract CompletableFuture<ByteBuffer> getByteBufferFuture();
@@ -31,6 +37,30 @@ public abstract class GcsObjectRange {
 
   // The length of the byte range.
   public abstract int getLength();
+
+  /**
+   * Adds a callback that promotes a queued low-priority download of this range to foreground
+   * priority. The callback runs right away if {@link #promote()} was already called.
+   */
+  void addPromotionAction(Runnable action) {
+    promotionActions.add(action);
+    if (promoted.get()) {
+      runPromotionActions();
+    }
+  }
+
+  /** Promotes every queued background download of this range to foreground priority. */
+  public void promote() {
+    promoted.set(true);
+    runPromotionActions();
+  }
+
+  private void runPromotionActions() {
+    Runnable action;
+    while ((action = promotionActions.poll()) != null) {
+      action.run();
+    }
+  }
 
   public static Builder builder() {
     return new AutoValue_GcsObjectRange.Builder();

@@ -104,7 +104,10 @@ final class PrefetchScheduler implements AutoCloseable {
         startOffset,
         length,
         fetchFuture,
-        () -> inFlightRequests.remove(key, objectRange))) {
+        () -> {
+          inFlightRequests.remove(key, objectRange);
+          objectRange.promote();
+        })) {
       return Optional.empty();
     }
     inFlightRequests.put(key, objectRange);

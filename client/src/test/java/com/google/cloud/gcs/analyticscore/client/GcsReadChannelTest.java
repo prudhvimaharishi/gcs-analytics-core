@@ -671,6 +671,40 @@ class GcsReadChannelTest {
         .reader(Mockito.any(BlobId.class), Mockito.any(BlobSourceOption[].class));
   }
 
+  @Test
+  void prefetchVectored_prioritizedReadPool_submitsRangeAtLowPriority() throws Exception {
+    GcsItemInfo itemInfo = createItemInfoWith(100);
+    createBinaryBlobInStorage(itemInfo);
+    PrioritizedReadExecutorService readPool = Mockito.spy(new PrioritizedReadExecutorService(4));
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage, itemInfo, TEST_GCS_READ_OPTIONS, Suppliers.ofInstance(readPool), telemetry);
+    GcsObjectRange range = createRange(0, 10);
+
+    gcsReadChannel.prefetchVectored(ImmutableList.of(range), ByteBuffer::allocate);
+    range.getByteBufferFuture().get();
+
+    Mockito.verify(readPool)
+        .submitLowPriority(Mockito.any(Runnable.class), Mockito.eq(ImmutableList.of(range)));
+  }
+
+  @Test
+  void readVectored_prioritizedReadPool_submitsNoRangeAtLowPriority() throws Exception {
+    GcsItemInfo itemInfo = createItemInfoWith(100);
+    createBinaryBlobInStorage(itemInfo);
+    PrioritizedReadExecutorService readPool = Mockito.spy(new PrioritizedReadExecutorService(4));
+    GcsReadChannel gcsReadChannel =
+        new GcsReadChannel(
+            storage, itemInfo, TEST_GCS_READ_OPTIONS, Suppliers.ofInstance(readPool), telemetry);
+    GcsObjectRange range = createRange(0, 10);
+
+    gcsReadChannel.readVectored(ImmutableList.of(range), ByteBuffer::allocate);
+    range.getByteBufferFuture().get();
+
+    Mockito.verify(readPool, Mockito.never())
+        .submitLowPriority(Mockito.any(Runnable.class), Mockito.anyList());
+  }
+
   private GcsReadChannel createDirectExecutorChannel(
       String objectData, RecordingOperationListener listener) throws IOException {
     GcsItemId itemId =
