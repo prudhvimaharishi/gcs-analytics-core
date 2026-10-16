@@ -60,6 +60,7 @@ class CredentialKeyTest {
       "https://www.googleapis.com/auth/cloud-platform";
   private static final String READ_ONLY_SCOPE =
       "https://www.googleapis.com/auth/devstorage.read_only";
+  private static final Date TOKEN_EXPIRATION = new Date(1_800_000_000_000L);
 
   @TempDir static Path sharedTempDir;
 
@@ -266,6 +267,95 @@ class CredentialKeyTest {
 
     assertThat(CredentialKey.fromCredentials(cred1))
         .isNotEqualTo(CredentialKey.fromCredentials(cred2));
+  }
+
+  @Test
+  void fromCredentials_accessTokenOnlyUserCredentialsForDifferentUsers_producesDifferentKeys() {
+    UserCredentials alice = accessTokenOnlyUserCredentials("alice-access-token");
+    UserCredentials bob = accessTokenOnlyUserCredentials("bob-access-token");
+
+    CredentialKey aliceKey = CredentialKey.fromCredentials(alice);
+    CredentialKey bobKey = CredentialKey.fromCredentials(bob);
+
+    assertThat(aliceKey).isNotEqualTo(bobKey);
+  }
+
+  @Test
+  void fromCredentials_accessTokenOnlyUserCredentialsWithSameToken_producesEqualKeys() {
+    UserCredentials cred1 = accessTokenOnlyUserCredentials("alice-access-token");
+    UserCredentials cred2 = accessTokenOnlyUserCredentials("alice-access-token");
+
+    CredentialKey key1 = CredentialKey.fromCredentials(cred1);
+    CredentialKey key2 = CredentialKey.fromCredentials(cred2);
+
+    assertThat(key1).isEqualTo(key2);
+  }
+
+  @Test
+  void fromCredentials_accessTokenOnlyUserCredentials_expiresWithAccessToken() {
+    UserCredentials cred = accessTokenOnlyUserCredentials("alice-access-token");
+
+    CredentialKey key = CredentialKey.fromCredentials(cred);
+
+    assertThat(key.expirationTimeMillis().getAsLong()).isEqualTo(TOKEN_EXPIRATION.getTime());
+  }
+
+  @Test
+  void fromCredentials_accessTokenOnlyUserCredentials_doesNotExposeRawAccessToken() {
+    UserCredentials cred = accessTokenOnlyUserCredentials("alice-access-token");
+
+    CredentialKey key = CredentialKey.fromCredentials(cred);
+
+    assertThat(key.toString()).doesNotContain("alice-access-token");
+  }
+
+  @Test
+  void fromCredentials_userCredentialsWithRefreshToken_ignoresDifferingAccessTokens() {
+    UserCredentials cred1 = refreshTokenUserCredentials("first-access-token");
+    UserCredentials cred2 = refreshTokenUserCredentials("second-access-token");
+
+    CredentialKey key1 = CredentialKey.fromCredentials(cred1);
+    CredentialKey key2 = CredentialKey.fromCredentials(cred2);
+
+    assertThat(key1).isEqualTo(key2);
+  }
+
+  @Test
+  void fromCredentials_userCredentialsWithoutRefreshOrAccessToken_failsClosedAsUniqueInstance() {
+    UserCredentials cred =
+        UserCredentials.newBuilder()
+            .setClientId("gcloud-client-id")
+            .setClientSecret("gcloud-client-secret")
+            .setRefreshToken("")
+            .build();
+
+    CredentialKey key = CredentialKey.fromCredentials(cred);
+
+    assertThat(key.kind()).isEqualTo(CredentialKey.Kind.UNIQUE_INSTANCE);
+  }
+
+  @Test
+  void
+      fromCredentials_impersonatedAccessTokenOnlyUserSourcesForDifferentUsers_producesDifferentKeys() {
+    ImpersonatedCredentials aliceImpersonated =
+        ImpersonatedCredentials.create(
+            accessTokenOnlyUserCredentials("alice-access-token"),
+            "target@test.iam.gserviceaccount.com",
+            null,
+            ImmutableList.of(CLOUD_PLATFORM_SCOPE),
+            3600);
+    ImpersonatedCredentials bobImpersonated =
+        ImpersonatedCredentials.create(
+            accessTokenOnlyUserCredentials("bob-access-token"),
+            "target@test.iam.gserviceaccount.com",
+            null,
+            ImmutableList.of(CLOUD_PLATFORM_SCOPE),
+            3600);
+
+    CredentialKey aliceKey = CredentialKey.fromCredentials(aliceImpersonated);
+    CredentialKey bobKey = CredentialKey.fromCredentials(bobImpersonated);
+
+    assertThat(aliceKey).isNotEqualTo(bobKey);
   }
 
   @Test
@@ -488,5 +578,22 @@ class CredentialKeyTest {
 
     assertThrows(
         UncheckedIOException.class, () -> CredentialKey.fromAuthOptions(missingKeyfileOptions));
+  }
+
+  private static UserCredentials accessTokenOnlyUserCredentials(String accessToken) {
+    return UserCredentials.newBuilder()
+        .setClientId("gcloud-client-id")
+        .setClientSecret("gcloud-client-secret")
+        .setAccessToken(new AccessToken(accessToken, TOKEN_EXPIRATION))
+        .build();
+  }
+
+  private static UserCredentials refreshTokenUserCredentials(String accessToken) {
+    return UserCredentials.newBuilder()
+        .setClientId("gcloud-client-id")
+        .setClientSecret("gcloud-client-secret")
+        .setRefreshToken("gcloud-refresh-token")
+        .setAccessToken(new AccessToken(accessToken, TOKEN_EXPIRATION))
+        .build();
   }
 }

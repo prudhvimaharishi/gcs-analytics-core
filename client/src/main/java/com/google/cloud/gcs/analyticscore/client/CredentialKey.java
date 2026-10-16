@@ -179,18 +179,7 @@ abstract class CredentialKey {
           OptionalLong.empty());
     }
     if (clazz == UserCredentials.class) {
-      UserCredentials c = (UserCredentials) credentials;
-      UserCredentials.Builder b = c.toBuilder();
-      return create(
-          Kind.USER,
-          ImmutableList.of(
-              nullToEmpty(c.getClientId()),
-              sha256Hex(nullToEmpty(c.getClientSecret())),
-              sha256Hex(nullToEmpty(c.getRefreshToken())),
-              Objects.toString(b.getTokenServerUri(), ""),
-              nullToEmpty(c.getQuotaProjectId()),
-              nullToEmpty(b.getUniverseDomain())),
-          OptionalLong.empty());
+      return fromUserCredentials((UserCredentials) credentials);
     }
     if (clazz == ImpersonatedCredentials.class) {
       ImpersonatedCredentials c = (ImpersonatedCredentials) credentials;
@@ -216,11 +205,7 @@ abstract class CredentialKey {
       if (token == null || isNullOrEmpty(token.getTokenValue())) {
         return uniqueInstance();
       }
-      Date expiresAt = token.getExpirationTime();
-      OptionalLong expMillis =
-          expiresAt != null
-              ? OptionalLong.of(expiresAt.toInstant().toEpochMilli())
-              : OptionalLong.empty();
+      OptionalLong expMillis = tokenExpirationMillis(token);
       return create(
           Kind.VENDED_OAUTH2,
           ImmutableList.of(
@@ -230,6 +215,47 @@ abstract class CredentialKey {
           expMillis);
     }
     return uniqueInstance();
+  }
+
+  /**
+   * Keys {@link UserCredentials} on the refresh token when present. Without a refresh token the
+   * access token is the only field identifying the user, so it becomes part of the key and the key
+   * expires with it.
+   */
+  private static CredentialKey fromUserCredentials(UserCredentials c) {
+    UserCredentials.Builder b = c.toBuilder();
+    String refreshTokenHash = "";
+    String accessTokenHash = "";
+    OptionalLong expirationTimeMillis = OptionalLong.empty();
+    if (!isNullOrEmpty(c.getRefreshToken())) {
+      // The access token is deliberately excluded: refresh() rotates it in place.
+      refreshTokenHash = sha256Hex(c.getRefreshToken());
+    } else {
+      AccessToken token = c.getAccessToken();
+      if (token == null || isNullOrEmpty(token.getTokenValue())) {
+        return uniqueInstance();
+      }
+      accessTokenHash = sha256Hex(token.getTokenValue());
+      expirationTimeMillis = tokenExpirationMillis(token);
+    }
+    return create(
+        Kind.USER,
+        ImmutableList.of(
+            nullToEmpty(c.getClientId()),
+            sha256Hex(nullToEmpty(c.getClientSecret())),
+            refreshTokenHash,
+            accessTokenHash,
+            Objects.toString(b.getTokenServerUri(), ""),
+            nullToEmpty(c.getQuotaProjectId()),
+            nullToEmpty(b.getUniverseDomain())),
+        expirationTimeMillis);
+  }
+
+  private static OptionalLong tokenExpirationMillis(AccessToken token) {
+    Date expiresAt = token.getExpirationTime();
+    return expiresAt != null
+        ? OptionalLong.of(expiresAt.toInstant().toEpochMilli())
+        : OptionalLong.empty();
   }
 
   private static CredentialKey createFileBackedKey(
