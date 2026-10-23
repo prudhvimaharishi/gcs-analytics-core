@@ -76,7 +76,11 @@ public final class HermeticGcsFileSystem {
 
     private InMemoryGcsClient(
         InMemoryStorage inMemoryStorage, GcsFileSystemOptions options, ExecutorService executor) {
-      super(options.getGcsClientOptions(), () -> executor, new Telemetry(ImmutableList.of()));
+      super(
+          options.getGcsClientOptions(),
+          () -> executor,
+          new Telemetry(ImmutableList.of()),
+          new AnalyticsCacheManager(options.getGcsCacheOptions()).getBucketPropertiesCache());
       this.inMemoryStorage = inMemoryStorage;
       this.executor = executor;
     }
@@ -87,8 +91,8 @@ public final class HermeticGcsFileSystem {
     }
 
     @Override
-    BucketProperties getBucketProperties(String bucketName) {
-      return BucketProperties.create(false);
+    public BucketProperties getBucketProperties(String bucketName) {
+      return BucketProperties.create(false, false);
     }
 
     @Override

@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -97,7 +98,10 @@ class GcsFileSystemImplTest {
   private GcsFileSystem gcsFileSystem;
 
   @BeforeEach
-  void setUp() {
+  void setUp() throws IOException {
+    lenient()
+        .when(mockClient.getBucketProperties(anyString()))
+        .thenReturn(BucketProperties.create(false, false));
     gcsFileSystem = new GcsFileSystemImpl(mockClient, TEST_GCS_FILESYSTEM_OPTIONS);
   }
 
@@ -157,6 +161,7 @@ class GcsFileSystemImplTest {
   void constructor_withValidOptions_passesMemorizedExecutorServiceAndTelemetryToGcsClient() {
     final AtomicReference<Supplier<ExecutorService>> capturedSupplier = new AtomicReference<>();
     final AtomicReference<Telemetry> capturedTelemetry = new AtomicReference<>();
+    final AtomicReference<Object> capturedBucketPropertiesCache = new AtomicReference<>();
     try (MockedConstruction<GcsClientImpl> mockGcsClientConstruction =
         Mockito.mockConstruction(
             GcsClientImpl.class,
@@ -168,6 +173,8 @@ class GcsFileSystemImplTest {
 
               Telemetry telemetry = (Telemetry) context.arguments().get(3);
               capturedTelemetry.set(telemetry);
+
+              capturedBucketPropertiesCache.set(context.arguments().get(4));
             })) {
 
       try (GcsFileSystemImpl fs = new GcsFileSystemImpl(TEST_GCS_FILESYSTEM_OPTIONS)) {
@@ -180,6 +187,8 @@ class GcsFileSystemImplTest {
         assertThat(executorService1).isEqualTo(executorService2);
         assertThat(capturedTelemetry.get()).isNotNull();
         assertThat(capturedTelemetry.get()).isSameInstanceAs(fs.getTelemetry());
+        assertThat(capturedBucketPropertiesCache.get())
+            .isSameInstanceAs(fs.getCacheManager().getBucketPropertiesCache());
         assertThat(fs.getFlatStrategy()).isNotNull();
         assertThat(fs.getHnsStrategy()).isNotNull();
       }
@@ -542,7 +551,7 @@ class GcsFileSystemImplTest {
       GcsFileInfo fileInfo = lazyFs.getFileInfo(itemId);
 
       assertThat(fileInfo.getItemInfo()).isEqualTo(objectInfo);
-      verify(mockClient, never()).isHnsBucket(any());
+      verify(mockClient, never()).getBucketProperties(any());
       verify(mockClient, never()).getGcsItemInfo(eq(dirId));
       verify(mockClient, never()).listFirstObjectWithPrefix(any());
       verify(mockClient, never()).getFolderInfo(any());
@@ -563,7 +572,7 @@ class GcsFileSystemImplTest {
 
       assertThrows(AccessDeniedException.class, () -> lazyFs.getFileInfo(itemId));
 
-      verify(mockClient, never()).isHnsBucket(any());
+      verify(mockClient, never()).getBucketProperties(any());
       verify(mockClient, never()).getGcsItemInfo(eq(dirId));
       verify(mockClient, never()).listFirstObjectWithPrefix(any());
       verify(mockClient, never()).getFolderInfo(any());
@@ -776,7 +785,8 @@ class GcsFileSystemImplTest {
             .setItemType(GcsItemInfo.ItemType.NATIVE_FOLDER)
             .build();
     AtomicReference<Thread> executionThread = new AtomicReference<>();
-    when(mockClient.isHnsBucket(TEST_BUCKET)).thenReturn(true);
+    when(mockClient.getBucketProperties(TEST_BUCKET))
+        .thenReturn(BucketProperties.create(true, false));
     when(mockClient.getFolderInfo(eq(folderId)))
         .thenAnswer(
             invocation -> {
@@ -850,7 +860,8 @@ class GcsFileSystemImplTest {
             .setSize(0L)
             .setItemType(GcsItemInfo.ItemType.NATIVE_FOLDER)
             .build();
-    when(mockClient.isHnsBucket(TEST_BUCKET)).thenReturn(true);
+    when(mockClient.getBucketProperties(TEST_BUCKET))
+        .thenReturn(BucketProperties.create(true, false));
     when(mockClient.getFolderInfo(eq(folderId))).thenReturn(folderInfo);
 
     GcsFileInfo fileInfo =
@@ -1257,7 +1268,8 @@ class GcsFileSystemImplTest {
   @Test
   void resolveStrategy_hnsFlagEnabledAndHnsBucket_returnsHnsStrategy() throws IOException {
     GcsFileSystemOptions options = testOptionsBuilder().setHnsApiEnabled(true).build();
-    when(mockClient.isHnsBucket(TEST_BUCKET)).thenReturn(true);
+    when(mockClient.getBucketProperties(TEST_BUCKET))
+        .thenReturn(BucketProperties.create(true, false));
 
     try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(mockClient, options)) {
       NamespaceStrategy strategy = gcsFileSystem.resolveStrategy(TEST_BUCKET);
@@ -1274,14 +1286,15 @@ class GcsFileSystemImplTest {
       NamespaceStrategy strategy = gcsFileSystem.resolveStrategy(TEST_BUCKET);
 
       assertThat(strategy).isInstanceOf(FlatNamespaceStrategyImpl.class);
-      verify(mockClient, never()).isHnsBucket(anyString());
+      verify(mockClient, never()).getBucketProperties(anyString());
     }
   }
 
   @Test
   void resolveStrategy_hnsFlagEnabledAndFlatBucket_returnsFlatStrategy() throws IOException {
     GcsFileSystemOptions options = testOptionsBuilder().setHnsApiEnabled(true).build();
-    when(mockClient.isHnsBucket(TEST_BUCKET)).thenReturn(false);
+    when(mockClient.getBucketProperties(TEST_BUCKET))
+        .thenReturn(BucketProperties.create(false, false));
 
     try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(mockClient, options)) {
       NamespaceStrategy strategy = gcsFileSystem.resolveStrategy(TEST_BUCKET);
@@ -1291,9 +1304,9 @@ class GcsFileSystemImplTest {
   }
 
   @Test
-  void resolveStrategy_isHnsBucketThrowsIoException_throwsIOException() throws IOException {
+  void resolveStrategy_getBucketPropertiesThrowsIoException_throwsIOException() throws IOException {
     GcsFileSystemOptions options = testOptionsBuilder().setHnsApiEnabled(true).build();
-    when(mockClient.isHnsBucket(TEST_BUCKET)).thenThrow(new IOException("test exception"));
+    when(mockClient.getBucketProperties(TEST_BUCKET)).thenThrow(new IOException("test exception"));
 
     try (GcsFileSystemImpl gcsFileSystem = new GcsFileSystemImpl(mockClient, options)) {
       IOException exception =

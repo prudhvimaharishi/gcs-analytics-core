@@ -83,6 +83,14 @@ public abstract class GcsItemId {
   }
 
   /**
+   * Returns true if this identifier represents a directory (root, a bucket, or an object path
+   * ending with a trailing slash).
+   */
+  public boolean isDirectory() {
+    return isRoot() || isBucket() || this.getObjectName().orElse("").endsWith("/");
+  }
+
+  /**
    * Resolves the {@link PathType} of this identifier based on its string format (e.g., trailing
    * slash).
    */
