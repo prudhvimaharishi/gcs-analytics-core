@@ -22,6 +22,7 @@ import com.google.api.client.http.HttpTransport;
 import com.google.auth.Credentials;
 import com.google.auth.http.HttpTransportFactory;
 import com.google.auth.oauth2.ComputeEngineCredentials;
+import com.google.auth.oauth2.DownscopedCredentials;
 import com.google.auth.oauth2.ExternalAccountCredentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ImpersonatedCredentials;
@@ -49,8 +50,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>This class is for internal use by the library and can change without notice.
  *
- * <p>Applies the {@code cloud-platform} scope, optional custom token server URI, and optional
- * service account impersonation.
+ * <p>Applies the {@code cloud-platform} scope, optional custom token server URI, optional service
+ * account impersonation, and an optional Credential Access Boundary.
  */
 public final class GcsCredentialsFactory {
 
@@ -137,19 +138,20 @@ public final class GcsCredentialsFactory {
 
     HttpTransport tokenTransport =
         GcsHttpTransportFactory.createHttpTransport(options, tokenTrustStoreSource(options));
-    HttpTransport impersonationTransport = createImpersonationTransport(options, tokenTransport);
+    HttpTransport iamTransport = createIamTransport(options, tokenTransport);
 
-    return createCredentials(options, () -> tokenTransport, () -> impersonationTransport);
+    return createCredentials(options, () -> tokenTransport, () -> iamTransport);
   }
 
   /**
-   * Returns the HTTP transport for IAM Credentials requests, reusing {@code tokenTransport} when it
-   * already uses the bundled Google trust store.
+   * Returns the transport for impersonation and the boundary token exchange, reusing {@code
+   * tokenTransport} when it already uses the bundled Google trust store.
    */
   @VisibleForTesting
-  static HttpTransport createImpersonationTransport(
-      GcsAuthOptions options, HttpTransport tokenTransport) throws IOException {
-    if (options.getImpersonationServiceAccount().isEmpty()
+  static HttpTransport createIamTransport(GcsAuthOptions options, HttpTransport tokenTransport)
+      throws IOException {
+    if ((options.getImpersonationServiceAccount().isEmpty()
+            && options.getCredentialAccessBoundary().isEmpty())
         || tokenTrustStoreSource(options) == TrustStoreSource.GOOGLE_BUNDLED) {
       return tokenTransport;
     }
@@ -172,7 +174,7 @@ public final class GcsCredentialsFactory {
   static Credentials createCredentials(
       GcsAuthOptions options,
       HttpTransportFactory tokenTransportFactory,
-      HttpTransportFactory impersonationTransportFactory)
+      HttpTransportFactory iamTransportFactory)
       throws IOException {
     GoogleCredentials credentials;
     try {
@@ -196,10 +198,16 @@ public final class GcsCredentialsFactory {
             .orElse(credentials)
             .createScoped(CLOUD_PLATFORM_SCOPES);
 
-    return options
-        .getImpersonationServiceAccount()
-        .map(principal -> impersonate(scopedCredentials, principal, impersonationTransportFactory))
-        .orElse(scopedCredentials);
+    GoogleCredentials principalCredentials =
+        options
+            .getImpersonationServiceAccount()
+            .map(principal -> impersonate(scopedCredentials, principal, iamTransportFactory))
+            .orElse(scopedCredentials);
+    if (options.getCredentialAccessBoundary().isEmpty()) {
+      return principalCredentials;
+    }
+    return downscope(
+        principalCredentials, options.getCredentialAccessBoundary().get(), iamTransportFactory);
   }
 
   private static GoogleCredentials createCredentialsForAuthType(
@@ -277,6 +285,20 @@ public final class GcsCredentialsFactory {
         .setTargetPrincipal(targetPrincipal)
         .setScopes(CLOUD_PLATFORM_SCOPES)
         .setHttpTransportFactory(transportFactory)
+        .build();
+  }
+
+  private static Credentials downscope(
+      GoogleCredentials sourceCredentials,
+      String credentialAccessBoundary,
+      HttpTransportFactory transportFactory)
+      throws IOException {
+    LOG.debug("Downscoping credentials with a Credential Access Boundary");
+    return DownscopedCredentials.newBuilder()
+        .setSourceCredential(sourceCredentials)
+        .setCredentialAccessBoundary(CredentialAccessBoundaryParser.parse(credentialAccessBoundary))
+        .setHttpTransportFactory(transportFactory)
+        .setUniverseDomain(sourceCredentials.getUniverseDomain())
         .build();
   }
 }
