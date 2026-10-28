@@ -43,6 +43,12 @@ import java.util.concurrent.ConcurrentSkipListMap;
  */
 final class PrefetchScheduler implements AutoCloseable {
 
+  /**
+   * The longest range that one request fetches into one buffer. Some JVMs reserve header words in
+   * every array, so this is the largest array length that all of them can allocate.
+   */
+  private static final long MAX_RANGE_BYTES = Integer.MAX_VALUE - 8;
+
   private static final Comparator<Range<Long>> BY_START_THEN_END =
       Comparator.<Range<Long>>comparingLong(Range::lowerEndpoint)
           .thenComparingLong(Range::upperEndpoint);
@@ -63,15 +69,17 @@ final class PrefetchScheduler implements AutoCloseable {
    * Schedules speculative reads for the given byte ranges, ignoring any that are already covered in
    * the cache.
    *
-   * @param byteRanges exact closed-open byte ranges {@code [startOffset, endOffset)} in ascending
-   *     order
+   * <p>Touching ranges are fetched as one range, and a range longer than {@code MAX_RANGE_BYTES} is
+   * fetched as consecutive ranges that each fit in one buffer.
+   *
+   * @param byteRanges closed-open byte ranges {@code [startOffset, endOffset)} in ascending order
    * @param fileSize the size of the object, used to truncate ranges extending past EOF
    * @return {@code true} if every range is now cached or in flight
    */
   boolean schedule(
       VectoredSeekableByteChannel source, Collection<Range<Long>> byteRanges, long fileSize) {
     List<GcsObjectRange> rangesToFetch = new ArrayList<>();
-    for (Range<Long> byteRange : byteRanges) {
+    for (Range<Long> byteRange : ByteRangeMerger.merge(byteRanges, MAX_RANGE_BYTES)) {
       long startOffset = byteRange.lowerEndpoint();
       long endOffset = Math.min(byteRange.upperEndpoint(), fileSize);
       int length = (int) (endOffset - startOffset);

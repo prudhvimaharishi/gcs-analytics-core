@@ -20,10 +20,12 @@ import static com.google.common.truth.Truth.assertThat;
 
 import com.google.cloud.gcs.analyticscore.client.FakeVectoredSeekableByteChannel;
 import com.google.cloud.gcs.analyticscore.client.GcsItemId;
+import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
 import com.google.cloud.gcs.analyticscore.client.PrefetchBufferCache;
 import com.google.cloud.gcs.analyticscore.common.telemetry.RecordingOperationListener;
 import com.google.cloud.gcs.analyticscore.common.telemetry.Telemetry;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Range;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -91,10 +93,19 @@ class PrefetchSchedulerTest {
   }
 
   @Test
-  void schedule_consecutiveRanges_requestsEachRangeAsItsOwnRange() {
+  void schedule_touchingRanges_requestsThemAsOneMergedRange() {
     schedule(0, RANGE_LENGTH);
 
-    assertThat(channel.getRequestedOffsets()).containsExactly(0L, (long) RANGE_LENGTH).inOrder();
+    GcsObjectRange request = Iterables.getOnlyElement(channel.getRequestedRanges());
+    assertThat(Range.closedOpen(request.getOffset(), request.getOffset() + request.getLength()))
+        .isEqualTo(Range.closedOpen(0L, 2L * RANGE_LENGTH));
+  }
+
+  @Test
+  void schedule_rangesWithGap_requestsEachRangeAsItsOwnRange() {
+    schedule(0, 2 * RANGE_LENGTH);
+
+    assertThat(channel.getRequestedOffsets()).containsExactly(0L, 2L * RANGE_LENGTH).inOrder();
   }
 
   @Test
