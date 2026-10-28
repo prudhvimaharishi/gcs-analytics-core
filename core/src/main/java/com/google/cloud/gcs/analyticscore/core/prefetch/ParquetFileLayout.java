@@ -25,7 +25,8 @@ import java.util.Optional;
 /**
  * The decoded byte layout of a Parquet object.
  *
- * <p>Describes the row groups and column chunks recorded in the file footer.
+ * <p>Describes the row groups and column chunks recorded in the file footer. Row groups are kept in
+ * byte order, and no two row groups share a byte.
  */
 @AutoValue
 abstract class ParquetFileLayout {
@@ -37,8 +38,8 @@ abstract class ParquetFileLayout {
   abstract long getSchemaFingerprint();
 
   /**
-   * Returns the row groups of this file, where the row group at position {@code i} has index {@code
-   * i}.
+   * Returns the row groups of this file in byte order, where the row group at position {@code i}
+   * has index {@code i}.
    */
   abstract ImmutableList<ParquetRowGroup> getRowGroups();
 
@@ -46,13 +47,24 @@ abstract class ParquetFileLayout {
    * Creates a layout from the row groups described by the file footer.
    *
    * @throws IllegalArgumentException if the index of a row group differs from its position in
-   *     {@code rowGroups}
+   *     {@code rowGroups}, or a row group starts before the previous one ends
    */
   static ParquetFileLayout create(
       long schemaFingerprint, ImmutableList<ParquetRowGroup> rowGroups) {
+    long endOffset = 0;
     for (int position = 0; position < rowGroups.size(); position++) {
-      int index = rowGroups.get(position).getIndex();
-      checkArgument(index == position, "Row group at position %s has index %s", position, index);
+      ParquetRowGroup rowGroup = rowGroups.get(position);
+      checkArgument(
+          rowGroup.getIndex() == position,
+          "Row group at position %s has index %s",
+          position,
+          rowGroup.getIndex());
+      checkArgument(
+          rowGroup.getStartOffset() >= endOffset,
+          "Row group %s starts before the previous row group ends at %s",
+          position,
+          endOffset);
+      endOffset = rowGroup.getEndOffset();
     }
     return new AutoValue_ParquetFileLayout(schemaFingerprint, rowGroups);
   }
@@ -70,6 +82,9 @@ abstract class ParquetFileLayout {
     for (ParquetRowGroup rowGroup : getRowGroups()) {
       if (rowGroup.containsPosition(position)) {
         return Optional.of(rowGroup);
+      }
+      if (rowGroup.getStartOffset() > position) {
+        break; // Row groups are in byte order, so no later row group contains the position.
       }
     }
     return Optional.empty();

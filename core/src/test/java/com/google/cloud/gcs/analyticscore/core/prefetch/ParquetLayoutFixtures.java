@@ -23,34 +23,29 @@ final class ParquetLayoutFixtures {
 
   private ParquetLayoutFixtures() {}
 
-  /** Returns a chunk whose data pages start at the first byte of the chunk. */
+  /** Returns a chunk without a dictionary page, whose data pages start at its first byte. */
   static ParquetColumnChunk columnChunk(String columnPath, long startOffset, long compressedSize) {
-    return ParquetColumnChunk.builder()
-        .setColumnPath(columnPath)
-        .setStartOffset(startOffset)
-        .setCompressedSize(compressedSize)
-        .setDataPageOffset(startOffset)
-        .build();
+    return ParquetColumnChunk.create(
+        columnPath,
+        startOffset,
+        compressedSize,
+        /* dataPageOffset= */ startOffset,
+        /* everyDataPageDictionaryEncoded= */ false);
   }
 
   /** Returns a chunk with a dictionary page occupying the bytes before {@code dataPageOffset}. */
   static ParquetColumnChunk dictionaryEncodedColumnChunk(
       String columnPath, long startOffset, long compressedSize, long dataPageOffset) {
-    return ParquetColumnChunk.builder()
-        .setColumnPath(columnPath)
-        .setStartOffset(startOffset)
-        .setCompressedSize(compressedSize)
-        .setDataPageOffset(dataPageOffset)
-        .setDictionaryPageOffset(startOffset)
-        .build();
+    return ParquetColumnChunk.create(
+        columnPath,
+        startOffset,
+        compressedSize,
+        dataPageOffset,
+        /* everyDataPageDictionaryEncoded= */ true);
   }
 
   static ParquetRowGroup rowGroup(int index, ParquetColumnChunk... columnChunks) {
-    ParquetRowGroup.Builder builder = ParquetRowGroup.builder().setIndex(index);
-    for (ParquetColumnChunk columnChunk : columnChunks) {
-      builder.addColumnChunk(columnChunk);
-    }
-    return builder.build();
+    return ParquetRowGroup.create(index, ImmutableList.copyOf(columnChunks));
   }
 
   static ParquetFileLayout layout(ParquetRowGroup... rowGroups) {

@@ -16,19 +16,19 @@
 
 package com.google.cloud.gcs.analyticscore.core.prefetch;
 
-import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.Range;
 import java.util.Optional;
-import java.util.OptionalLong;
 
 /**
  * The byte layout of a single Parquet column chunk within one row group.
  *
- * <p>All offsets are absolute positions within the Parquet object. Every chunk is one contiguous
- * range of at least one byte: it starts at a non-negative offset, its end fits in a {@code long},
- * its data pages start inside it, and a dictionary page, when present, opens the chunk.
+ * <p>All offsets are absolute positions within the Parquet object. A chunk is one contiguous range
+ * that {@link #getDataPageOffset()} splits in two: the bytes before it are a dictionary page that
+ * can filter the chunk on its own, and the bytes from it to the end of the chunk are the data
+ * pages, which always hold at least one byte.
  */
 @AutoValue
 abstract class ParquetColumnChunk {
@@ -45,32 +45,50 @@ abstract class ParquetColumnChunk {
   /**
    * Returns the offset of the first data page of this chunk.
    *
-   * <p>When the chunk exposes no dictionary page this equals {@link #getStartOffset()}: a
-   * dictionary page that cannot filter the chunk on its own is read together with the data pages,
-   * so it counts as part of them.
+   * <p>This equals {@link #getStartOffset()} when the chunk has no dictionary page that can filter
+   * it on its own.
    */
   abstract long getDataPageOffset();
 
   /**
-   * Returns the offset of the dictionary page, present only when every data page of this chunk is
-   * dictionary encoded, so the dictionary page alone can filter the chunk.
+   * Creates a chunk from the offsets recorded in the file footer.
+   *
+   * <p>A dictionary page can filter the chunk on its own only when every data page is dictionary
+   * encoded. Otherwise the dictionary page is read together with the data pages, so the chunk
+   * counts it as part of them.
+   *
+   * @param columnPath the dotted column path
+   * @param startOffset the offset of the first byte of the chunk, dictionary page included
+   * @param compressedSize the total compressed size of the chunk in bytes
+   * @param dataPageOffset the offset of the first data page, as recorded in the footer
+   * @param everyDataPageDictionaryEncoded whether every data page of the chunk is dictionary
+   *     encoded
+   * @throws IllegalArgumentException if the offsets do not describe one contiguous chunk whose data
+   *     pages start inside it
    */
-  abstract OptionalLong getDictionaryPageOffset();
-
-  static Builder builder() {
-    return new AutoValue_ParquetColumnChunk.Builder();
-  }
-
-  /**
-   * Returns whether the offsets describe a chunk of at least one byte whose end fits in a {@code
-   * long} and whose data pages start inside it.
-   */
-  static boolean isConsistent(long startOffset, long compressedSize, long dataPageOffset) {
-    return startOffset >= 0
-        && compressedSize > 0
-        && compressedSize <= Long.MAX_VALUE - startOffset
-        && dataPageOffset >= startOffset
-        && dataPageOffset - startOffset <= compressedSize;
+  static ParquetColumnChunk create(
+      String columnPath,
+      long startOffset,
+      long compressedSize,
+      long dataPageOffset,
+      boolean everyDataPageDictionaryEncoded) {
+    // Checks the recorded data page offset even when the dictionary page is counted as data, so a
+    // corrupt offset is never hidden.
+    checkArgument(
+        startOffset >= 0
+            && dataPageOffset >= startOffset
+            && dataPageOffset - startOffset < compressedSize
+            && compressedSize <= Long.MAX_VALUE - startOffset,
+        "Column chunk %s has inconsistent offsets: start %s, size %s, first data page %s",
+        columnPath,
+        startOffset,
+        compressedSize,
+        dataPageOffset);
+    return new AutoValue_ParquetColumnChunk(
+        columnPath,
+        startOffset,
+        compressedSize,
+        everyDataPageDictionaryEncoded ? dataPageOffset : startOffset);
   }
 
   /** Returns the offset one past the last byte of this chunk. */
@@ -102,68 +120,24 @@ abstract class ParquetColumnChunk {
    * Returns whether {@code [startOffset, endOffset)} overlaps the dictionary page of this chunk.
    */
   final boolean touchesDictionaryPage(long startOffset, long endOffset) {
-    return hasDictionaryPage()
-        && overlaps(
-            getDictionaryPageOffset().getAsLong(), getDataPageOffset(), startOffset, endOffset);
+    return overlaps(getStartOffset(), getDataPageOffset(), startOffset, endOffset);
   }
 
-  /** Returns whether this chunk exposes a dictionary page that can filter it on its own. */
+  /** Returns whether this chunk has a dictionary page that can filter it on its own. */
   final boolean hasDictionaryPage() {
-    return getDictionaryPageOffset().isPresent();
+    return getStartOffset() < getDataPageOffset();
   }
 
-  /**
-   * Returns the byte range covering only the dictionary page, which is the region between the
-   * dictionary page offset and the first data page.
-   */
+  /** Returns the byte range covering only the dictionary page, if this chunk has one. */
   final Optional<Range<Long>> getDictionaryPageRange() {
     if (!hasDictionaryPage()) {
       return Optional.empty();
     }
-    return Optional.of(
-        Range.closedOpen(getDictionaryPageOffset().getAsLong(), getDataPageOffset()));
+    return Optional.of(Range.closedOpen(getStartOffset(), getDataPageOffset()));
   }
 
   /** Returns whether two half-open ranges share a byte; an empty range shares none. */
   private static boolean overlaps(long start, long end, long otherStart, long otherEnd) {
     return start < end && otherStart < otherEnd && start < otherEnd && otherStart < end;
-  }
-
-  /** Builder for {@link ParquetColumnChunk}. */
-  @AutoValue.Builder
-  abstract static class Builder {
-
-    abstract Builder setColumnPath(String columnPath);
-
-    abstract Builder setStartOffset(long startOffset);
-
-    abstract Builder setCompressedSize(long compressedSize);
-
-    abstract Builder setDataPageOffset(long dataPageOffset);
-
-    abstract Builder setDictionaryPageOffset(long dictionaryPageOffset);
-
-    abstract ParquetColumnChunk autoBuild();
-
-    /**
-     * Builds the chunk.
-     *
-     * @throws IllegalStateException if the offsets do not describe one contiguous chunk
-     */
-    final ParquetColumnChunk build() {
-      ParquetColumnChunk chunk = autoBuild();
-      checkState(
-          isConsistent(
-              chunk.getStartOffset(), chunk.getCompressedSize(), chunk.getDataPageOffset()),
-          "Inconsistent column chunk offsets: %s",
-          chunk);
-      checkState(
-          !chunk.hasDictionaryPage()
-              || (chunk.getDictionaryPageOffset().getAsLong() == chunk.getStartOffset()
-                  && chunk.getStartOffset() < chunk.getDataPageOffset()),
-          "Dictionary page must open the chunk and precede its data pages: %s",
-          chunk);
-      return chunk;
-    }
   }
 }
