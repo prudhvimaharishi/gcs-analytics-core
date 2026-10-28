@@ -27,6 +27,56 @@ import org.junit.jupiter.api.Test;
 class ParquetColumnChunkTest {
 
   @Test
+  void create_notEveryDataPageDictionaryEncoded_countsDictionaryPageAsDataPages() {
+    ParquetColumnChunk chunk =
+        ParquetColumnChunk.create(
+            "price", 100, 50, 120, /* everyDataPageDictionaryEncoded= */ false);
+
+    assertThat(chunk.getDataPageOffset()).isEqualTo(100);
+  }
+
+  @Test
+  void create_dictionaryCountedAsDataWithDataPageOffsetPastEnd_throwsIllegalArgumentException() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            ParquetColumnChunk.create(
+                "price", 100, 50, 999, /* everyDataPageDictionaryEncoded= */ false));
+  }
+
+  @Test
+  void create_negativeStartOffset_throwsIllegalArgumentException() {
+    assertThrows(IllegalArgumentException.class, () -> createChunk(-1, 50, -1));
+  }
+
+  @Test
+  void create_negativeCompressedSize_throwsIllegalArgumentException() {
+    assertThrows(IllegalArgumentException.class, () -> createChunk(100, -1, 100));
+  }
+
+  @Test
+  void create_zeroCompressedSize_throwsIllegalArgumentException() {
+    assertThrows(IllegalArgumentException.class, () -> createChunk(100, 0, 100));
+  }
+
+  @Test
+  void create_endOffsetBeyondLongRange_throwsIllegalArgumentException() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> createChunk(Long.MAX_VALUE - 10, 50, Long.MAX_VALUE - 10));
+  }
+
+  @Test
+  void create_dataPageOffsetBeforeStartOffset_throwsIllegalArgumentException() {
+    assertThrows(IllegalArgumentException.class, () -> createChunk(100, 50, 99));
+  }
+
+  @Test
+  void create_dataPageOffsetAtEndOffset_throwsIllegalArgumentException() {
+    assertThrows(IllegalArgumentException.class, () -> createChunk(100, 50, 150));
+  }
+
+  @Test
   void getEndOffset_returnsStartOffsetPlusCompressedSize() {
     ParquetColumnChunk chunk = columnChunk("price", 100, 50);
 
@@ -61,68 +111,10 @@ class ParquetColumnChunkTest {
   }
 
   @Test
-  void getDictionaryPageRange_chunkWithDictionary_spansDictionaryPageOffsetToDataPageOffset() {
+  void getDictionaryPageRange_chunkWithDictionary_spansStartOffsetToDataPageOffset() {
     ParquetColumnChunk chunk = dictionaryEncodedColumnChunk("price", 100, 50, 120);
 
     assertThat(chunk.getDictionaryPageRange()).hasValue(Range.closedOpen(100L, 120L));
-  }
-
-  @Test
-  void build_dictionaryPageNotBeforeDataPages_throwsIllegalStateException() {
-    ParquetColumnChunk.Builder builder =
-        chunkBuilder(100, 50, 100).setDictionaryPageOffset(/* dictionaryPageOffset= */ 100);
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_dictionaryPageAfterChunkStart_throwsIllegalStateException() {
-    ParquetColumnChunk.Builder builder =
-        chunkBuilder(100, 50, 120).setDictionaryPageOffset(/* dictionaryPageOffset= */ 110);
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_negativeStartOffset_throwsIllegalStateException() {
-    ParquetColumnChunk.Builder builder = chunkBuilder(-1, 50, -1);
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_negativeCompressedSize_throwsIllegalStateException() {
-    ParquetColumnChunk.Builder builder = chunkBuilder(100, -1, 100);
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_zeroCompressedSize_throwsIllegalStateException() {
-    ParquetColumnChunk.Builder builder = chunkBuilder(100, 0, 100);
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_endOffsetBeyondLongRange_throwsIllegalStateException() {
-    ParquetColumnChunk.Builder builder = chunkBuilder(Long.MAX_VALUE - 10, 50, Long.MAX_VALUE - 10);
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_dataPageOffsetBeforeStartOffset_throwsIllegalStateException() {
-    ParquetColumnChunk.Builder builder = chunkBuilder(100, 50, 99);
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_dataPageOffsetPastEndOffset_throwsIllegalStateException() {
-    ParquetColumnChunk.Builder builder = chunkBuilder(100, 50, 151);
-
-    assertThrows(IllegalStateException.class, builder::build);
   }
 
   @Test
@@ -182,13 +174,6 @@ class ParquetColumnChunkTest {
   }
 
   @Test
-  void touchesDataPages_chunkWithEmptyDataPageRange_returnsFalse() {
-    ParquetColumnChunk chunk = dictionaryEncodedColumnChunk("price", 100, 50, 150);
-
-    assertThat(chunk.touchesDataPages(140, 160)).isFalse();
-  }
-
-  @Test
   void touchesDictionaryPage_overlappingRange_returnsTrue() {
     ParquetColumnChunk chunk = dictionaryEncodedColumnChunk("price", 100, 50, 120);
 
@@ -216,12 +201,13 @@ class ParquetColumnChunkTest {
     assertThat(chunk.touchesDictionaryPage(120, 140)).isFalse();
   }
 
-  private static ParquetColumnChunk.Builder chunkBuilder(
+  private static ParquetColumnChunk createChunk(
       long startOffset, long compressedSize, long dataPageOffset) {
-    return ParquetColumnChunk.builder()
-        .setColumnPath("price")
-        .setStartOffset(startOffset)
-        .setCompressedSize(compressedSize)
-        .setDataPageOffset(dataPageOffset);
+    return ParquetColumnChunk.create(
+        "price",
+        startOffset,
+        compressedSize,
+        dataPageOffset,
+        /* everyDataPageDictionaryEncoded= */ true);
   }
 }

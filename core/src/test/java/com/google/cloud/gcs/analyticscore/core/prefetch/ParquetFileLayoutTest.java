@@ -38,6 +38,28 @@ class ParquetFileLayoutTest {
   }
 
   @Test
+  void create_overlappingRowGroups_throwsIllegalArgumentException() {
+    ImmutableList<ParquetRowGroup> rowGroups =
+        ImmutableList.of(
+            rowGroup(0, columnChunk("price", 100, 50)), rowGroup(1, columnChunk("price", 149, 50)));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> ParquetFileLayout.create(/* schemaFingerprint= */ 7L, rowGroups));
+  }
+
+  @Test
+  void create_rowGroupsOutOfByteOrder_throwsIllegalArgumentException() {
+    ImmutableList<ParquetRowGroup> rowGroups =
+        ImmutableList.of(
+            rowGroup(0, columnChunk("price", 200, 50)), rowGroup(1, columnChunk("price", 100, 50)));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> ParquetFileLayout.create(/* schemaFingerprint= */ 7L, rowGroups));
+  }
+
+  @Test
   void getRowGroup_knownIndex_returnsThatRowGroup() {
     ParquetRowGroup second = rowGroup(1, columnChunk("price", 200, 50));
     ParquetFileLayout fileLayout = layout(rowGroup(0, columnChunk("price", 100, 50)), second);
@@ -65,6 +87,15 @@ class ParquetFileLayoutTest {
     ParquetFileLayout fileLayout = layout(rowGroup(0, columnChunk("price", 100, 50)), second);
 
     assertThat(fileLayout.findRowGroupAt(225)).hasValue(second);
+  }
+
+  @Test
+  void findRowGroupAt_positionBetweenRowGroups_returnsEmpty() {
+    ParquetFileLayout fileLayout =
+        layout(
+            rowGroup(0, columnChunk("price", 100, 50)), rowGroup(1, columnChunk("price", 200, 50)));
+
+    assertThat(fileLayout.findRowGroupAt(175)).isEmpty();
   }
 
   @Test

@@ -22,14 +22,57 @@ import static com.google.cloud.gcs.analyticscore.core.prefetch.ParquetLayoutFixt
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Range;
 import org.junit.jupiter.api.Test;
 
 class ParquetRowGroupTest {
 
-  /** The largest array length that every JVM can allocate. */
-  private static final long MAX_RANGE_BYTES = Integer.MAX_VALUE - 8;
+  @Test
+  void create_keysEachChunkByItsColumnPath() {
+    ParquetRowGroup group = rowGroup(0, columnChunk("address.city", 100, 50));
+
+    assertThat(group.getColumnChunks().keySet()).containsExactly("address.city");
+  }
+
+  @Test
+  void create_chunksOutOfByteOrder_keepsChunksInByteOrder() {
+    ParquetRowGroup group =
+        rowGroup(0, columnChunk("price", 300, 50), columnChunk("name", 100, 50));
+
+    assertThat(group.getColumnChunks().keySet()).containsExactly("name", "price").inOrder();
+  }
+
+  @Test
+  void create_negativeIndex_throwsIllegalArgumentException() {
+    ImmutableList<ParquetColumnChunk> chunks = ImmutableList.of(columnChunk("price", 100, 50));
+
+    assertThrows(IllegalArgumentException.class, () -> ParquetRowGroup.create(-1, chunks));
+  }
+
+  @Test
+  void create_noColumnChunks_throwsIllegalArgumentException() {
+    ImmutableList<ParquetColumnChunk> chunks = ImmutableList.of();
+
+    assertThrows(IllegalArgumentException.class, () -> ParquetRowGroup.create(0, chunks));
+  }
+
+  @Test
+  void create_overlappingColumnChunks_throwsIllegalArgumentException() {
+    ImmutableList<ParquetColumnChunk> chunks =
+        ImmutableList.of(columnChunk("id", 100, 50), columnChunk("name", 149, 50));
+
+    assertThrows(IllegalArgumentException.class, () -> ParquetRowGroup.create(0, chunks));
+  }
+
+  @Test
+  void create_duplicateColumnPath_throwsIllegalArgumentException() {
+    ImmutableList<ParquetColumnChunk> chunks =
+        ImmutableList.of(columnChunk("id", 100, 50), columnChunk("id", 150, 50));
+
+    assertThrows(IllegalArgumentException.class, () -> ParquetRowGroup.create(0, chunks));
+  }
 
   @Test
   void getColumnChunk_knownColumnPath_returnsThatChunk() {
@@ -64,60 +107,6 @@ class ParquetRowGroupTest {
     long endOffset = group.getEndOffset();
 
     assertThat(endOffset).isEqualTo(350);
-  }
-
-  @Test
-  void getStartOffset_rowGroupWithoutChunks_returnsZero() {
-    ParquetRowGroup group = rowGroup(0);
-
-    long startOffset = group.getStartOffset();
-
-    assertThat(startOffset).isEqualTo(0);
-  }
-
-  @Test
-  void getEndOffset_rowGroupWithoutChunks_returnsZero() {
-    ParquetRowGroup group = rowGroup(0);
-
-    long endOffset = group.getEndOffset();
-
-    assertThat(endOffset).isEqualTo(0);
-  }
-
-  @Test
-  void addColumnChunk_keysTheChunkByItsColumnPath() {
-    ParquetRowGroup group = rowGroup(0, columnChunk("address.city", 100, 50));
-
-    assertThat(group.getColumnChunks().keySet()).containsExactly("address.city");
-  }
-
-  @Test
-  void build_negativeIndex_throwsIllegalStateException() {
-    ParquetRowGroup.Builder builder = ParquetRowGroup.builder().setIndex(-1);
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_overlappingColumnChunks_throwsIllegalStateException() {
-    ParquetRowGroup.Builder builder =
-        ParquetRowGroup.builder()
-            .setIndex(0)
-            .addColumnChunk(columnChunk("id", 100, 50))
-            .addColumnChunk(columnChunk("name", 149, 50));
-
-    assertThrows(IllegalStateException.class, builder::build);
-  }
-
-  @Test
-  void build_duplicateColumnPath_throwsIllegalArgumentException() {
-    ParquetRowGroup.Builder builder =
-        ParquetRowGroup.builder()
-            .setIndex(0)
-            .addColumnChunk(columnChunk("id", 100, 50))
-            .addColumnChunk(columnChunk("id", 150, 50));
-
-    assertThrows(IllegalArgumentException.class, builder::build);
   }
 
   @Test
@@ -187,7 +176,7 @@ class ParquetRowGroupTest {
   }
 
   @Test
-  void getCoalescedColumnRanges_mergesTouchingColumnsAndSeparatesDisjointColumns() {
+  void getColumnChunkRanges_returnsRangesOfKnownColumnsInByteOrder() {
     ParquetRowGroup group =
         rowGroup(
             0,
@@ -195,74 +184,27 @@ class ParquetRowGroupTest {
             columnChunk("category", 150, 50),
             columnChunk("value", 250, 50));
 
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("value", "id", "category", "absent")))
-        .containsExactly(Range.closedOpen(100L, 200L), Range.closedOpen(250L, 300L))
+    assertThat(group.getColumnChunkRanges(ImmutableSet.of("value", "id", "category", "absent")))
+        .containsExactly(
+            Range.closedOpen(100L, 150L),
+            Range.closedOpen(150L, 200L),
+            Range.closedOpen(250L, 300L))
         .inOrder();
   }
 
   @Test
-  void getCoalescedColumnRanges_dictionaryEncodedColumn_returnsWholeChunkIncludingDictionaryPage() {
+  void getColumnChunkRanges_dictionaryEncodedColumn_includesDictionaryPage() {
     ParquetRowGroup group = rowGroup(0, dictionaryEncodedColumnChunk("category", 150, 50, 170));
 
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("category")))
+    assertThat(group.getColumnChunkRanges(ImmutableSet.of("category")))
         .containsExactly(Range.closedOpen(150L, 200L));
   }
 
   @Test
-  void getCoalescedColumnRanges_dictionaryEncodedColumnBetweenColumns_mergesIntoOneRange() {
-    ParquetRowGroup group =
-        rowGroup(
-            0,
-            columnChunk("id", 100, 50),
-            dictionaryEncodedColumnChunk("category", 150, 50, 170),
-            columnChunk("value", 200, 50));
-
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("id", "category", "value")))
-        .containsExactly(Range.closedOpen(100L, 250L));
-  }
-
-  @Test
-  void getCoalescedColumnRanges_noMatchingColumns_returnsEmptyList() {
+  void getColumnChunkRanges_noMatchingColumns_returnsEmptyList() {
     ParquetRowGroup group = rowGroup(0, columnChunk("id", 100, 50));
 
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("absent"))).isEmpty();
-  }
-
-  @Test
-  void getCoalescedColumnRanges_touchingColumnsSpanningMoreThanMaxRangeBytes_keepsRangesSeparate() {
-    ParquetRowGroup group =
-        rowGroup(
-            0, columnChunk("id", 0, MAX_RANGE_BYTES), columnChunk("category", MAX_RANGE_BYTES, 50));
-
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("id", "category")))
-        .containsExactly(
-            Range.closedOpen(0L, MAX_RANGE_BYTES),
-            Range.closedOpen(MAX_RANGE_BYTES, MAX_RANGE_BYTES + 50))
-        .inOrder();
-  }
-
-  @Test
-  void getCoalescedColumnRanges_touchingColumnsSpanningExactlyMaxRangeBytes_mergesIntoOneRange() {
-    ParquetRowGroup group =
-        rowGroup(
-            0,
-            columnChunk("id", 0, MAX_RANGE_BYTES - 50),
-            columnChunk("category", MAX_RANGE_BYTES - 50, 50));
-
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("id", "category")))
-        .containsExactly(Range.closedOpen(0L, MAX_RANGE_BYTES));
-  }
-
-  @Test
-  void getCoalescedColumnRanges_columnLongerThanMaxRangeBytes_splitsIntoConsecutiveRanges() {
-    ParquetRowGroup group = rowGroup(0, columnChunk("payload", 100, 2 * MAX_RANGE_BYTES + 50));
-
-    assertThat(group.getCoalescedColumnRanges(ImmutableSet.of("payload")))
-        .containsExactly(
-            Range.closedOpen(100L, 100 + MAX_RANGE_BYTES),
-            Range.closedOpen(100 + MAX_RANGE_BYTES, 100 + 2 * MAX_RANGE_BYTES),
-            Range.closedOpen(100 + 2 * MAX_RANGE_BYTES, 150 + 2 * MAX_RANGE_BYTES))
-        .inOrder();
+    assertThat(group.getColumnChunkRanges(ImmutableSet.of("absent"))).isEmpty();
   }
 
   @Test
@@ -276,21 +218,6 @@ class ParquetRowGroupTest {
 
     assertThat(group.getDictionaryPageRanges(ImmutableSet.of("id", "status", "category")))
         .containsExactly(Range.closedOpen(150L, 170L), Range.closedOpen(250L, 270L))
-        .inOrder();
-  }
-
-  @Test
-  void getDictionaryPageRanges_dictionaryPageLongerThanMaxRangeBytes_splitsIntoConsecutiveRanges() {
-    ParquetRowGroup group =
-        rowGroup(
-            0,
-            dictionaryEncodedColumnChunk(
-                "category", 100, MAX_RANGE_BYTES + 100, MAX_RANGE_BYTES + 150));
-
-    assertThat(group.getDictionaryPageRanges(ImmutableSet.of("category")))
-        .containsExactly(
-            Range.closedOpen(100L, 100 + MAX_RANGE_BYTES),
-            Range.closedOpen(100 + MAX_RANGE_BYTES, MAX_RANGE_BYTES + 150))
         .inOrder();
   }
 }

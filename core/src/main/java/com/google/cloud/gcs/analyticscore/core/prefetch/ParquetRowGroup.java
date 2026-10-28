@@ -16,10 +16,9 @@
 
 package com.google.cloud.gcs.analyticscore.core.prefetch;
 
-import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
-import com.google.auto.value.extension.memoized.Memoized;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -31,44 +30,50 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-/** The byte layout of a single Parquet row group, whose column chunks never share a byte. */
+/**
+ * The byte layout of a single Parquet row group: at least one column chunk, kept in byte order,
+ * where no two chunks share a byte.
+ */
 @AutoValue
 abstract class ParquetRowGroup {
-
-  /**
-   * The longest range that this class returns. Some JVMs reserve header words in every array, so
-   * this is the largest array length that all of them can allocate.
-   */
-  private static final long MAX_RANGE_BYTES = Integer.MAX_VALUE - 8;
 
   /** Returns the zero-based index of this row group within the file. */
   abstract int getIndex();
 
-  /** Returns the column chunks of this row group, keyed by dotted column path. */
+  /** Returns the column chunks of this row group in byte order, keyed by dotted column path. */
   abstract ImmutableMap<String, ParquetColumnChunk> getColumnChunks();
 
-  /** Returns the offset of the first byte of this row group, or {@code 0} if it has no chunks. */
-  @Memoized
-  long getStartOffset() {
-    return getColumnChunks().values().stream()
-        .mapToLong(ParquetColumnChunk::getStartOffset)
-        .min()
-        .orElse(0);
-  }
+  /** Returns the offset of the first byte of this row group. */
+  abstract long getStartOffset();
+
+  /** Returns the offset one past the last byte of this row group. */
+  abstract long getEndOffset();
 
   /**
-   * Returns the offset one past the last byte of this row group, or {@code 0} if it has no chunks.
+   * Creates a row group from its column chunks, given in any order.
+   *
+   * @throws IllegalArgumentException if the index is negative, there are no column chunks, two
+   *     chunks share a column path, or two chunks share a byte
    */
-  @Memoized
-  long getEndOffset() {
-    return getColumnChunks().values().stream()
-        .mapToLong(ParquetColumnChunk::getEndOffset)
-        .max()
-        .orElse(0);
-  }
-
-  static Builder builder() {
-    return new AutoValue_ParquetRowGroup.Builder();
+  static ParquetRowGroup create(int index, Collection<ParquetColumnChunk> columnChunks) {
+    checkArgument(index >= 0, "Row group index must not be negative: %s", index);
+    checkArgument(!columnChunks.isEmpty(), "Row group %s has no column chunks", index);
+    List<ParquetColumnChunk> sortedChunks = new ArrayList<>(columnChunks);
+    sortedChunks.sort(Comparator.comparingLong(ParquetColumnChunk::getStartOffset));
+    ImmutableMap.Builder<String, ParquetColumnChunk> chunksByPath =
+        ImmutableMap.builderWithExpectedSize(sortedChunks.size());
+    long endOffset = 0;
+    for (ParquetColumnChunk chunk : sortedChunks) {
+      checkArgument(
+          chunk.getStartOffset() >= endOffset,
+          "Column chunk %s starts before the previous chunk ends at %s",
+          chunk.getColumnPath(),
+          endOffset);
+      chunksByPath.put(chunk.getColumnPath(), chunk);
+      endOffset = chunk.getEndOffset();
+    }
+    return new AutoValue_ParquetRowGroup(
+        index, chunksByPath.buildOrThrow(), sortedChunks.get(0).getStartOffset(), endOffset);
   }
 
   /** Returns the chunk for the given dotted column path, if this row group contains it. */
@@ -88,6 +93,9 @@ abstract class ParquetRowGroup {
   final ImmutableSet<String> findDataColumnsInRange(long startOffset, long endOffset) {
     ImmutableSet.Builder<String> touchedColumns = ImmutableSet.builder();
     for (ParquetColumnChunk chunk : getColumnChunks().values()) {
+      if (chunk.getStartOffset() >= endOffset) {
+        break; // Chunks are in byte order, so no later chunk overlaps the range.
+      }
       if (chunk.touchesDataPages(startOffset, endOffset)) {
         touchedColumns.add(chunk.getColumnPath());
       }
@@ -102,6 +110,9 @@ abstract class ParquetRowGroup {
   final ImmutableSet<String> findDictionaryColumnsInRange(long startOffset, long endOffset) {
     ImmutableSet.Builder<String> touchedColumns = ImmutableSet.builder();
     for (ParquetColumnChunk chunk : getColumnChunks().values()) {
+      if (chunk.getStartOffset() >= endOffset) {
+        break; // Chunks are in byte order, so no later chunk overlaps the range.
+      }
       if (chunk.touchesDictionaryPage(startOffset, endOffset)) {
         touchedColumns.add(chunk.getColumnPath());
       }
@@ -112,6 +123,9 @@ abstract class ParquetRowGroup {
   /** Returns the data-page byte range of the column chunk containing {@code position}, if any. */
   final Optional<Range<Long>> findDataPageRangeAt(long position) {
     for (ParquetColumnChunk chunk : getColumnChunks().values()) {
+      if (chunk.getStartOffset() > position) {
+        break; // Chunks are in byte order, so no later chunk contains the position.
+      }
       if (chunk.containsDataPagePosition(position)) {
         return Optional.of(chunk.getDataPageRange());
       }
@@ -120,120 +134,30 @@ abstract class ParquetRowGroup {
   }
 
   /**
-   * Returns the sorted byte ranges of the whole column chunks of {@code columns}, dictionary pages
-   * included.
-   *
-   * <p>Touching chunks merge into one range. Each range fits in a single array: a chunk longer than
-   * {@code MAX_RANGE_BYTES} comes back as several consecutive ranges.
+   * Returns the byte ranges of the whole column chunks of {@code columns}, dictionary pages
+   * included, in byte order. Columns that this row group does not contain are skipped.
    */
-  final ImmutableList<Range<Long>> getCoalescedColumnRanges(Set<String> columns) {
-    List<Range<Long>> ranges = new ArrayList<>();
-    for (String columnPath : columns) {
-      getColumnChunk(columnPath).map(ParquetColumnChunk::getByteRange).ifPresent(ranges::add);
+  final ImmutableList<Range<Long>> getColumnChunkRanges(Set<String> columns) {
+    ImmutableList.Builder<Range<Long>> ranges = ImmutableList.builder();
+    for (ParquetColumnChunk chunk : getColumnChunks().values()) {
+      if (columns.contains(chunk.getColumnPath())) {
+        ranges.add(chunk.getByteRange());
+      }
     }
-    ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return splitOversizedRanges(coalesceConnectedRanges(ranges));
+    return ranges.build();
   }
 
   /**
-   * Returns the sorted dictionary page byte ranges of the dictionary-encoded {@code columns}.
-   *
-   * <p>Each range fits in a single array: a dictionary page longer than {@code MAX_RANGE_BYTES}
-   * comes back as several consecutive ranges.
+   * Returns the byte ranges of the dictionary pages of {@code columns}, in byte order. Columns
+   * without a dictionary page that can filter them are skipped.
    */
   final ImmutableList<Range<Long>> getDictionaryPageRanges(Set<String> columns) {
-    List<Range<Long>> ranges = new ArrayList<>();
-    for (String columnPath : columns) {
-      getColumnChunk(columnPath)
-          .flatMap(ParquetColumnChunk::getDictionaryPageRange)
-          .ifPresent(ranges::add);
-    }
-    ranges.sort(Comparator.comparingLong(Range::lowerEndpoint));
-    return splitOversizedRanges(ranges);
-  }
-
-  private static ImmutableList<Range<Long>> coalesceConnectedRanges(
-      List<Range<Long>> sortedRanges) {
-    if (sortedRanges.isEmpty()) {
-      return ImmutableList.of();
-    }
-    ImmutableList.Builder<Range<Long>> coalesced = ImmutableList.builder();
-    Range<Long> current = sortedRanges.get(0);
-    for (int i = 1; i < sortedRanges.size(); i++) {
-      Range<Long> next = sortedRanges.get(i);
-      if (current.isConnected(next)
-          && next.upperEndpoint() - current.lowerEndpoint() <= MAX_RANGE_BYTES) {
-        current = current.span(next);
-      } else {
-        coalesced.add(current);
-        current = next;
+    ImmutableList.Builder<Range<Long>> ranges = ImmutableList.builder();
+    for (ParquetColumnChunk chunk : getColumnChunks().values()) {
+      if (columns.contains(chunk.getColumnPath())) {
+        chunk.getDictionaryPageRange().ifPresent(ranges::add);
       }
     }
-    coalesced.add(current);
-    return coalesced.build();
-  }
-
-  /**
-   * Splits every range longer than {@code MAX_RANGE_BYTES} into consecutive ranges of at most that
-   * length, keeping the order of {@code ranges}.
-   */
-  private static ImmutableList<Range<Long>> splitOversizedRanges(List<Range<Long>> ranges) {
-    ImmutableList.Builder<Range<Long>> splitRanges = ImmutableList.builder();
-    for (Range<Long> range : ranges) {
-      long start = range.lowerEndpoint();
-      long end = range.upperEndpoint();
-      while (end - start > MAX_RANGE_BYTES) {
-        splitRanges.add(Range.closedOpen(start, start + MAX_RANGE_BYTES));
-        start += MAX_RANGE_BYTES;
-      }
-      splitRanges.add(Range.closedOpen(start, end));
-    }
-    return splitRanges.build();
-  }
-
-  /** Builder for {@link ParquetRowGroup}. */
-  @AutoValue.Builder
-  abstract static class Builder {
-
-    abstract Builder setIndex(int index);
-
-    abstract ImmutableMap.Builder<String, ParquetColumnChunk> columnChunksBuilder();
-
-    abstract ParquetRowGroup autoBuild();
-
-    final Builder addColumnChunk(ParquetColumnChunk columnChunk) {
-      columnChunksBuilder().put(columnChunk.getColumnPath(), columnChunk);
-      return this;
-    }
-
-    /**
-     * Builds the row group.
-     *
-     * @throws IllegalArgumentException if two column chunks share a column path
-     * @throws IllegalStateException if the index is negative or two column chunks share a byte
-     */
-    final ParquetRowGroup build() {
-      ParquetRowGroup rowGroup = autoBuild();
-      checkState(
-          rowGroup.getIndex() >= 0,
-          "Row group index must not be negative: %s",
-          rowGroup.getIndex());
-      checkColumnChunksDoNotOverlap(rowGroup.getColumnChunks().values());
-      return rowGroup;
-    }
-
-    private static void checkColumnChunksDoNotOverlap(Collection<ParquetColumnChunk> columnChunks) {
-      List<ParquetColumnChunk> sortedChunks = new ArrayList<>(columnChunks);
-      sortedChunks.sort(Comparator.comparingLong(ParquetColumnChunk::getStartOffset));
-      for (int i = 1; i < sortedChunks.size(); i++) {
-        ParquetColumnChunk previous = sortedChunks.get(i - 1);
-        ParquetColumnChunk current = sortedChunks.get(i);
-        checkState(
-            previous.getEndOffset() <= current.getStartOffset(),
-            "Column chunks must not overlap: %s and %s",
-            previous,
-            current);
-      }
-    }
+    return ranges.build();
   }
 }
