@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GCS BiDi Scan Optimization — Visual Architecture & Prioritization</title>
+  <title>GCS BiDi Optimization Pitch — The Two Toll Gates</title>
   <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <style>
     * { box-sizing: border-box; }
@@ -14,76 +14,80 @@
       font-family: 'Google Sans', Inter, -apple-system, BlinkMacSystemFont, sans-serif;
       -webkit-font-smoothing: antialiased;
     }
-    .surface-card {
+    .card-surface {
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 14px;
+      border-radius: 16px;
     }
-    .subtle-box {
+    .soft-panel {
       background: color-mix(in srgb, var(--foreground) 4%, var(--card));
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 12px;
     }
-    .pill-btn {
+    .nav-pill {
       border: 1px solid var(--border);
       background: var(--card);
       color: var(--muted-foreground);
       transition: all 0.16s ease;
       cursor: pointer;
     }
-    .pill-btn:hover {
+    .nav-pill:hover {
+      border-color: color-mix(in srgb, #3b82f6 65%, var(--border));
+      color: var(--foreground);
+    }
+    .nav-pill.active {
+      background: color-mix(in srgb, #3b82f6 16%, var(--card));
+      border-color: #3b82f6;
+      color: color-mix(in srgb, #3b82f6 72%, var(--foreground));
+      font-weight: 700;
+    }
+    .mode-pill {
+      border: 1.5px solid var(--border);
+      background: var(--card);
+      color: var(--muted-foreground);
+      transition: all 0.16s ease;
+      cursor: pointer;
+    }
+    .mode-pill:hover {
       border-color: #3b82f6;
       color: var(--foreground);
     }
-    .pill-btn.active {
-      background: rgba(37, 99, 235, 0.14);
-      border-color: #2563eb;
-      color: #2563eb;
-      font-weight: 600;
+    .mode-pill.active {
+      background: color-mix(in srgb, #2563eb 18%, var(--card));
+      border-color: #3b82f6;
+      color: color-mix(in srgb, #3b82f6 75%, var(--foreground));
+      font-weight: 700;
+      box-shadow: 0 2px 10px rgba(37, 99, 235, 0.14);
     }
-    .dark .pill-btn.active {
-      background: rgba(59, 130, 246, 0.22);
-      border-color: #60a5fa;
-      color: #93c5fd;
+    .play-btn {
+      background: #2563eb;
+      color: #ffffff;
+      border: none;
+      cursor: pointer;
+      transition: transform 0.12s ease, filter 0.15s ease;
+    }
+    .play-btn:hover {
+      filter: brightness(1.08);
+    }
+    .play-btn:active {
+      transform: scale(0.97);
     }
     .venn-slice {
       cursor: pointer;
-      transition: opacity 0.18s ease, stroke-width 0.18s ease, filter 0.18s ease;
+      transition: fill-opacity 0.18s ease, stroke-width 0.18s ease, filter 0.18s ease;
     }
     .venn-slice:hover {
-      filter: brightness(1.08);
+      filter: brightness(1.1);
     }
-    .bar-anim {
-      transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.25s ease, opacity 0.25s ease;
+    .step-card {
+      transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      cursor: pointer;
     }
-    .node-anim {
-      transition: all 0.25s ease;
+    .step-card:hover {
+      transform: translateY(-2px);
     }
-    .toggle-track {
-      width: 38px;
-      height: 22px;
-      border-radius: 999px;
-      background: color-mix(in srgb, var(--foreground) 18%, transparent);
-      position: relative;
-      transition: background 0.18s ease;
-      flex-shrink: 0;
-    }
-    .toggle-track.on {
-      background: #2563eb;
-    }
-    .toggle-thumb {
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: #ffffff;
-      position: absolute;
-      top: 3px;
-      left: 3px;
-      transition: transform 0.18s ease;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
-    }
-    .toggle-track.on .toggle-thumb {
-      transform: translateX(16px);
+    .bar-seg {
+      transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease;
     }
     svg text {
       font-family: inherit;
@@ -95,1153 +99,1025 @@
 
   <div class="max-w-6xl mx-auto flex flex-col gap-4">
 
-    <!-- Top Deck Header & Slide Tabs -->
-    <header class="surface-card px-5 py-4 flex flex-col gap-3">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-            <span>GCS Analytics Core · BiDi Read Path</span>
-            <span>•</span>
-            <span id="slideBadge">Slide 1 of 5</span>
-          </div>
-          <h1 id="slideTitle" class="text-xl md:text-2xl font-bold mt-0.5 text-[var(--foreground)]">
-            Where BiDi Scan Time Goes
-          </h1>
-          <p id="slideSubtitle" class="text-sm text-[var(--muted-foreground)] mt-0.5">
-            Step through a 2-table query to see per-client cold setup vs per-file stream open.
-          </p>
+    <!-- ==================== COMPACT HEADER & 3-SCREEN TABS ==================== -->
+    <header class="card-surface px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <div class="text-xs font-bold uppercase tracking-wider text-[var(--muted-foreground)]">
+          GCS BiDi Analytics · Executive View
         </div>
-
-        <div class="flex items-center gap-2">
-          <button id="prevBtn" onclick="goSlide(currentSlide - 1)" class="pill-btn px-3 py-1.5 rounded-lg text-xs font-medium">
-            ← Prev
-          </button>
-          <button id="nextBtn" onclick="goSlide(currentSlide + 1)" class="pill-btn px-3 py-1.5 rounded-lg text-xs font-medium">
-            Next →
-          </button>
-        </div>
+        <h1 id="screenTitle" class="text-lg md:text-xl font-extrabold text-[var(--foreground)]">
+          Every Read Passes Two Toll Gates
+        </h1>
       </div>
 
-      <!-- Slide Navigation Tabs -->
-      <nav class="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1 border-t border-[var(--border)]">
-        <button onclick="goSlide(0)" class="slide-tab pill-btn active px-3 py-2 rounded-lg text-xs text-left">
-          1 · Scan Phases
+      <nav class="flex flex-wrap items-center gap-2">
+        <button onclick="showScreen(0)" class="screen-tab nav-pill active px-3.5 py-2 rounded-xl text-xs md:text-sm">
+          1 · Watch Query Run
         </button>
-        <button onclick="goSlide(1)" class="slide-tab pill-btn px-3 py-2 rounded-lg text-xs text-left">
-          2 · Live Simulator
+        <button onclick="showScreen(1)" class="screen-tab nav-pill px-3.5 py-2 rounded-xl text-xs md:text-sm">
+          2 · Merge vs Stack
         </button>
-        <button onclick="goSlide(2)" class="slide-tab pill-btn px-3 py-2 rounded-lg text-xs text-left">
-          3 · Overlap Venns
-        </button>
-        <button onclick="goSlide(3)" class="slide-tab pill-btn px-3 py-2 rounded-lg text-xs text-left">
-          4 · Regional vs Zonal
-        </button>
-        <button onclick="goSlide(4)" class="slide-tab pill-btn px-3 py-2 rounded-lg text-xs text-left">
-          5 · Priority Stack
+        <button onclick="showScreen(2)" class="screen-tab nav-pill px-3.5 py-2 rounded-xl text-xs md:text-sm">
+          3 · Funding Order
         </button>
       </nav>
     </header>
 
-    <!-- ==================== SLIDE 1: STEP-BY-STEP SCAN WALKTHROUGH ==================== -->
-    <section id="slide-0" class="slide-pane surface-card p-5 flex flex-col gap-5">
+    <!-- ==================== SCREEN 1: THE TWO TOLL GATES ANIMATION ==================== -->
+    <section id="screen-0" class="screen-pane card-surface p-5 flex flex-col gap-4">
 
-      <!-- Controls Row -->
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <!-- Step Selector -->
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] mr-1">Query Step:</span>
-          <button onclick="setWalkStep(0)" class="walk-step-btn pill-btn active px-3 py-1.5 rounded-lg text-xs">
-            1. Scan 1: orders (Split 1)
-          </button>
-          <button onclick="setWalkStep(1)" class="walk-step-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
-            2. Scan 1: orders (Split 2)
-          </button>
-          <button onclick="setWalkStep(2)" class="walk-step-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
-            3. Scan 2: customers
-          </button>
-          <button onclick="setWalkStep(3)" class="walk-step-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
-            4. Scan 3: 2nd Bucket
-          </button>
-        </div>
-
-        <!-- Mode Selector -->
+      <!-- Mode Switcher + Play Controls -->
+      <div class="flex flex-wrap items-center justify-between gap-2.5">
         <div class="flex flex-wrap items-center gap-1.5">
-          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] mr-1">Mode:</span>
-          <button onclick="setWalkMode('none')" id="wmode-none" class="pill-btn active px-2.5 py-1.5 rounded-lg text-xs">
-            No Cache
+          <button onclick="selectAnimMode('cold')" id="amode-cold" class="mode-pill active px-2.5 py-2 rounded-xl text-xs">
+            1. Cold Today
           </button>
-          <button onclick="setWalkMode('client')" id="wmode-client" class="pill-btn px-2.5 py-1.5 rounded-lg text-xs">
-            Client Cache (Current)
+          <button onclick="selectAnimMode('cache')" id="amode-cache" class="mode-pill px-2.5 py-2 rounded-xl text-xs">
+            2. + Client Cache
           </button>
-          <button onclick="setWalkMode('client_warm')" id="wmode-client_warm" class="pill-btn px-2.5 py-1.5 rounded-lg text-xs">
-            + Warm-Up
+          <button onclick="selectAnimMode('warmup')" id="amode-warmup" class="mode-pill px-2.5 py-2 rounded-xl text-xs">
+            3. + Warm-Up
           </button>
-          <button onclick="setWalkMode('all')" id="wmode-all" class="pill-btn px-2.5 py-1.5 rounded-lg text-xs">
-            + Session Pool
+          <button onclick="selectAnimMode('reactive')" id="amode-reactive" class="mode-pill px-2.5 py-2 rounded-xl text-xs">
+            4. + Bulk Open (Reactive Pool)
+          </button>
+          <button onclick="selectAnimMode('proactive')" id="amode-proactive" class="mode-pill px-2.5 py-2 rounded-xl text-xs">
+            5. + Bulk Open (Proactive Pool)
+          </button>
+          <button onclick="selectAnimMode('handle')" id="amode-handle" class="mode-pill px-2.5 py-2 rounded-xl text-xs">
+            6. vs BidiReadHandle (Zonal)
+          </button>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button onclick="toggleSlowMo()" id="slowBtn" class="nav-pill px-3 py-2 rounded-xl text-xs font-semibold">
+            Speed: 1×
+          </button>
+          <button onclick="replayAnim()" id="playBtn" class="play-btn px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5">
+            ↻ Replay
           </button>
         </div>
       </div>
 
-      <!-- 4-Phase Visual Pipeline -->
-      <div class="grid grid-cols-1 md:grid-cols-4 gap-3" id="walkPhaseGrid">
-        <!-- Populated by JS -->
+      <!-- Animated Highway Stage -->
+      <div class="soft-panel p-3 md:p-4">
+        <div class="flex flex-wrap items-center justify-between gap-2 px-2 pb-2">
+          <div class="flex flex-wrap items-center gap-4 text-xs font-semibold text-[var(--muted-foreground)]">
+            <span class="flex items-center gap-1.5">
+              <span class="inline-block w-3 h-3 rounded-full" style="background:#ef4444"></span> Closed Gate (Stop &amp; Pay)
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="inline-block w-3 h-3 rounded-full" style="background:#f59e0b"></span> Ticket Reopen (+8 ms Zonal)
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="inline-block w-3 h-3 rounded-full" style="background:#10b981"></span> Open Gate (0 ms Pass)
+            </span>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">Total Query Time:</span>
+            <span id="liveTimer" class="text-base md:text-lg font-extrabold tabular-nums px-3 py-0.5 rounded-lg"
+                  style="background:color-mix(in srgb, #3b82f6 15%, var(--card)); color:color-mix(in srgb, #3b82f6 75%, var(--foreground))">
+              0 ms
+            </span>
+          </div>
+        </div>
+
+        <svg id="highwaySvg" viewBox="0 0 1060 330" class="w-full h-auto block">
+          <!-- Static Track Infrastructure -->
+          <!-- Road Background -->
+          <rect x="278" y="172" width="594" height="40" rx="8"
+                fill="color-mix(in srgb, var(--foreground) 8%, var(--card))"
+                stroke="var(--border)" stroke-width="1.5" />
+          <line x1="292" y1="192" x2="858" y2="192"
+                stroke="var(--border)" stroke-width="2" stroke-dasharray="10 10" />
+
+          <!-- Lookahead Background Wire (Active only in Bulk Open Proactive Pool) -->
+          <g id="lookaheadGroup" opacity="0">
+            <path id="lookaheadPath" d="M 278 248 Q 491 314 704 232"
+                  fill="none" stroke="#0d9488" stroke-width="2.5" stroke-dasharray="7 6" />
+            <rect x="336" y="284" width="310" height="28" rx="14"
+                  fill="color-mix(in srgb, #0d9488 18%, var(--card))" stroke="#0d9488" stroke-width="1.5" />
+            <text x="491" y="302" text-anchor="middle" font-size="12" font-weight="700"
+                  fill="color-mix(in srgb, #0d9488 72%, var(--foreground))">
+              multiOpen Pre-Opens customers.parquet
+            </text>
+            <circle id="lookaheadPulse" cx="278" cy="248" r="7" fill="#14b8a6" opacity="0" />
+          </g>
+
+          <!-- LEFT DOCK: SPARK SQL JOIN READS -->
+          <rect x="12" y="86" width="266" height="198" rx="14"
+                fill="var(--card)" stroke="var(--border)" stroke-width="1.5" />
+          <text x="145" y="110" text-anchor="middle" font-size="12" font-weight="800"
+                fill="var(--muted-foreground)">SPARK SQL READS (orders ⋈ customers)</text>
+
+          <g id="sparkQueueRows"></g>
+
+          <!-- GATE 1: CONNECT TO GCS -->
+          <text x="448" y="30" text-anchor="middle" font-size="13.5" font-weight="800" fill="var(--foreground)">
+            Gate 1 · Connect to GCS
+          </text>
+          <rect id="g1PillRect" x="344" y="42" width="208" height="28" rx="14"
+                fill="rgba(239,68,68,0.15)" stroke="#ef4444" stroke-width="1.5" />
+          <text id="g1PillText" x="448" y="60" text-anchor="middle" font-size="12.5" font-weight="700" fill="#ef4444">
+            Closed · 2,230 ms
+          </text>
+
+          <!-- Gate 1 Housing + Sliding Door -->
+          <rect x="434" y="110" width="28" height="58" rx="6"
+                fill="color-mix(in srgb, var(--foreground) 6%, var(--card))"
+                stroke="var(--border)" stroke-width="1.5" stroke-dasharray="4 3" />
+          <rect x="432" y="166" width="32" height="52" rx="6"
+                fill="none" stroke="var(--border)" stroke-width="2" />
+          <rect id="g1Door" x="438" y="169" width="20" height="46" rx="5"
+                fill="#ef4444" />
+
+          <!-- GATE 2: OPEN FILE -->
+          <text x="704" y="30" text-anchor="middle" font-size="13.5" font-weight="800" fill="var(--foreground)">
+            Gate 2 · Open File
+          </text>
+          <rect id="g2PillRect" x="574" y="42" width="260" height="28" rx="14"
+                fill="rgba(239,68,68,0.15)" stroke="#ef4444" stroke-width="1.5" />
+          <text id="g2PillText" x="704" y="60" text-anchor="middle" font-size="12.5" font-weight="700" fill="#ef4444">
+            Closed · 40 ms / file
+          </text>
+
+          <!-- Gate 2 Housing + Sliding Door -->
+          <rect x="690" y="110" width="28" height="58" rx="6"
+                fill="color-mix(in srgb, var(--foreground) 6%, var(--card))"
+                stroke="var(--border)" stroke-width="1.5" stroke-dasharray="4 3" />
+          <rect x="688" y="166" width="32" height="52" rx="6"
+                fill="none" stroke="var(--border)" stroke-width="2" />
+          <rect id="g2Door" x="694" y="169" width="20" height="46" rx="5"
+                fill="#ef4444" />
+
+          <!-- RIGHT DOCK: READ DATA -->
+          <rect x="872" y="86" width="176" height="198" rx="14"
+                fill="var(--card)" stroke="var(--border)" stroke-width="1.5" />
+          <text x="960" y="110" text-anchor="middle" font-size="12" font-weight="800"
+                fill="var(--muted-foreground)">READ DATA (8 ms)</text>
+
+          <g id="doneRows"></g>
+
+          <!-- ACTIVE MOVING PACKET & WAIT CALLOUT -->
+          <g id="activePacket" opacity="0">
+            <!-- Wait Ring -->
+            <circle id="waitRing" cx="0" cy="0" r="21" fill="none"
+                    stroke="#ef4444" stroke-width="4" stroke-linecap="round"
+                    stroke-dasharray="132" stroke-dashoffset="132" transform="rotate(-90)" />
+            <!-- Packet Ball -->
+            <circle id="packetBall" cx="0" cy="0" r="15" fill="#3b82f6" stroke="#ffffff" stroke-width="2.5" />
+            <text id="packetNum" x="0" y="5" text-anchor="middle" font-size="13" font-weight="800" fill="#ffffff">1</text>
+
+            <!-- Wait Floating Pill (above road when paused) -->
+            <g id="waitBubble" opacity="0">
+              <rect id="waitBubbleRect" x="-72" y="-58" width="144" height="26" rx="13" fill="#ef4444" />
+              <text id="waitBubbleText" x="0" y="-41" text-anchor="middle" font-size="12" font-weight="800" fill="#ffffff">
+                +2,230 ms
+              </text>
+            </g>
+          </g>
+        </svg>
       </div>
 
-      <!-- Visual Architecture Flow Diagram (Executor -> Client -> Bucket -> File) -->
-      <div class="subtle-box p-4">
-        <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]" id="walkScenarioLabel">
-            Executor Timeline for Selected Step
-          </span>
-          <div class="flex items-center gap-4 text-xs">
-            <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm" style="background:#ef4444"></span> Paid on critical path</span>
-            <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm" style="background:#f59e0b"></span> Paid once / backgrounded</span>
-            <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm" style="background:#10b981"></span> 0 ms Cache / Pool Hit</span>
-          </div>
-        </div>
-
-        <!-- Proportional Horizontal Time Bar -->
-        <div class="w-full h-11 rounded-lg overflow-hidden flex border border-[var(--border)] bg-[var(--card)]" id="walkTotalBar">
-        </div>
-
-        <div class="flex items-center justify-between mt-3 text-sm">
-          <span id="walkCalloutText" class="font-medium text-[var(--foreground)]"></span>
-          <span id="walkTotalMs" class="font-bold text-base"></span>
-        </div>
-      </div>
-
-      <!-- Bottom Visual Legend: Per-Client vs Per-File Split -->
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div class="subtle-box p-3.5 flex items-center justify-between gap-3">
-          <div>
-            <div class="text-xs font-bold uppercase tracking-wide" style="color:#2563eb">Group A · Phases 1 & 2 (Per-Client / Bucket)</div>
-            <div class="text-sm font-semibold mt-0.5">~2,270 ms cold setup in Java DirectPath</div>
-            <div class="text-xs text-[var(--muted-foreground)] mt-0.5">Targeted by: Client Caching & Channel Warm-Up</div>
-          </div>
-          <div class="px-3 py-1.5 rounded-lg text-xs font-bold" style="background:rgba(37,99,235,0.12); color:#2563eb">
-            Once per client
-          </div>
-        </div>
-        <div class="subtle-box p-3.5 flex items-center justify-between gap-3">
-          <div>
-            <div class="text-xs font-bold uppercase tracking-wide" style="color:#059669">Group B · Phase 3 (Per-File Stream Open)</div>
-            <div class="text-sm font-semibold mt-0.5">~35–40 ms on every file open (Spanner + IAM)</div>
-            <div class="text-xs text-[var(--muted-foreground)] mt-0.5">Targeted by: Session Pool, Handle Cache & Bulk Open</div>
-          </div>
-          <div class="px-3 py-1.5 rounded-lg text-xs font-bold" style="background:rgba(5,150,105,0.12); color:#059669">
-            × Every file
-          </div>
-        </div>
+      <!-- One-Line Executive Takeaway -->
+      <div class="card-surface px-4 py-3 flex flex-wrap items-center justify-between gap-2 border-l-4"
+           id="animTakeawayBar" style="border-left-color:#3b82f6">
+        <span id="animHeadline" class="text-sm md:text-base font-bold text-[var(--foreground)]"></span>
+        <span id="animDeltaPill" class="px-3 py-1 rounded-full text-xs font-extrabold"></span>
       </div>
     </section>
 
-    <!-- ==================== SLIDE 2: LIVE FEATURE SIMULATOR & PHASE MATRIX ==================== -->
-    <section id="slide-1" class="slide-pane hidden surface-card p-5 flex flex-col gap-4">
+    <!-- ==================== SCREEN 2: SPACIOUS DUAL-VENN (MERGE VS STACK) ==================== -->
+    <section id="screen-1" class="screen-pane hidden card-surface p-5 flex flex-col gap-4">
 
-      <!-- Top Preset Bar -->
-      <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[var(--border)]">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">Workload:</span>
-          <button onclick="setSimPreset('tpcds')" id="preset-tpcds" class="pill-btn active px-3 py-1.5 rounded-lg text-xs">
-            Multi-Scan · 500 MB Files (TPC-DS)
-          </button>
-          <button onclick="setSimPreset('single100')" id="preset-single100" class="pill-btn px-3 py-1.5 rounded-lg text-xs">
-            1 Scan · ≤128 MB Files (Read Once)
-          </button>
-          <button onclick="setSimPreset('vended')" id="preset-vended" class="pill-btn px-3 py-1.5 rounded-lg text-xs">
-            Per-Scan Vended Tokens
-          </button>
-        </div>
+      <div class="grid grid-cols-1 lg:grid-cols-11 gap-4 items-stretch">
 
-        <div class="flex items-center gap-1.5">
-          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">Bucket:</span>
-          <button onclick="setSimBucket('regional')" id="bkt-regional" class="pill-btn active px-2.5 py-1.5 rounded-lg text-xs">
-            Regional Standard
-          </button>
-          <button onclick="setSimBucket('zonal')" id="bkt-zonal" class="pill-btn px-2.5 py-1.5 rounded-lg text-xs">
-            Zonal Rapid
-          </button>
-        </div>
-      </div>
-
-      <!-- Swimlane Matrix: Toggles on Left, 4 Phase Columns on Right -->
-      <div class="overflow-x-auto">
-        <div class="min-w-[680px] flex flex-col gap-2">
-          <!-- Column Headers -->
-          <div class="grid grid-cols-12 gap-2 text-xs font-bold uppercase tracking-wide text-[var(--muted-foreground)] px-2">
-            <div class="col-span-4">Feature Toggle (Click to Combine)</div>
-            <div class="col-span-2 text-center">P1 · Build Client</div>
-            <div class="col-span-2 text-center">P2 · Channel & Route</div>
-            <div class="col-span-2 text-center">P3 · Open File</div>
-            <div class="col-span-2 text-center">P4 · Range Read</div>
+        <!-- LEFT VENN: GATE 1 -->
+        <div class="lg:col-span-5 soft-panel p-4 flex flex-col items-center justify-between">
+          <div class="w-full flex items-center justify-between gap-2">
+            <span class="text-sm md:text-base font-extrabold text-[var(--foreground)]">
+              Gate 1 · Connect (2.3 s)
+            </span>
+            <span class="px-2.5 py-1 rounded-lg text-xs font-bold"
+                  style="background:color-mix(in srgb, #2563eb 16%, var(--card)); color:color-mix(in srgb, #3b82f6 72%, var(--foreground))">
+              Same Gate → Merge
+            </span>
           </div>
 
-          <!-- Swimlane Rows rendered by JS -->
-          <div id="swimlaneRows" class="flex flex-col gap-2"></div>
-        </div>
-      </div>
+          <svg id="vennGate1" viewBox="0 0 540 285" class="w-full max-w-[510px] h-auto my-1"></svg>
 
-      <!-- Live Executor Scan Overhead Comparison Bars -->
-      <div class="subtle-box p-4 flex flex-col gap-3 mt-1">
-        <div class="flex items-center justify-between flex-wrap gap-2">
-          <span class="text-xs font-bold uppercase tracking-wide text-[var(--muted-foreground)]" id="simWorkloadDesc">
-            Sample Executor Cost: 6 Table Scans · 40 File Opens (10 unique 500 MB files × 4 splits)
-          </span>
-          <span id="simSavingsBadge" class="px-2.5 py-1 rounded-md text-xs font-bold" style="background:rgba(16,185,129,0.15); color:#059669"></span>
-        </div>
-
-        <!-- Cold Baseline Bar -->
-        <div class="flex flex-col gap-1">
-          <div class="flex justify-between text-xs">
-            <span class="text-[var(--muted-foreground)] font-medium">Unoptimized Cold Baseline</span>
-            <span id="simBaseLabel" class="font-semibold"></span>
+          <div class="w-full flex items-center justify-center gap-2 text-xs font-semibold text-[var(--muted-foreground)] pt-1">
+            <span>Fold Warm-Up into Client Cache misses</span>
           </div>
-          <div class="w-full h-6 rounded-md overflow-hidden flex bg-[var(--card)] border border-[var(--border)]" id="simBaseBar"></div>
         </div>
 
-        <!-- Active Toggles Bar -->
-        <div class="flex flex-col gap-1">
-          <div class="flex justify-between text-xs">
-            <span class="font-semibold text-[var(--foreground)]">With Selected Features Enabled</span>
-            <span id="simOptLabel" class="font-bold"></span>
-          </div>
-          <div class="w-full h-7 rounded-md overflow-hidden flex bg-[var(--card)] border border-[var(--border)]" id="simOptBar"></div>
-        </div>
-
-        <div class="flex flex-wrap items-center justify-between gap-3 pt-1 text-xs">
-          <div class="flex flex-wrap items-center gap-4">
-            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block" style="background:#2563eb"></span> Per-Client & Bucket Setup (P1+P2)</span>
-            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block" style="background:#059669"></span> Per-File Stream Open (P3)</span>
-            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block" style="background:#64748b"></span> Steady Data Transfer + Tail Wait (P4)</span>
-          </div>
-          <span id="simNotice" class="font-semibold" style="color:#d97706"></span>
-        </div>
-      </div>
-    </section>
-
-    <!-- ==================== SLIDE 3: DUAL-VENN OVERLAP VS STACK DIAGRAM ==================== -->
-    <section id="slide-2" class="slide-pane hidden surface-card p-5 flex flex-col gap-4">
-
-      <div class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] text-center">
-        Click any of the 6 regions below to inspect where features overlap (merge) vs where they add unique value
-      </div>
-
-      <!-- Dual Container Grid with + Connector -->
-      <div class="grid grid-cols-1 lg:grid-cols-11 gap-3 items-stretch">
-
-        <!-- LEFT BOX: GROUP A VENN -->
-        <div class="lg:col-span-5 subtle-box p-4 flex flex-col items-center">
-          <div class="w-full flex items-center justify-between mb-1">
-            <span class="text-xs font-bold uppercase tracking-wide" style="color:#2563eb">Group A · Phases 1 & 2</span>
-            <span class="text-xs font-semibold px-2 py-0.5 rounded" style="background:rgba(37,99,235,0.12); color:#2563eb">~95% Overlap on Warm Runs</span>
-          </div>
-          <div class="text-sm font-bold w-full text-left mb-2">Per-Client & Bucket Setup (~2.3 s)</div>
-
-          <svg id="vennA" viewBox="0 0 460 245" class="w-full max-w-[460px] h-auto">
-            <!-- Populated by exact geometry JS -->
-          </svg>
-        </div>
-
-        <!-- CENTER PLUS BADGE -->
-        <div class="lg:col-span-1 flex lg:flex-col items-center justify-center gap-2 py-2">
-          <div class="w-11 h-11 rounded-full flex items-center justify-center text-xl font-black border-2"
-               style="border-color:#10b981; background:rgba(16,185,129,0.12); color:#059669">
+        <!-- CENTER PLUS CONNECTOR -->
+        <div class="lg:col-span-1 flex lg:flex-col items-center justify-center gap-2 py-1">
+          <div class="w-12 h-12 rounded-full flex items-center justify-center text-2xl font-black border-2"
+               style="border-color:#10b981; background:color-mix(in srgb, #10b981 16%, var(--card)); color:color-mix(in srgb, #10b981 75%, var(--foreground))">
             +
           </div>
-          <span class="text-xs font-bold uppercase tracking-wider text-center" style="color:#059669">
+          <div class="text-xs font-extrabold uppercase tracking-wider text-center"
+               style="color:color-mix(in srgb, #10b981 75%, var(--foreground))">
             Stacks<br/>100%
-          </span>
-        </div>
-
-        <!-- RIGHT BOX: GROUP B VENN -->
-        <div class="lg:col-span-5 subtle-box p-4 flex flex-col items-center">
-          <div class="w-full flex items-center justify-between mb-1">
-            <span class="text-xs font-bold uppercase tracking-wide" style="color:#059669">Group B · Phase 3</span>
-            <span class="text-xs font-semibold px-2 py-0.5 rounded" style="background:rgba(5,150,105,0.12); color:#059669">Split by File Size & Reuse</span>
           </div>
-          <div class="text-sm font-bold w-full text-left mb-2">Per-File Stream Open (~35 ms / file)</div>
-
-          <svg id="vennB" viewBox="0 0 460 245" class="w-full max-w-[460px] h-auto">
-            <!-- Populated by exact geometry JS -->
-          </svg>
-        </div>
-      </div>
-
-      <!-- Selected Region Visual Detail Strip -->
-      <div id="vennDetailBox" class="surface-card p-4 border-2" style="border-color:#2563eb">
-        <!-- Populated by JS -->
-      </div>
-    </section>
-
-    <!-- ==================== SLIDE 4: REGIONAL VS ZONAL HANDLE & SESSION FLOW ==================== -->
-    <section id="slide-3" class="slide-pane hidden surface-card p-5 flex flex-col gap-4">
-
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">Lifecycle Stage:</span>
-          <button onclick="setArchStage(0)" class="arch-btn pill-btn active px-3 py-1.5 rounded-lg text-xs">
-            1. Task 1 Opens File
-          </button>
-          <button onclick="setArchStage(1)" class="arch-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
-            2. Task 1 Closes Stream
-          </button>
-          <button onclick="setArchStage(2)" class="arch-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
-            3. Task 2 Reopens Same File
-          </button>
-        </div>
-        <span class="text-xs text-[var(--muted-foreground)] font-medium">
-          Shows why Regional buckets have no BidiReadHandle token, making Live Session Pool essential
-        </span>
-      </div>
-
-      <!-- Two Parallel Visual Tracks -->
-      <div class="grid grid-cols-1 gap-4" id="archTracks">
-        <!-- Populated by JS -->
-      </div>
-
-      <!-- Server-Side Handle Cache Callout -->
-      <div class="subtle-box p-3.5 flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-3">
-          <span class="px-2.5 py-1 rounded text-xs font-bold" style="background:rgba(217,119,6,0.15); color:#d97706">
-            Server-Side Handle Bypass
-          </span>
-          <span class="text-xs md:text-sm text-[var(--foreground)]">
-            Relaxes Zonal 5-min TTL + VM IP binding in Fastpusher — scoped to <strong>BigQuery internal client (non-prod only)</strong>.
-          </span>
-        </div>
-        <span class="text-xs font-semibold text-[var(--muted-foreground)]">
-          3P Production Path → Wait for Auth Sessions
-        </span>
-      </div>
-    </section>
-
-    <!-- ==================== SLIDE 5: PRIORITIZATION & MERGE STACK ==================== -->
-    <section id="slide-4" class="slide-pane hidden surface-card p-5 flex flex-col gap-4">
-
-      <!-- 4-Step Visual Architecture Stack -->
-      <div class="grid grid-cols-1 md:grid-cols-4 gap-3" id="prioGrid">
-        <!-- Populated by JS -->
-      </div>
-
-      <!-- Visual Impact Waterfall + Dependency Detail -->
-      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-        <!-- Left: Selected Priority Breakdown -->
-        <div class="lg:col-span-7 subtle-box p-4 flex flex-col justify-between gap-3" id="prioDetail">
-          <!-- Populated by JS -->
         </div>
 
-        <!-- Right: Parallel Track (Phase 4 Tail Stalls) -->
-        <div class="lg:col-span-5 subtle-box p-4 flex flex-col justify-between gap-3">
-          <div>
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-bold uppercase tracking-wide" style="color:#dc2626">Untouched Gap · Phase 4</span>
-              <span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:rgba(220,38,38,0.12); color:#dc2626">Separate Track</span>
-            </div>
-            <div class="text-base font-bold mt-1">Mid-Stream Range Tail Stalls</div>
-            <div class="text-xs text-[var(--muted-foreground)] mt-1">
-              On Regional Standard buckets, 1 BiDi stream routes ranges through 1 Bitpusher + 2 MiB BCL chunks (2.07× IO wait vs HTTP).
-            </div>
+        <!-- RIGHT VENN: GATE 2 -->
+        <div class="lg:col-span-5 soft-panel p-4 flex flex-col items-center justify-between">
+          <div class="w-full flex items-center justify-between gap-2">
+            <span class="text-sm md:text-base font-extrabold text-[var(--foreground)]">
+              Gate 2 · Open File (40 ms × files)
+            </span>
+            <span class="px-2.5 py-1 rounded-lg text-xs font-bold"
+                  style="background:color-mix(in srgb, #10b981 16%, var(--card)); color:color-mix(in srgb, #10b981 72%, var(--foreground))">
+              Live Pool vs Ticket
+            </span>
           </div>
 
-          <div class="surface-card p-3 flex items-center justify-between">
-            <div>
-              <div class="text-xs font-semibold text-[var(--muted-foreground)]">Fix</div>
-              <div class="text-sm font-bold">BiDi Read Request Hedging</div>
-            </div>
-            <span class="px-2.5 py-1 rounded text-xs font-bold" style="background:rgba(37,99,235,0.12); color:#2563eb">
-              Stacks with P1–P3
+          <svg id="vennGate2" viewBox="0 0 540 285" class="w-full max-w-[510px] h-auto my-1"></svg>
+
+          <!-- Simple Bucket Coverage Pills -->
+          <div class="w-full flex flex-wrap items-center justify-center gap-2 pt-1">
+            <span class="px-2.5 py-1 rounded-md text-xs font-bold"
+                  style="background:color-mix(in srgb, #10b981 16%, var(--card)); color:color-mix(in srgb, #10b981 74%, var(--foreground))">
+              Bulk Open = Reactive + Proactive Pool (Regional + Zonal)
+            </span>
+            <span class="px-2.5 py-1 rounded-md text-xs font-bold"
+                  style="background:color-mix(in srgb, #f59e0b 16%, var(--card)); color:color-mix(in srgb, #f59e0b 74%, var(--foreground))">
+              BidiReadHandle = Ticket Only (Zonal Rapid)
             </span>
           </div>
         </div>
       </div>
+
+      <!-- Single-Line Interactive Slice Bar -->
+      <div id="vennOneLiner" class="card-surface px-4 py-3.5 border-2 flex flex-wrap items-center justify-between gap-3">
+      </div>
+    </section>
+
+    <!-- ==================== SCREEN 3: 1-2-3-4 FUNDING ORDER ==================== -->
+    <section id="screen-2" class="screen-pane hidden card-surface p-5 flex flex-col gap-5">
+
+      <!-- Visual 1 TB Scan-Time Trajectory Bar -->
+      <div class="soft-panel p-4 flex flex-col gap-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <span class="text-xs md:text-sm font-extrabold uppercase tracking-wide text-[var(--muted-foreground)]">
+            1 TB TPC-DS Scan Time Gap vs Cached HTTP
+          </span>
+          <span class="text-xs font-semibold text-[var(--muted-foreground)]">
+            Click a step below to highlight what it removes
+          </span>
+        </div>
+
+        <div class="flex flex-col gap-2.5">
+          <!-- Cold BiDi Reference -->
+          <div class="grid grid-cols-12 items-center gap-3">
+            <div class="col-span-3 sm:col-span-2 text-xs font-bold text-[var(--muted-foreground)]">Cold BiDi</div>
+            <div class="col-span-9 sm:col-span-10 flex items-center gap-3">
+              <div class="h-7 rounded-lg flex items-center px-3 text-xs font-extrabold text-white"
+                   style="width:100%; background:#ef4444">
+                24,222 s
+              </div>
+            </div>
+          </div>
+
+          <!-- Step #1 Shipped -->
+          <div class="grid grid-cols-12 items-center gap-3">
+            <div class="col-span-3 sm:col-span-2 text-xs font-bold"
+                 style="color:color-mix(in srgb, #10b981 74%, var(--foreground))">#1 Shipped</div>
+            <div class="col-span-9 sm:col-span-10 flex items-center gap-2">
+              <div class="h-7 rounded-lg flex items-center justify-between px-3 text-xs font-extrabold text-white"
+                   style="width:85.25%; background:#10b981">
+                <span>20,650 s (Client Cache)</span>
+                <span>−14.7%</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Active Selected Step Projection Row -->
+          <div class="grid grid-cols-12 items-center gap-3">
+            <div id="projRowLabel" class="col-span-3 sm:col-span-2 text-xs font-extrabold"
+                 style="color:color-mix(in srgb, #2563eb 76%, var(--foreground))">After #2</div>
+            <div class="col-span-9 sm:col-span-10 flex items-center gap-2">
+              <div id="projRowBar" class="bar-seg h-7 rounded-lg flex items-center justify-between px-3 text-xs font-extrabold text-white"
+                   style="width:77.5%; background:#2563eb">
+                <span id="projRowText">Bulk Open (Reactive Pool) + Warm-Up removes repeat opens &amp; cold misses</span>
+                <span id="projRowTag">0 Spark changes</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cached HTTP Target -->
+          <div class="grid grid-cols-12 items-center gap-3">
+            <div class="col-span-3 sm:col-span-2 text-xs font-bold text-[var(--muted-foreground)]">HTTP Reference</div>
+            <div class="col-span-9 sm:col-span-10 flex items-center gap-2">
+              <div class="h-7 rounded-lg flex items-center justify-between px-3 text-xs font-extrabold text-white"
+                   style="width:71.6%; background:#475569">
+                <span>17,344 s (Cached HTTP)</span>
+                <span>Target Parity</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4 Clean Visual Funding Cards -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5" id="fundingCards"></div>
+
     </section>
 
   </div>
 
   <script>
-    // ==================== SLIDE NAVIGATION ====================
-    const SLIDE_META = [
-      {
-        title: "Where BiDi Scan Time Goes",
-        subtitle: "Step through a 2-table query to see per-client cold setup vs per-file stream open."
-      },
-      {
-        title: "Which Feature Fixes Which Phase (Live Simulator)",
-        subtitle: "Toggle features across workloads to see what stacks vs what adds 0 ms."
-      },
-      {
-        title: "Where Features Overlap (Merge) vs Stack (Add Up)",
-        subtitle: "Inside a box = overlapping solutions (merge). Across boxes = independent phases (stack)."
-      },
-      {
-        title: "Regional Standard vs Zonal Rapid: How File Open Works",
-        subtitle: "Why Live BlobReadSession pooling works everywhere, while BidiReadHandle tokens only exist on Zonal Rapid."
-      },
-      {
-        title: "Prioritization & Merge Roadmap",
-        subtitle: "Click any stage to inspect target phase, code layer, and merge decision."
-      }
+    // ==================== SCREEN SWITCHING ====================
+    const SCREEN_TITLES = [
+      "Every Read Passes Two Toll Gates",
+      "Same Gate Merges · Different Gates Stack",
+      "What to Fund: 1 → 2 → 3 → 4"
     ];
 
-    let currentSlide = 0;
+    let activeScreen = 0;
 
-    function goSlide(idx) {
-      if (idx < 0 || idx >= SLIDE_META.length) return;
-      currentSlide = idx;
-      document.getElementById("slideBadge").textContent = `Slide ${idx + 1} of ${SLIDE_META.length}`;
-      document.getElementById("slideTitle").textContent = SLIDE_META[idx].title;
-      document.getElementById("slideSubtitle").textContent = SLIDE_META[idx].subtitle;
-
-      document.querySelectorAll(".slide-pane").forEach((el, i) => {
-        el.classList.toggle("hidden", i !== idx);
-      });
-      document.querySelectorAll(".slide-tab").forEach((el, i) => {
-        el.classList.toggle("active", i === idx);
-      });
-      document.getElementById("prevBtn").style.opacity = idx === 0 ? "0.45" : "1";
-      document.getElementById("nextBtn").style.opacity = idx === SLIDE_META.length - 1 ? "0.45" : "1";
+    function showScreen(idx) {
+      if (idx < 0 || idx >= SCREEN_TITLES.length) return;
+      activeScreen = idx;
+      document.getElementById("screenTitle").textContent = SCREEN_TITLES[idx];
+      document.querySelectorAll(".screen-pane").forEach((el, i) => el.classList.toggle("hidden", i !== idx));
+      document.querySelectorAll(".screen-tab").forEach((el, i) => el.classList.toggle("active", i === idx));
+      if (idx === 0) {
+        replayAnim();
+      } else {
+        stopAnimLoop();
+      }
     }
 
     document.addEventListener("keydown", (e) => {
-      if (e.key === "ArrowRight") goSlide(currentSlide + 1);
-      if (e.key === "ArrowLeft") goSlide(currentSlide - 1);
+      if (e.key === "ArrowRight") showScreen(activeScreen + 1);
+      if (e.key === "ArrowLeft") showScreen(activeScreen - 1);
+      if (e.key === " " && activeScreen === 0) {
+        e.preventDefault();
+        replayAnim();
+      }
     });
 
-    // ==================== SLIDE 1 LOGIC ====================
-    let walkStep = 0;
-    let walkMode = "none";
+    // ==================== SCREEN 1: REAL HIGHWAY ANIMATION ====================
+    const REQUESTS = [
+      { id: 1, title: "orders.parquet (Chunk 1)", sub: "Scan 1 · 1st half of 256 MB file", gateTag: "orders",    color: "#3b82f6" },
+      { id: 2, title: "orders.parquet (Chunk 2)", sub: "Scan 1 · 2nd half (same file)",    gateTag: "orders",    color: "#06b6d4" },
+      { id: 3, title: "customers.parquet (New)",  sub: "Scan 2 · Join table (read once)", gateTag: "customers", color: "#f59e0b" }
+    ];
 
-    function setWalkStep(s) {
-      walkStep = s;
-      document.querySelectorAll(".walk-step-btn").forEach((b, i) => b.classList.toggle("active", i === s));
-      renderWalkthrough();
-    }
+    const ANIM_MODE_KEYS = ["cold", "cache", "warmup", "reactive", "proactive", "handle"];
 
-    function setWalkMode(m) {
-      walkMode = m;
-      ["none", "client", "client_warm", "all"].forEach(id => {
-        document.getElementById("wmode-" + id).classList.toggle("active", id === m);
-      });
-      renderWalkthrough();
-    }
-
-    function renderWalkthrough() {
-      // Costs in ms for [P1 build, P2 channel+route, P3 file open, P4 range read]
-      let p1 = 0, p2 = 0, p3 = 0, p4 = 8;
-      let s1State = "hit", s2State = "hit", s3State = "hit";
-      let note = "";
-
-      if (walkStep === 0) {
-        // Scan 1, orders Split 1 (Cold executor start)
-        if (walkMode === "none" || walkMode === "client") {
-          p1 = 906; p2 = 1324; p3 = 40;
-          s1State = "paid"; s2State = "paid"; s3State = "paid";
-          note = walkMode === "none"
-            ? "Cold Scan #1 builds a fresh Java gRPC client (~906 ms) + DirectPath channel/auth (~1,324 ms) + opens file (~40 ms)."
-            : "Cold Scan #1 still pays the initial ~2.23 s client setup once, then caches the Storage client for all later scans.";
-        } else if (walkMode === "client_warm") {
-          p1 = 0; p2 = 27; p3 = 40;
-          s1State = "bg"; s2State = "bg"; s3State = "paid";
-          note = "Tier 1 + warmUp(bucket) moved client build & DirectPath setup off the query path (~75 ms first read).";
-        } else {
-          p1 = 0; p2 = 27; p3 = 40;
-          s1State = "bg"; s2State = "bg"; s3State = "paid";
-          note = "Client warmed ahead of time; Split 1 pays one ~40 ms file stream open and puts BlobReadSession in the pool.";
-        }
-      } else if (walkStep === 1) {
-        // Scan 1, orders Split 2 (same 500 MB file, same scan!)
-        p1 = 0; p2 = 0;
-        s1State = "hit"; s2State = "hit";
-        if (walkMode === "all") {
-          p3 = 0; s3State = "hit";
-          note = "Split 2 reads row group 2 of the SAME 500 MB file → reuses pooled BlobReadSession (0 ms file open!).";
-        } else {
-          p3 = 40; s3State = "paid";
-          note = "Same scan reuses the client (0 ms setup), but Split 2 closed & reopened the file stream → pays 40 ms Spanner + IAM again.";
-        }
-      } else if (walkStep === 2) {
-        // Scan 2: customers table (same bucket, new Iceberg FileIO broadcast!)
-        if (walkMode === "none") {
-          p1 = 906; p2 = 1324; p3 = 40;
-          s1State = "paid"; s2State = "paid"; s3State = "paid";
-          note = "Without Client Caching, Iceberg's new FileIO broadcast builds ANOTHER cold gRPC client from scratch (+2,230 ms wasted!).";
-        } else if (walkMode === "all") {
-          p1 = 0; p2 = 0; p3 = 0;
-          s1State = "hit"; s2State = "hit"; s3State = "bg";
-          note = "Client Cache hits in <1 ms (0 ms client setup), and Bulk Open / Pool hides the file stream open!";
-        } else {
-          p1 = 0; p2 = 0; p3 = 40;
-          s1State = "hit"; s2State = "hit"; s3State = "paid";
-          note = "Client Cache HIT! Skips the entire 2,230 ms gRPC + DirectPath cold start. Only pays 40 ms for opening the new file.";
-        }
-      } else if (walkStep === 3) {
-        // Scan 3: 2nd Zonal Bucket on same executor
-        if (walkMode === "none") {
-          p1 = 906; p2 = 1390; p3 = 35;
-          s1State = "paid"; s2State = "paid"; s3State = "paid";
-          note = "No cache: rebuilds entire client + zonal subchannel from scratch (~2.33 s).";
-        } else if (walkMode === "client") {
-          p1 = 0; p2 = 126; p3 = 35;
-          s1State = "hit"; s2State = "paid"; s3State = "paid";
-          note = "Client Cache reuses parent channel, BUT first call to a 2nd Zonal bucket still pays +126 ms RLS + subchannel handshake!";
-        } else if (walkMode === "client_warm") {
-          p1 = 0; p2 = 0; p3 = 35;
-          s1State = "hit"; s2State = "bg"; s3State = "paid";
-          note = "warmUp(bucket2) pre-populated RLS routing & zonal subchannel → +126 ms cross-bucket penalty disappears.";
-        } else {
-          p1 = 0; p2 = 0; p3 = 0;
-          s1State = "hit"; s2State = "bg"; s3State = "hit";
-          note = "Both per-bucket routing and file session are warm → straight to 8 ms data transfer.";
-        }
+    const ANIM_MODES = {
+      cold: {
+        headline: "Without caching: Scan 2 reconnects (2.23 s), and every parquet read stops 40 ms at Gate 2.",
+        badge: "4,604 ms total",
+        badgeColor: "#ef4444",
+        preWarmGate1: false,
+        lookaheadGate2: false,
+        steps: [
+          { g1Ms: 2230, g1WaitSec: 1.45, g1AfterOpen: true,  g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 },
+          { g1Ms: 0,    g1WaitSec: 0,    g1AfterOpen: false, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 },
+          { g1Ms: 2230, g1WaitSec: 1.45, g1AfterOpen: true,  g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 }
+        ]
+      },
+      cache: {
+        headline: "Client Cache holds Gate 1 open for customers.parquet (+14.7% faster) — all 3 reads still stop at Gate 2.",
+        badge: "2,374 ms (−48%)",
+        badgeColor: "#2563eb",
+        preWarmGate1: false,
+        lookaheadGate2: false,
+        steps: [
+          { g1Ms: 2230, g1WaitSec: 1.45, g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 },
+          { g1Ms: 0,    g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 },
+          { g1Ms: 0,    g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 }
+        ]
+      },
+      warmup: {
+        headline: "Warm-Up opens Gate 1 before orders.parquet (Chunk 1) — only cold starts & new tokens benefit.",
+        badge: "171 ms",
+        badgeColor: "#0284c7",
+        preWarmGate1: true,
+        lookaheadGate2: false,
+        steps: [
+          { g1Ms: 27, g1WaitSec: 0.16, g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 },
+          { g1Ms: 0,  g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 },
+          { g1Ms: 0,  g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "closed", readMs: 8 }
+        ]
+      },
+      reactive: {
+        headline: "Bulk Open (Reactive Pool): Keeps live session open for orders.parquet (Chunk 2) in 0 ms — Regional + Zonal, 0 engine changes.",
+        badge: "131 ms",
+        badgeColor: "#10b981",
+        preWarmGate1: true,
+        lookaheadGate2: false,
+        steps: [
+          { g1Ms: 27, g1WaitSec: 0.16, g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "open",   readMs: 8 },
+          { g1Ms: 0,  g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 0,  g2WaitSec: 0,    g2TicketReopen: false, g2AfterState: "closed", readMs: 8 },
+          { g1Ms: 0,  g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "open",   readMs: 8 }
+        ]
+      },
+      proactive: {
+        headline: "Bulk Open (Proactive Pool): multiOpen pre-opens customers.parquet into Session Pool while reading orders — zero Gate 2 stops.",
+        badge: "91 ms (Fastest)",
+        badgeColor: "#0d9488",
+        preWarmGate1: true,
+        lookaheadGate2: true,
+        steps: [
+          { g1Ms: 27, g1WaitSec: 0.16, g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "open", readMs: 8 },
+          { g1Ms: 0,  g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 0,  g2WaitSec: 0,    g2TicketReopen: false, g2AfterState: "open", readMs: 8 },
+          { g1Ms: 0,  g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 0,  g2WaitSec: 0,    g2TicketReopen: false, g2AfterState: "open", readMs: 8 }
+        ]
+      },
+      handle: {
+        headline: "BidiReadHandle (Zonal only): Reopens evicted orders.parquet via +8 ms ticket — 0 savings on Regional or new files.",
+        badge: "139 ms (Zonal Only)",
+        badgeColor: "#d97706",
+        preWarmGate1: true,
+        lookaheadGate2: false,
+        steps: [
+          { g1Ms: 27, g1WaitSec: 0.16, g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "ticket", readMs: 8 },
+          { g1Ms: 0,  g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 8,  g2WaitSec: 0.26, g2TicketReopen: true,  g2AfterState: "closed", readMs: 8 },
+          { g1Ms: 0,  g1WaitSec: 0,    g1AfterOpen: true, g2Ms: 40, g2WaitSec: 0.55, g2TicketReopen: false, g2AfterState: "ticket", readMs: 8 }
+        ]
       }
-
-      const phases = [
-        { code: "Phase 1", name: "Build Client", ms: p1, state: s1State, target: "StorageOptions.grpc().getService()" },
-        { code: "Phase 2", name: "Connect & Bucket Route", ms: p2, state: s2State, target: "DirectPath ALTS + RLS + xDS" },
-        { code: "Phase 3", name: "Open File Stream", ms: p3, state: s3State, target: "Spanner Lookup + IAM Check" },
-        { code: "Phase 4", name: "Read Byte Ranges", ms: p4, state: "steady", target: "readVectored (steady 8 ms)" }
-      ];
-
-      const colorFor = (st) => {
-        if (st === "paid") return { bg: "rgba(239,68,68,0.12)", border: "#ef4444", badge: "#dc2626", tag: "Paid Inline" };
-        if (st === "bg") return { bg: "rgba(245,158,11,0.14)", border: "#f59e0b", badge: "#d97706", tag: "Pre-Warmed" };
-        if (st === "hit") return { bg: "rgba(16,185,129,0.13)", border: "#10b981", badge: "#059669", tag: "0 ms Hit" };
-        return { bg: "rgba(100,116,139,0.12)", border: "#64748b", badge: "#475569", tag: "Data Transfer" };
-      };
-
-      const grid = document.getElementById("walkPhaseGrid");
-      grid.innerHTML = phases.map(p => {
-        const c = colorFor(p.state);
-        return `
-          <div class="node-anim p-3.5 rounded-xl border-2 flex flex-col justify-between gap-2"
-               style="background:${c.bg}; border-color:${c.border}">
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-bold uppercase tracking-wide" style="color:${c.badge}">${p.code}</span>
-              <span class="px-2 py-0.5 rounded text-xs font-bold" style="background:var(--card); color:${c.badge}">${c.tag}</span>
-            </div>
-            <div>
-              <div class="text-base font-bold">${p.name}</div>
-              <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${p.target}</div>
-            </div>
-            <div class="text-xl font-extrabold" style="color:${c.badge}">${p.ms} ms</div>
-          </div>
-        `;
-      }).join("");
-
-      const total = p1 + p2 + p3 + p4;
-      const maxScale = 2350;
-      const bar = document.getElementById("walkTotalBar");
-      const segs = [
-        { ms: p1, color: "#ef4444", label: `Build ${p1}ms` },
-        { ms: p2, color: s2State === "bg" ? "#f59e0b" : "#dc2626", label: `Route ${p2}ms` },
-        { ms: p3, color: "#d97706", label: `Open ${p3}ms` },
-        { ms: p4, color: "#10b981", label: `Read ${p4}ms` }
-      ].filter(s => s.ms > 0);
-
-      bar.innerHTML = segs.map(s => {
-        const pct = Math.max((s.ms / maxScale) * 100, s.ms > 0 ? 3.5 : 0);
-        return `<div class="bar-anim h-full flex items-center justify-center text-xs font-bold text-white px-1 truncate"
-                     style="width:${pct}%; background:${s.color}" title="${s.label}">
-                  ${pct > 9 ? s.label : ""}
-                </div>`;
-      }).join("");
-
-      document.getElementById("walkCalloutText").textContent = note;
-      document.getElementById("walkTotalMs").textContent = `Total Time to First Data: ${total.toLocaleString()} ms`;
-    }
-
-    // ==================== SLIDE 2 LOGIC (SIMULATOR) ====================
-    let simPreset = "tpcds";
-    let simBucket = "regional";
-    let simToggles = {
-      clientCache: true,
-      warmUp: false,
-      sessionPool: false,
-      bulkOpen: false,
-      handleToken: false
     };
 
-    function setSimPreset(p) {
-      simPreset = p;
-      ["tpcds", "single100", "vended"].forEach(id => {
-        document.getElementById("preset-" + id).classList.toggle("active", id === p);
+    let currentModeKey = "cold";
+    let speedMul = 1;
+    let rafId = null;
+    let animStartTs = null;
+    let timelineEvents = [];
+    let totalDurationSec = 0;
+
+    function toggleSlowMo() {
+      speedMul = speedMul === 1 ? 0.5 : 1;
+      document.getElementById("slowBtn").textContent = `Speed: ${speedMul}×`;
+      replayAnim();
+    }
+
+    function selectAnimMode(modeKey) {
+      currentModeKey = modeKey;
+      ANIM_MODE_KEYS.forEach(k => {
+        document.getElementById("amode-" + k).classList.toggle("active", k === modeKey);
       });
-      renderSimulator();
+      replayAnim();
     }
 
-    function setSimBucket(b) {
-      simBucket = b;
-      ["regional", "zonal"].forEach(id => {
-        document.getElementById("bkt-" + id).classList.toggle("active", id === b);
+    function stopAnimLoop() {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    }
+
+    function idleGate2Label(g2State, modeKey, m, nextReqIdx) {
+      if (g2State === "open") {
+        return (m.lookaheadGate2 && nextReqIdx >= 2)
+          ? "Pre-Opened (customers) · 0 ms"
+          : "Pooled (orders) · 0 ms";
+      }
+      if (g2State === "ticket") {
+        return "Zonal Ticket Cached · +8 ms";
+      }
+      if (modeKey === "handle" && nextReqIdx === 2) {
+        return "No Ticket (New) · +40 ms";
+      }
+      return "Closed · +40 ms";
+    }
+
+    function buildTimeline(modeKey) {
+      const m = ANIM_MODES[modeKey];
+      const segMove = 0.38;
+      let t = 0.12;
+      let simMs = 0;
+      const seq = [];
+
+      let g1State = m.preWarmGate1 ? "open" : "closed";
+      let g2State = "closed";
+
+      m.steps.forEach((st, idx) => {
+        const req = REQUESTS[idx];
+
+        // Segment 1: Spark (278) -> Gate 1 (448)
+        const xStopG1 = st.g1WaitSec > 0 ? 412 : 448;
+        seq.push({
+          type: "move", reqIdx: idx, t0: t, t1: t + segMove,
+          x0: 278, x1: xStopG1,
+          sim0: simMs, sim1: simMs,
+          g1State, g2State,
+          g1Label: g1State === "open"
+            ? (m.preWarmGate1 && idx === 0 ? "Pre-Warmed · +27 ms" : "Held Open · 0 ms")
+            : "Closed · +2,230 ms",
+          g2Label: idleGate2Label(g2State, modeKey, m, idx),
+          lookaheadProg: (m.lookaheadGate2 && idx === 1) ? [0.0, 0.33] : null
+        });
+        t += segMove;
+
+        // Wait at Gate 1 if > 0
+        if (st.g1WaitSec > 0) {
+          seq.push({
+            type: "wait", gate: 1, reqIdx: idx, t0: t, t1: t + st.g1WaitSec,
+            x: xStopG1,
+            waitLabel: `+${st.g1Ms.toLocaleString()} ms`,
+            waitColor: m.preWarmGate1 ? "#0284c7" : "#ef4444",
+            sim0: simMs, sim1: simMs + st.g1Ms,
+            g1State: m.preWarmGate1 ? "open" : "closed",
+            g2State,
+            g1Label: m.preWarmGate1 ? "Pre-Warmed · +27 ms" : "Opening · +2,230 ms",
+            g2Label: idleGate2Label(g2State, modeKey, m, idx)
+          });
+          t += st.g1WaitSec;
+          simMs += st.g1Ms;
+          g1State = "open";
+        }
+
+        // Segment 2: Gate 1 -> Gate 2 (704)
+        const xStopG2 = st.g2WaitSec > 0 ? 668 : 704;
+        seq.push({
+          type: "move", reqIdx: idx, t0: t, t1: t + segMove,
+          x0: xStopG1, x1: xStopG2,
+          sim0: simMs, sim1: simMs,
+          g1State: "open", g2State,
+          g1Label: st.g1AfterOpen ? "Held Open · 0 ms" : "Open (Scan 1)",
+          g2Label: idleGate2Label(g2State, modeKey, m, idx),
+          lookaheadProg: (m.lookaheadGate2 && idx === 1) ? [0.33, 0.67] : null
+        });
+        t += segMove;
+
+        // Wait at Gate 2 if > 0
+        if (st.g2WaitSec > 0) {
+          seq.push({
+            type: "wait", gate: 2, reqIdx: idx, t0: t, t1: t + st.g2WaitSec,
+            x: xStopG2,
+            waitLabel: st.g2TicketReopen ? "+8 ms Ticket" : `+${st.g2Ms} ms`,
+            waitColor: st.g2TicketReopen ? "#d97706" : "#ef4444",
+            sim0: simMs, sim1: simMs + st.g2Ms,
+            g1State: "open",
+            g2State: st.g2TicketReopen ? "ticket" : "closed",
+            g1Label: st.g1AfterOpen ? "Held Open · 0 ms" : "Open (Scan 1)",
+            g2Label: st.g2TicketReopen
+              ? "Ticket Reopen · +8 ms"
+              : `Opening ${req.gateTag} · +40 ms`
+          });
+          t += st.g2WaitSec;
+          simMs += st.g2Ms;
+          g2State = "open";
+        }
+
+        // Segment 3: Gate 2 -> Read Data (872)
+        seq.push({
+          type: "move", reqIdx: idx, t0: t, t1: t + segMove,
+          x0: xStopG2, x1: 872,
+          sim0: simMs, sim1: simMs + st.readMs,
+          g1State: "open", g2State: "open",
+          g1Label: st.g1AfterOpen ? "Held Open · 0 ms" : "Open (Scan 1)",
+          g2Label: st.g2AfterState === "open"
+            ? (idx === 1 && m.lookaheadGate2 ? "Pre-Opened (customers) · 0 ms" : `Pooled (${req.gateTag}) · 0 ms`)
+            : (st.g2AfterState === "ticket" ? "Minting Zonal Ticket · 8 ms" : "Reading · 8 ms"),
+          lookaheadProg: (m.lookaheadGate2 && idx === 1) ? [0.67, 1.0] : null
+        });
+        t += segMove;
+        simMs += st.readMs;
+
+        // Post-packet gate states
+        g1State = st.g1AfterOpen ? "open" : "closed";
+        g2State = st.g2AfterState;
+
+        // Brief gap before next packet
+        seq.push({
+          type: "gap", reqIdx: idx, t0: t, t1: t + 0.14,
+          sim0: simMs, sim1: simMs,
+          g1State, g2State,
+          g1Label: g1State === "open" ? "Held Open · 0 ms" : "Closed (Client Dropped!)",
+          g2Label: idleGate2Label(g2State, modeKey, m, idx + 1)
+        });
+        t += 0.14;
       });
-      renderSimulator();
+
+      return { seq, totalT: t, finalMs: simMs };
     }
 
-    function flipToggle(key) {
-      simToggles[key] = !simToggles[key];
-      renderSimulator();
+    function setGateVisual(gateNum, state, label) {
+      const door = document.getElementById(`g${gateNum}Door`);
+      const rect = document.getElementById(`g${gateNum}PillRect`);
+      const text = document.getElementById(`g${gateNum}PillText`);
+
+      // Door positions: open=115 (lifted), ticket=142 (half-lifted amber), closed=169 (blocking road)
+      const targetY = state === "open" ? 115 : (state === "ticket" ? 142 : 169);
+      const curY = parseFloat(door.getAttribute("y") || "169");
+      const nextY = curY + (targetY - curY) * 0.28;
+      door.setAttribute("y", nextY.toFixed(1));
+
+      const col = state === "open" ? "#10b981" : (state === "ticket" ? "#f59e0b" : "#ef4444");
+      const bg  = state === "open" ? "rgba(16,185,129,0.16)" : (state === "ticket" ? "rgba(245,158,11,0.18)" : "rgba(239,68,68,0.15)");
+
+      door.setAttribute("fill", col);
+      rect.setAttribute("fill", bg);
+      rect.setAttribute("stroke", col);
+      text.setAttribute("fill", col);
+      text.textContent = label;
     }
 
-    function renderSimulator() {
-      // Workload parameters on 1 executor
-      const cfg = {
-        tpcds: {
-          desc: "Executor Model: 6 Table Scans · 40 File Opens (10 files × 500 MB = 4 splits/file)",
-          scans: 6,
-          totalOpens: 40,
-          uniqueFiles: 10,
-          reusableOpens: 30 // 30 of 40 opens are repeat opens on same executor
-        },
-        single100: {
-          desc: "Executor Model: 1 Table Scan · 40 File Opens (40 files × 100 MB, 1 split/file, read once)",
-          scans: 1,
-          totalOpens: 40,
-          uniqueFiles: 40,
-          reusableOpens: 0 // 0 repeat opens!
-        },
-        vended: {
-          desc: "Executor Model: 6 Table Scans w/ Per-Scan Vended Tokens · 40 File Opens (500 MB files)",
-          scans: 6,
-          totalOpens: 40,
-          uniqueFiles: 10,
-          reusableOpens: 20 // within-scan reuse only
-        }
-      }[simPreset];
-
-      const openCost = simBucket === "zonal" ? 28 : 38;
-      const coldClientCost = simBucket === "zonal" ? 2310 : 2230;
-      const warmClientCost = 75; // with Tier1 + warmUp(bucket)
-      const dataTransferMs = 1200; // steady P4 transfer + tail baseline
-
-      // Baseline (nothing enabled)
-      const baseSetupMs = cfg.scans * coldClientCost;
-      const baseOpenMs = cfg.totalOpens * openCost;
-      const baseTotal = baseSetupMs + baseOpenMs + dataTransferMs;
-
-      // Calculate optimized P1+P2 setup
-      let optSetupMs = baseSetupMs;
-      const cacheEffectiveAcrossScans = simToggles.clientCache && simPreset !== "vended";
-
-      if (cacheEffectiveAcrossScans && simToggles.warmUp) {
-        optSetupMs = warmClientCost; // 1st scan warmed, 2..N cached (0ms)
-      } else if (cacheEffectiveAcrossScans && !simToggles.warmUp) {
-        optSetupMs = coldClientCost; // paid once on Scan 1, 0ms on Scans 2..N
-      } else if (!cacheEffectiveAcrossScans && simToggles.warmUp) {
-        optSetupMs = cfg.scans * warmClientCost; // every new client/token gets fast warmup
-      }
-
-      // Calculate optimized P3 file opens
-      let firstOpens = cfg.totalOpens - cfg.reusableOpens;
-      let repeatOpens = cfg.reusableOpens;
-
-      // Repeat opens:
-      let repeatOpenUnitCost = openCost;
-      if (simToggles.sessionPool) {
-        repeatOpenUnitCost = 0; // 0 RTT live session hit
-      } else if (simToggles.handleToken && simBucket === "zonal") {
-        repeatOpenUnitCost = 8; // 1 fast RTT skipping Spanner/IAM on Zonal Rapid
-      }
-
-      // First-time opens:
-      let firstOpenUnitCost = openCost;
-      if (simToggles.bulkOpen) {
-        // First file in partition pays inline, subsequent files hidden in background (~85% hidden)
-        firstOpenUnitCost = Math.round(openCost * 0.18);
-      }
-
-      const optOpenMs = (firstOpens * firstOpenUnitCost) + (repeatOpens * repeatOpenUnitCost);
-      const optTotal = optSetupMs + optOpenMs + dataTransferMs;
-
-      // Status pill per feature row (shows WHY something works or adds 0ms!)
-      const rows = [
-        {
-          key: "clientCache",
-          name: "Client Caching",
-          tag: "Shipped",
-          spans: [true, true, false, false],
-          color: "#2563eb",
-          status: simPreset === "vended"
-            ? { text: "Misses across scans (new token)", warn: true }
-            : (cfg.scans === 1 ? { text: "1 scan only (helps Scan 2+)", warn: true } : { text: `Skips ${cfg.scans - 1}× rebuilds`, warn: false })
-        },
-        {
-          key: "warmUp",
-          name: "Channel Warm-Up (Ajay)",
-          tag: "SDK Proposal",
-          spans: [true, true, false, false],
-          color: "#3b82f6",
-          status: (cacheEffectiveAcrossScans && cfg.scans > 1)
-            ? { text: "Only helps Cold Scan #1", warn: true }
-            : { text: "Cuts 2.2s cold start → 75ms", warn: false }
-        },
-        {
-          key: "sessionPool",
-          name: "Live Session Pool",
-          tag: "analytics-core",
-          spans: [false, false, true, false],
-          color: "#059669",
-          status: cfg.reusableOpens === 0
-            ? { text: "0% Hit Rate (files read once!)", warn: true }
-            : { text: `0 ms on ${cfg.reusableOpens} repeat opens`, warn: false }
-        },
-        {
-          key: "bulkOpen",
-          name: "Proactive Bulk Open",
-          tag: "Needs Lookahead",
-          spans: [false, false, true, false],
-          color: "#0d9488",
-          status: { text: `Hides ${firstOpens} first-time opens`, warn: false }
-        },
-        {
-          key: "handleToken",
-          name: "Read Handle Token",
-          tag: "Zonal Only",
-          spans: [false, false, true, false],
-          color: "#d97706",
-          status: simBucket === "regional"
-            ? { text: "0 ms — Regional has no handle", warn: true }
-            : (simToggles.sessionPool
-                ? { text: "Fallback after pool eviction", warn: true }
-                : (cfg.reusableOpens === 0 ? { text: "0% Hit Rate (files read once)", warn: true } : { text: "Fast 1-RTT Zonal reopen", warn: false }))
-        }
-      ];
-
-      const container = document.getElementById("swimlaneRows");
-      const laneHtml = rows.map(r => {
-        const on = simToggles[r.key];
-        const cells = r.spans.map(covered => {
-          if (!covered) {
-            return `<div class="col-span-2 h-10 rounded-lg border border-dashed border-[var(--border)] opacity-35"></div>`;
-          }
-          const bg = on
-            ? (r.status.warn ? "rgba(245,158,11,0.16)" : `${r.color}22`)
-            : "rgba(148,163,184,0.10)";
-          const brd = on ? (r.status.warn ? "#f59e0b" : r.color) : "var(--border)";
-          const txtColor = on ? (r.status.warn ? "#d97706" : r.color) : "var(--muted-foreground)";
-          return `
-            <div class="col-span-2 h-10 rounded-lg border-2 flex items-center justify-center px-2 text-xs font-bold truncate"
-                 style="background:${bg}; border-color:${brd}; color:${txtColor}">
-              ${on ? "Active" : "Off"}
-            </div>
-          `;
-        }).join("");
-
+    function renderDockLists(doneCount, activeIdx, modeSteps) {
+      const qHtml = REQUESTS.map((r, i) => {
+        const state = i < doneCount ? "✓" : (i === activeIdx ? "●" : "·");
+        const opacity = i < doneCount ? "0.5" : "1";
+        const y = 138 + i * 50;
         return `
-          <div onclick="flipToggle('${r.key}')"
-               class="grid grid-cols-12 gap-2 items-center p-2 rounded-xl border border-[var(--border)] cursor-pointer hover:border-blue-400 transition">
-            <div class="col-span-4 flex items-center justify-between gap-2 pr-2">
-              <div class="flex items-center gap-2.5 min-w-0">
-                <div class="toggle-track ${on ? 'on' : ''}"><div class="toggle-thumb"></div></div>
-                <div class="min-w-0">
-                  <div class="text-xs md:text-sm font-bold truncate">${r.name}</div>
-                  <div class="text-xs ${r.status.warn && on ? 'font-semibold' : 'text-[var(--muted-foreground)]'} truncate"
-                       style="${r.status.warn && on ? 'color:#d97706' : ''}">
-                    ${on ? r.status.text : r.tag}
-                  </div>
-                </div>
-              </div>
-            </div>
-            ${cells}
-          </div>
+          <g opacity="${opacity}">
+            <rect x="22" y="${y - 20}" width="246" height="42" rx="9"
+                  fill="${i === activeIdx ? 'color-mix(in srgb, ' + r.color + ' 16%, var(--card))' : 'transparent'}"
+                  stroke="${i === activeIdx ? r.color : 'var(--border)'}" stroke-width="1.3" />
+            <circle cx="38" cy="${y + 1}" r="9" fill="${r.color}" />
+            <text x="38" y="${y + 5}" text-anchor="middle" font-size="12" font-weight="800" fill="#ffffff">${r.id}</text>
+            <text x="54" y="${y - 2}" font-size="12.5" font-weight="700" fill="var(--foreground)">${r.title}</text>
+            <text x="54" y="${y + 13}" font-size="12" fill="var(--muted-foreground)">${r.sub}</text>
+            <text x="256" y="${y + 5}" text-anchor="end" font-size="13" font-weight="800"
+                  fill="${i < doneCount ? '#10b981' : (i === activeIdx ? r.color : 'var(--muted-foreground)')}">${state}</text>
+          </g>
         `;
       }).join("");
+      document.getElementById("sparkQueueRows").innerHTML = qHtml;
 
-      // Static gray row for Phase 4 Read Hedging
-      const p4Row = `
-        <div class="grid grid-cols-12 gap-2 items-center p-2 rounded-xl border border-dashed border-[var(--border)] opacity-80">
-          <div class="col-span-4 flex items-center gap-2.5 pl-1">
-            <span class="px-2 py-0.5 rounded text-xs font-bold" style="background:rgba(220,38,38,0.14); color:#dc2626">P4 Gap</span>
-            <div>
-              <div class="text-xs md:text-sm font-bold">Read Hedging</div>
-              <div class="text-xs text-[var(--muted-foreground)]">Separate SDK track (mid-stream stalls)</div>
-            </div>
-          </div>
-          <div class="col-span-2 h-9 rounded-lg border border-dashed border-[var(--border)] opacity-30"></div>
-          <div class="col-span-2 h-9 rounded-lg border border-dashed border-[var(--border)] opacity-30"></div>
-          <div class="col-span-2 h-9 rounded-lg border border-dashed border-[var(--border)] opacity-30"></div>
-          <div class="col-span-2 h-9 rounded-lg border-2 flex items-center justify-center text-xs font-bold"
-               style="border-color:#dc2626; background:rgba(220,38,38,0.10); color:#dc2626">
-            Fixes 2.07× Stall
-          </div>
-        </div>
-      `;
-
-      container.innerHTML = laneHtml + p4Row;
-
-      // Render Bars
-      document.getElementById("simWorkloadDesc").textContent = cfg.desc;
-      const savedPct = Math.round(((baseTotal - optTotal) / baseTotal) * 100);
-      document.getElementById("simSavingsBadge").textContent =
-        savedPct > 0 ? `−${savedPct}% Overhead (${((baseTotal - optTotal)/1000).toFixed(1)}s saved)` : "0% Saved";
-
-      document.getElementById("simBaseLabel").textContent =
-        `${(baseTotal / 1000).toFixed(2)}s  (Client: ${(baseSetupMs/1000).toFixed(2)}s · File Opens: ${(baseOpenMs/1000).toFixed(2)}s · Data: ${(dataTransferMs/1000).toFixed(2)}s)`;
-      document.getElementById("simOptLabel").textContent =
-        `${(optTotal / 1000).toFixed(2)}s  (Client: ${(optSetupMs/1000).toFixed(2)}s · File Opens: ${(optOpenMs/1000).toFixed(2)}s · Data: ${(dataTransferMs/1000).toFixed(2)}s)`;
-
-      const renderBar = (setup, open, data) => {
-        const pSetup = (setup / baseTotal) * 100;
-        const pOpen = (open / baseTotal) * 100;
-        const pData = (data / baseTotal) * 100;
+      const dHtml = REQUESTS.map((r, i) => {
+        const done = i < doneCount;
+        const st = modeSteps[i];
+        const reqTotal = st.g1Ms + st.g2Ms + st.readMs;
+        const y = 138 + i * 50;
         return `
-          <div class="bar-anim h-full" style="width:${pSetup}%; background:#2563eb" title="Client Setup ${setup}ms"></div>
-          <div class="bar-anim h-full" style="width:${pOpen}%; background:#059669" title="File Opens ${open}ms"></div>
-          <div class="bar-anim h-full" style="width:${pData}%; background:#64748b" title="Data Transfer ${data}ms"></div>
+          <g opacity="${done ? '1' : '0.32'}">
+            <rect x="882" y="${y - 20}" width="156" height="42" rx="9"
+                  fill="${done ? 'rgba(16,185,129,0.14)' : 'transparent'}"
+                  stroke="${done ? '#10b981' : 'var(--border)'}" stroke-width="1.3" />
+            <text x="894" y="${y + 5}" font-size="12.5" font-weight="700" fill="var(--foreground)">#${r.id}</text>
+            <text x="1028" y="${y + 5}" text-anchor="end" font-size="12.5" font-weight="800"
+                  fill="${done ? '#10b981' : 'var(--muted-foreground)'}">
+              ${done ? reqTotal.toLocaleString() + " ms ✓" : "—"}
+            </text>
+          </g>
         `;
-      };
-
-      document.getElementById("simBaseBar").innerHTML = renderBar(baseSetupMs, baseOpenMs, dataTransferMs);
-      document.getElementById("simOptBar").innerHTML = renderBar(optSetupMs, optOpenMs, dataTransferMs);
-
-      let notice = "";
-      if (simToggles.handleToken && simBucket === "regional") {
-        notice = "Note: Regional Standard buckets do not mint BidiReadHandle tokens — toggle Zonal Rapid or use Live Session Pool.";
-      } else if (simToggles.sessionPool && simPreset === "single100") {
-        notice = "Note: On ≤128 MB single-pass files, reactive Session Pool has 0% hits — enable Proactive Bulk Open!";
-      } else if (simToggles.clientCache && simPreset === "vended" && !simToggles.warmUp) {
-        notice = "Note: Per-scan vended tokens miss Client Cache across scans — combine with Channel Warm-Up!";
-      }
-      document.getElementById("simNotice").textContent = notice;
+      }).join("");
+      document.getElementById("doneRows").innerHTML = dHtml;
     }
 
-    // ==================== SLIDE 3 LOGIC (EXACT SVG DUAL-VENN) ====================
-    const VENN_INFO = {
-      A_left: {
-        group: "Group A · Left Only (Client Caching Only)",
+    function replayAnim() {
+      stopAnimLoop();
+      const m = ANIM_MODES[currentModeKey];
+      const built = buildTimeline(currentModeKey);
+      timelineEvents = built.seq;
+      totalDurationSec = built.totalT;
+
+      // Update bottom takeaway strip
+      document.getElementById("animHeadline").textContent = m.headline;
+      const pill = document.getElementById("animDeltaPill");
+      pill.textContent = m.badge;
+      pill.style.background = `color-mix(in srgb, ${m.badgeColor} 18%, var(--card))`;
+      pill.style.color = `color-mix(in srgb, ${m.badgeColor} 76%, var(--foreground))`;
+      document.getElementById("animTakeawayBar").style.borderLeftColor = m.badgeColor;
+
+      // Lookahead visibility
+      document.getElementById("lookaheadGroup").setAttribute("opacity", m.lookaheadGate2 ? "1" : "0");
+
+      // Reset initial doors immediately
+      document.getElementById("g1Door").setAttribute("y", m.preWarmGate1 ? "115" : "169");
+      document.getElementById("g2Door").setAttribute("y", "169");
+
+      animStartTs = null;
+      rafId = requestAnimationFrame(stepAnimFrame);
+    }
+
+    function stepAnimFrame(ts) {
+      if (animStartTs === null) animStartTs = ts;
+      const elapsedSec = ((ts - animStartTs) / 1000) * speedMul;
+      const m = ANIM_MODES[currentModeKey];
+
+      let ev = timelineEvents.find(e => elapsedSec >= e.t0 && elapsedSec < e.t1);
+      const packetEl = document.getElementById("activePacket");
+      const waitRing = document.getElementById("waitRing");
+      const waitBub  = document.getElementById("waitBubble");
+      const waitRect = document.getElementById("waitBubbleRect");
+      const pulse    = document.getElementById("lookaheadPulse");
+
+      if (!ev) {
+        if (elapsedSec >= totalDurationSec) {
+          packetEl.setAttribute("opacity", "0");
+          pulse.setAttribute("opacity", "0");
+          const last = timelineEvents[timelineEvents.length - 1];
+          setGateVisual(1, last.g1State, last.g1State === "open" ? "Held Open · 0 ms" : "Closed");
+          setGateVisual(2, last.g2State, last.g2Label);
+          document.getElementById("g1Door").setAttribute("y", last.g1State === "open" ? "115" : "169");
+          document.getElementById("g2Door").setAttribute("y", last.g2State === "open" ? "115" : (last.g2State === "ticket" ? "142" : "169"));
+          document.getElementById("liveTimer").textContent = `${last.sim1.toLocaleString()} ms`;
+          renderDockLists(3, -1, m.steps);
+          rafId = null;
+          return;
+        }
+        ev = timelineEvents[0];
+      }
+
+      const p = Math.min(1, Math.max(0, (elapsedSec - ev.t0) / Math.max(0.001, ev.t1 - ev.t0)));
+      const simNow = Math.round(ev.sim0 + (ev.sim1 - ev.sim0) * p);
+      document.getElementById("liveTimer").textContent = `${simNow.toLocaleString()} ms`;
+
+      setGateVisual(1, ev.g1State, ev.g1Label);
+      setGateVisual(2, ev.g2State, ev.g2Label);
+
+      const doneSoFar = ev.type === "gap" ? ev.reqIdx + 1 : ev.reqIdx;
+      renderDockLists(doneSoFar, ev.type === "gap" ? -1 : ev.reqIdx, m.steps);
+
+      // Lookahead pulse animation along quadratic Bezier M 278 248 Q 491 314 704 232
+      if (ev.lookaheadProg) {
+        const lp = ev.lookaheadProg[0] + (ev.lookaheadProg[1] - ev.lookaheadProg[0]) * p;
+        const u = 1 - lp;
+        const px = u * u * 278 + 2 * u * lp * 491 + lp * lp * 704;
+        const py = u * u * 248 + 2 * u * lp * 314 + lp * lp * 232;
+        pulse.setAttribute("cx", px.toFixed(1));
+        pulse.setAttribute("cy", py.toFixed(1));
+        pulse.setAttribute("opacity", "1");
+      } else {
+        pulse.setAttribute("opacity", "0");
+      }
+
+      if (ev.type === "gap") {
+        packetEl.setAttribute("opacity", "0");
+      } else {
+        const req = REQUESTS[ev.reqIdx];
+        const ease = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+        const cx = ev.type === "move" ? (ev.x0 + (ev.x1 - ev.x0) * ease) : ev.x;
+
+        packetEl.setAttribute("opacity", "1");
+        packetEl.setAttribute("transform", `translate(${cx.toFixed(1)}, 192)`);
+        document.getElementById("packetBall").setAttribute("fill", req.color);
+        document.getElementById("packetNum").textContent = String(req.id);
+
+        if (ev.type === "wait") {
+          const dash = 132 * (1 - p);
+          const wCol = ev.waitColor || "#ef4444";
+          waitRing.setAttribute("stroke", wCol);
+          waitRing.setAttribute("stroke-dashoffset", dash.toFixed(1));
+          waitRing.setAttribute("opacity", "1");
+          waitRect.setAttribute("fill", wCol);
+          waitBub.setAttribute("opacity", "1");
+          document.getElementById("waitBubbleText").textContent = ev.waitLabel;
+        } else {
+          waitRing.setAttribute("opacity", "0");
+          waitBub.setAttribute("opacity", "0");
+        }
+      }
+
+      rafId = requestAnimationFrame(stepAnimFrame);
+    }
+
+    // ==================== SCREEN 2: SPACIOUS ZERO-OVERLAP VENNS ====================
+    const VENN_SLICES = {
+      g1_left: {
+        badge: "Gate 1 · Client Cache Only",
         color: "#2563eb",
-        title: "Eliminates Rebuilding Storage & Analytics Caches on Scans 2..N",
-        example: "Example: TPC-DS runs 103 queries (hundreds of table scans) with the same VM credential.",
-        why: "Warm-up alone still builds a fresh Storage object (+906 ms) if clients aren't reused; Client Caching skips creation completely (&lt;1 ms) and shares Parquet footer & small-object caches.",
-        action: "Already shipped on branch (+14.7% 1 TB / +8.3% 10 TB BiDi scan speedup)."
+        example: "100+ queries with the same credential skip 906 ms client rebuilds and share Parquet footer caches.",
+        decision: "Shipped (+14.7% 1 TB scan speedup)."
       },
-      A_mid: {
-        group: "Group A · Center Overlap (Both Fix This — Merge Zone)",
+      g1_mid: {
+        badge: "Gate 1 · Overlap (Merge Zone)",
         color: "#0284c7",
-        title: "Warm gRPC Channel, DirectPath Auth & Bucket Routing on Repeat Scans",
-        example: "Example: Scans 2..6 hitting gs://sales-bucket on an already-used executor.",
-        why: "Once Client Caching keeps one client alive, the channel and RLS route stay warm automatically — doing 95% of what Warm-Up would do on long workloads.",
-        action: "Do NOT treat as double scan-time savings; merge Warm-Up as a cache-miss hook."
+        example: "Scans 2..N on the same bucket already keep the connection warm via Client Cache.",
+        decision: "Do NOT double-count — merge Warm-Up into Client Cache misses."
       },
-      A_right: {
-        group: "Group A · Right Only (Channel Warm-Up Unique Value)",
+      g1_right: {
+        badge: "Gate 1 · Warm-Up Unique Value",
         color: "#d97706",
-        title: "Cold Scan #1, 2nd Bucket First Touch, & Per-Scan Vended Tokens",
-        example: "Example: Iceberg REST Catalog vends a fresh downscoped token per scan plan → Client Cache misses every scan!",
-        why: "Client Caching cannot share a Storage client across different tokens today. SDK Tier 1 + prefix-aware warmUp cuts every cold client miss from ~2.3 s → ~75 ms.",
-        action: "Trigger background warmUp(bucket) inside Client Cache on every cache miss."
+        example: "Cold Scan #1, touching a 2nd bucket, or per-scan vended catalog tokens (2.3 s → 75 ms).",
+        decision: "Trigger warmUp(bucket) asynchronously on Client Cache miss."
       },
-      B_left: {
-        group: "Group B · Left Only (Reactive Session / Handle Cache)",
+      g2_left: {
+        badge: "Gate 2 · Bulk Open Only",
         color: "#059669",
-        title: "Multi-Split Large Files (>128 MB), Self-Joins/CTEs, & Repeat Queries — Zero Engine Changes",
-        example: "Example: 500 MB Parquet file split into 4 tasks on the same executor, or dimension tables read across CTEs.",
-        why: "Requires zero Spark or Iceberg planner changes! Live BlobReadSession pooling works on BOTH Regional Standard and Zonal Rapid buckets (-17% scan time in Connector 10 TB POC).",
-        action: "Build bounded BlobReadSession pool inside LeasedClientEntry in gcs-analytics-core first."
+        example: "Regional buckets have no ticket, and Proactive Pool pre-opens read-once (≤128 MB) files on first touch.",
+        decision: "Fund Reactive + Proactive Session Pool (covers Regional + Zonal)."
       },
-      B_mid: {
-        group: "Group B · Center Overlap (Both Help)",
+      g2_mid: {
+        badge: "Gate 2 · Overlap (Merge Zone)",
         color: "#0d9488",
-        title: "Multi-Split or Repeated Files When Engine Lookahead Also Exists",
-        example: "Example: Dataproc Spark with multiOpen enabled scanning 500 MB Parquet files.",
-        why: "Proactive prewarm hides Split #1's open in the background, and the Session Pool reuses that live stream for Splits #2–#4 without reopening.",
-        action: "In go/connector-bidi-bulk-open, multiOpen + CHANNEL_POOL already share one single pool."
+        example: "Zonal workloads with ≤100 active files already get 0 ms reuse from Bulk Open's Reactive Session Pool.",
+        decision: "Do NOT double-count — live Session Pool (0 ms) beats ticket reopen (~8 ms)."
       },
-      B_right: {
-        group: "Group B · Right Only (Proactive Bulk Open Unique Value)",
+      g2_right: {
+        badge: "Gate 2 · BidiReadHandle Only",
         color: "#ea580c",
-        title: "Single-Pass Scans of ≤128 MB Files (Touched Once Only)",
-        example: "Example: One batch query scans 1,000 × 100 MB Parquet files (1 split per file, never reopened).",
-        why: "Reactive caching gets a 0% hit rate when every file is opened once! Only background pre-opening of files 2..N while reading file 1 hides the ~35 ms open cost (-15.7% in Dataproc 1 TB POC).",
-        action: "Requires adding task-level file lookahead in Iceberg's reader + skipping small-object cache hits."
+        example: "Zonal Rapid scans cycling >100 files within 5 min reopen evicted streams in ~8 ms instead of 40 ms.",
+        decision: "Low priority separate SDK cache — wait until after Bulk Open ships."
       }
     };
 
-    let selectedVenn = "A_right";
+    let activeVennKey = "g2_mid";
 
-    function buildVennSvg(svgId, cx1, cx2, cy, r, labels, keys, colors) {
+    function drawCleanVenn(svgId, labels, keys, colors) {
+      // Exact symmetric geometry: cx1=210, cx2=330, cy=160, r=120 -> left=120px, center=120px, right=120px
+      const cx1 = 210, cx2 = 330, cy = 160, r = 120;
       const xm = (cx1 + cx2) / 2;
       const dx = (cx2 - cx1) / 2;
       const dy = Math.sqrt(r * r - dx * dx);
-      const yTop = (cy - dy).toFixed(2);
-      const yBot = (cy + dy).toFixed(2);
+      const yTop = (cy - dy).toFixed(1);
+      const yBot = (cy + dy).toFixed(1);
 
-      const pathLeft = `M ${xm} ${yTop} A ${r} ${r} 0 1 0 ${xm} ${yBot} A ${r} ${r} 0 0 1 ${xm} ${yTop} Z`;
-      const pathMid  = `M ${xm} ${yTop} A ${r} ${r} 0 0 1 ${xm} ${yBot} A ${r} ${r} 0 0 1 ${xm} ${yTop} Z`;
-      const pathRight= `M ${xm} ${yTop} A ${r} ${r} 0 0 1 ${xm} ${yBot} A ${r} ${r} 0 1 0 ${xm} ${yTop} Z`;
+      const pLeft  = `M ${xm} ${yTop} A ${r} ${r} 0 1 0 ${xm} ${yBot} A ${r} ${r} 0 0 1 ${xm} ${yTop} Z`;
+      const pMid   = `M ${xm} ${yTop} A ${r} ${r} 0 0 1 ${xm} ${yBot} A ${r} ${r} 0 0 1 ${xm} ${yTop} Z`;
+      const pRight = `M ${xm} ${yTop} A ${r} ${r} 0 0 1 ${xm} ${yBot} A ${r} ${r} 0 1 0 ${xm} ${yTop} Z`;
 
-      const leftCenterX = ((cx1 - r) + (cx2 - r)) / 2;
-      const rightCenterX = ((cx1 + r) + (cx2 + r)) / 2;
+      const xLeft  = ((cx1 - r) + (cx2 - r)) / 2; // 150
+      const xRight = ((cx1 + r) + (cx2 + r)) / 2; // 390
+      const hx1    = labels.hx1 || 140;
+      const hx2    = labels.hx2 || 400;
+      const sel    = (k) => activeVennKey === k;
 
-      const isSel = (k) => selectedVenn === k;
+      document.getElementById(svgId).innerHTML = `
+        <!-- Circle Headers well above circle top (cy - r = 40) with wide horizontal separation -->
+        <text x="${hx1}" y="24" text-anchor="middle" font-size="13" font-weight="800"
+              fill="color-mix(in srgb, ${colors[0]} 75%, var(--foreground))">${labels.h1}</text>
+        <text x="${hx2}" y="24" text-anchor="middle" font-size="13" font-weight="800"
+              fill="color-mix(in srgb, ${colors[2]} 75%, var(--foreground))">${labels.h2}</text>
 
-      const svg = document.getElementById(svgId);
-      svg.innerHTML = `
-        <!-- Circle Titles Above -->
-        <text x="${cx1 - 24}" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="${colors[0]}">${labels.c1}</text>
-        <text x="${cx2 + 24}" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="${colors[2]}">${labels.c2}</text>
+        <!-- Slices -->
+        <path d="${pLeft}" onclick="pickVenn('${keys[0]}')" onmouseenter="pickVenn('${keys[0]}')" class="venn-slice"
+              fill="${colors[0]}" fill-opacity="${sel(keys[0]) ? '0.34' : '0.15'}"
+              stroke="${colors[0]}" stroke-width="${sel(keys[0]) ? '3.5' : '2'}" />
 
-        <!-- Left Crescent -->
-        <path d="${pathLeft}" onclick="selectVenn('${keys[0]}')" class="venn-slice"
-              fill="${colors[0]}" fill-opacity="${isSel(keys[0]) ? '0.34' : '0.16'}"
-              stroke="${colors[0]}" stroke-width="${isSel(keys[0]) ? '3.5' : '1.8'}" />
+        <path d="${pMid}" onclick="pickVenn('${keys[1]}')" onmouseenter="pickVenn('${keys[1]}')" class="venn-slice"
+              fill="${colors[1]}" fill-opacity="${sel(keys[1]) ? '0.38' : '0.20'}"
+              stroke="${colors[1]}" stroke-width="${sel(keys[1]) ? '3.5' : '2'}" />
 
-        <!-- Center Intersection -->
-        <path d="${pathMid}" onclick="selectVenn('${keys[1]}')" class="venn-slice"
-              fill="${colors[1]}" fill-opacity="${isSel(keys[1]) ? '0.38' : '0.20'}"
-              stroke="${colors[1]}" stroke-width="${isSel(keys[1]) ? '3.5' : '1.8'}" />
+        <path d="${pRight}" onclick="pickVenn('${keys[2]}')" onmouseenter="pickVenn('${keys[2]}')" class="venn-slice"
+              fill="${colors[2]}" fill-opacity="${sel(keys[2]) ? '0.34' : '0.15'}"
+              stroke="${colors[2]}" stroke-width="${sel(keys[2]) ? '3.5' : '2'}" />
 
-        <!-- Right Crescent -->
-        <path d="${pathRight}" onclick="selectVenn('${keys[2]}')" class="venn-slice"
-              fill="${colors[2]}" fill-opacity="${isSel(keys[2]) ? '0.34' : '0.16'}"
-              stroke="${colors[2]}" stroke-width="${isSel(keys[2]) ? '3.5' : '1.8'}" />
+        <!-- Short 2-word labels centered inside wide 120px regions -->
+        <text x="${xLeft}" y="${cy - 6}" text-anchor="middle" pointer-events="none" font-size="13" font-weight="800" fill="var(--foreground)">${labels.l1}</text>
+        <text x="${xLeft}" y="${cy + 13}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="600" fill="var(--muted-foreground)">${labels.l2}</text>
 
-        <!-- Region Labels (>=12px) -->
-        <text x="${leftCenterX}" y="${cy - 8}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="700" fill="currentColor">${labels.l1}</text>
-        <text x="${leftCenterX}" y="${cy + 10}" text-anchor="middle" pointer-events="none" font-size="12" fill="currentColor" opacity="0.8">${labels.l2}</text>
+        <text x="${xm}" y="${cy - 6}" text-anchor="middle" pointer-events="none" font-size="13" font-weight="800" fill="var(--foreground)">${labels.m1}</text>
+        <text x="${xm}" y="${cy + 13}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="700" fill="var(--muted-foreground)">${labels.m2}</text>
 
-        <text x="${xm}" y="${cy - 8}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="800" fill="currentColor">${labels.m1}</text>
-        <text x="${xm}" y="${cy + 10}" text-anchor="middle" pointer-events="none" font-size="12" fill="currentColor" opacity="0.85">${labels.m2}</text>
-
-        <text x="${rightCenterX}" y="${cy - 8}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="700" fill="currentColor">${labels.r1}</text>
-        <text x="${rightCenterX}" y="${cy + 10}" text-anchor="middle" pointer-events="none" font-size="12" fill="currentColor" opacity="0.8">${labels.r2}</text>
+        <text x="${xRight}" y="${cy - 6}" text-anchor="middle" pointer-events="none" font-size="13" font-weight="800" fill="var(--foreground)">${labels.r1}</text>
+        <text x="${xRight}" y="${cy + 13}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="600" fill="var(--muted-foreground)">${labels.r2}</text>
       `;
     }
 
-    function selectVenn(key) {
-      selectedVenn = key;
+    function pickVenn(key) {
+      activeVennKey = key;
       renderVenns();
     }
 
     function renderVenns() {
-      // Group A: High overlap (closer centers: 185 & 275, r=96 -> lens=102px, crescents=90px)
-      buildVennSvg(
-        "vennA", 185, 275, 136, 96,
+      drawCleanVenn(
+        "vennGate1",
         {
-          c1: "Client Caching", c2: "Channel Warm-Up",
-          l1: "Build Skip", l2: "& Caches",
-          m1: "Warm Pipe", m2: "(Scans 2..N)",
-          r1: "Scan #1 &", r2: "Vended Auth"
+          h1: "Client Cache", h2: "Warm-Up", hx1: 150, hx2: 390,
+          l1: "Reuse Client", l2: "& Caches",
+          m1: "Scans 2..N",   m2: "(Merge)",
+          r1: "Scan #1 &",    r2: "New Tokens"
         },
-        ["A_left", "A_mid", "A_right"],
+        ["g1_left", "g1_mid", "g1_right"],
         ["#2563eb", "#0284c7", "#d97706"]
       );
 
-      // Group B: Moderate overlap (centers: 170 & 290, r=96 -> lens=72px, crescents=120px)
-      buildVennSvg(
-        "vennB", 170, 290, 136, 96,
+      drawCleanVenn(
+        "vennGate2",
         {
-          c1: "Session / Handle Cache", c2: "Proactive Bulk Open",
-          l1: ">128MB Splits", l2: "& Repeat SQL",
-          m1: "Multi-Split", m2: "+ Prewarm",
-          r1: "≤128MB", r2: "Read Once"
+          h1: "Bulk Open (Session Pool)", h2: "BidiReadHandle Cache", hx1: 138, hx2: 404,
+          l1: "Regional +", l2: "1st Open",
+          m1: "Zonal ≤100", m2: "Active Files",
+          r1: "Zonal >100", r2: "Evicted Files"
         },
-        ["B_left", "B_mid", "B_right"],
+        ["g2_left", "g2_mid", "g2_right"],
         ["#059669", "#0d9488", "#ea580c"]
       );
 
-      const d = VENN_INFO[selectedVenn];
-      const box = document.getElementById("vennDetailBox");
-      box.style.borderColor = d.color;
+      const info = VENN_SLICES[activeVennKey];
+      const box = document.getElementById("vennOneLiner");
+      box.style.borderColor = info.color;
       box.innerHTML = `
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="text-xs font-bold uppercase tracking-wider" style="color:${d.color}">${d.group}</span>
-          <span class="px-2.5 py-0.5 rounded text-xs font-bold" style="background:${d.color}20; color:${d.color}">
-            Decision: ${d.action}
+        <div class="flex flex-wrap items-center gap-2.5">
+          <span class="px-2.5 py-1 rounded-md text-xs font-extrabold uppercase tracking-wide"
+                style="background:color-mix(in srgb, ${info.color} 18%, var(--card)); color:color-mix(in srgb, ${info.color} 76%, var(--foreground))">
+            ${info.badge}
           </span>
+          <span class="text-sm font-semibold text-[var(--foreground)]">${info.example}</span>
         </div>
-        <div class="text-base font-bold mt-1">${d.title}</div>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2 text-xs md:text-sm">
-          <div class="subtle-box p-2.5"><strong>Concrete Example:</strong> ${d.example}</div>
-          <div class="subtle-box p-2.5"><strong>Why:</strong> ${d.why}</div>
-        </div>
+        <span class="text-xs md:text-sm font-extrabold"
+              style="color:color-mix(in srgb, ${info.color} 76%, var(--foreground))">
+          → ${info.decision}
+        </span>
       `;
     }
 
-    // ==================== SLIDE 4 LOGIC (REGIONAL VS ZONAL) ====================
-    let archStage = 0;
-
-    function setArchStage(s) {
-      archStage = s;
-      document.querySelectorAll(".arch-btn").forEach((b, i) => b.classList.toggle("active", i === s));
-      renderArch();
-    }
-
-    function renderArch() {
-      const stages = [
-        {
-          regClient: { label: "BlobReadSession Open", sub: "Sends (bucket, object)", color: "#2563eb" },
-          regMid:    { label: "read_handle = EMPTY", sub: "No token minted on Standard", color: "#dc2626" },
-          regServer: { label: "Bitpusher Stream RAM", sub: "Spanner + IAM (~38 ms) pinned to stream", color: "#d97706" },
-          zonClient: { label: "BlobReadSession Open", sub: "Sends (bucket, object)", color: "#059669" },
-          zonMid:    { label: "BidiReadHandle Minted", sub: "Encrypted OFL + 5-min VM auth", color: "#059669" },
-          zonServer: { label: "Fastpusher + Local SSD", sub: "16 KiB OFL fragments resolved (~28 ms)", color: "#059669" }
-        },
-        {
-          regClient: { label: "Task 1 Calls close()", sub: "Pool intercepts vs Normal close", color: "#2563eb" },
-          regMid:    { label: "No Token Left Behind", sub: "Nothing for SDK token cache to save!", color: "#dc2626" },
-          regServer: { label: "If Closed → RAM Wiped!", sub: "If Pooled → Bitpusher RAM stays warm", color: "#d97706" },
-          zonClient: { label: "Task 1 Calls close()", sub: "Pool keeps stream OR SDK saves ticket", color: "#059669" },
-          zonMid:    { label: "Ticket Valid 5 Min", sub: "Bound to this exact GCE VM", color: "#059669" },
-          zonServer: { label: "Fastpusher Stateless Resume", sub: "Ticket carries SSD fragment map", color: "#059669" }
-        },
-        {
-          regClient: { label: "Task 2 Reopens File", sub: "Reads Row Group 2", color: "#2563eb" },
-          regMid:    { label: "Live Session Pool = 0 ms!", sub: "Raw Handle Cache = 38 ms MISS", color: "#059669" },
-          regServer: { label: "Reuses Open Stream RAM", sub: "Skips Spanner & IAM completely", color: "#059669" },
-          zonClient: { label: "Task 2 Reopens File", sub: "Reads Row Group 2", color: "#059669" },
-          zonMid:    { label: "Pool = 0 RTT · Ticket = 1 Fast RTT", sub: "Both work on Zonal Rapid!", color: "#059669" },
-          zonServer: { label: "Decrypts Ticket in &lt;1 ms", sub: "Skips Spanner & Access Service", color: "#059669" }
-        }
-      ][archStage];
-
-      const renderTrack = (title, badge, badgeCol, c, m, s, verdict) => `
-        <div class="subtle-box p-4 flex flex-col gap-3">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <div class="text-sm md:text-base font-bold">${title}</div>
-            <span class="px-2.5 py-0.5 rounded text-xs font-bold" style="background:${badgeCol}20; color:${badgeCol}">${badge}</span>
-          </div>
-
-          <div class="grid grid-cols-1 md:grid-cols-11 gap-2 items-center">
-            <div class="md:col-span-3 surface-card p-3 border-2" style="border-color:${c.color}">
-              <div class="text-xs font-semibold text-[var(--muted-foreground)]">Executor Client</div>
-              <div class="text-sm font-bold mt-0.5">${c.label}</div>
-              <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${c.sub}</div>
-            </div>
-
-            <div class="md:col-span-1 text-center font-black text-lg text-[var(--muted-foreground)]">⇄</div>
-
-            <div class="md:col-span-3 surface-card p-3 border-2" style="border-color:${m.color}">
-              <div class="text-xs font-semibold text-[var(--muted-foreground)]">Wire Handle / Pool</div>
-              <div class="text-sm font-bold mt-0.5" style="color:${m.color}">${m.label}</div>
-              <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${m.sub}</div>
-            </div>
-
-            <div class="md:col-span-1 text-center font-black text-lg text-[var(--muted-foreground)]">⇄</div>
-
-            <div class="md:col-span-3 surface-card p-3 border-2" style="border-color:${s.color}">
-              <div class="text-xs font-semibold text-[var(--muted-foreground)]">GCS Backend</div>
-              <div class="text-sm font-bold mt-0.5">${s.label}</div>
-              <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${s.sub}</div>
-            </div>
-          </div>
-
-          <div class="text-xs font-semibold text-[var(--muted-foreground)] pt-1 border-t border-[var(--border)]">
-            ${verdict}
-          </div>
-        </div>
-      `;
-
-      document.getElementById("archTracks").innerHTML =
-        renderTrack(
-          "Track 1 · Regional Standard Bucket (Bitpusher + 2 MiB BCL + Shard Service)",
-          "Live Session Pool Only", "#2563eb",
-          stages.regClient, stages.regMid, stages.regServer,
-          "Takeaway: Open state lives ONLY inside the live gRPC stream — pooling BlobReadSession in analytics-core works on Regional buckets with zero SDK/server blockers."
-        ) +
-        renderTrack(
-          "Track 2 · Zonal Rapid Bucket (Fastpusher + 16 KiB Colossus SSD OFL)",
-          "Session Pool + SDK Handle Fallback", "#059669",
-          stages.zonClient, stages.zonMid, stages.zonServer,
-          "Takeaway: Live Session Pool gives 0-RTT hits; caching BidiReadHandle inside the SDK gives a cheap 1-RTT fallback when streams are evicted within 5 minutes."
-        );
-    }
-
-    // ==================== SLIDE 5 LOGIC (PRIORITIZATION STACK) ====================
-    const PRIO_ITEMS = [
+    // ==================== SCREEN 3: 1-2-3-4 FUNDING CARDS ====================
+    const FUNDING_STEPS = [
       {
-        step: "Done · Foundation",
-        title: "Auth-Safe Client Cache + Shared Analytics Cache",
-        color: "#059669",
-        phase: "Phases 1 & 2 (Scans 2..N) + Cached Footers",
-        where: "gcs-analytics-core (LeasedClientEntry)",
-        gain: "+14.7% (1 TB) / +8.3% (10 TB) BiDi scan speedup measured",
-        merge: "Base foundation — eliminates repeated 2.3 s client rebuilds and shares footer/small-object caches safely per CredentialKey."
+        num: "#1 · SHIPPED",
+        gate: "Gate 1 · Connect",
+        title: "Client Cache",
+        sub: "Reuse Storage + Shared Metadata Cache",
+        metric: "+14.7% faster",
+        metricNote: "Measured on 1 TB TPC-DS",
+        dep: "0 external dependencies · Done in analytics-core",
+        color: "#10b981"
       },
       {
-        step: "Priority 1 · Next Build",
-        title: "Live BlobReadSession Reuse Pool",
-        color: "#2563eb",
-        phase: "Phase 3 · Repeat & Multi-Split File Opens",
-        where: "gcs-analytics-core ONLY (Zero SDK / Engine blocks)",
-        gain: "−17% BiDi scan time in 10 TB Connector POC (500 MB files)",
-        merge: "Works on BOTH Regional Standard & Zonal Rapid buckets; thread-safe readAs lets concurrent tasks share 1 live session per file."
+        num: "#2 · BUILD NEXT",
+        gate: "Gate 2 + Cold Miss",
+        title: "Bulk Open: Reactive Pool",
+        sub: "Keep live sessions open + Warm-Up on miss",
+        metric: "−17% scan POC",
+        metricNote: "Multi-split files · Regional + Zonal",
+        dep: "0 Spark / Iceberg changes · analytics-core + SDK",
+        color: "#2563eb"
       },
       {
-        step: "Priority 2 · Merge Into Miss",
-        title: "Channel Warm-Up on Client Cache Miss",
-        color: "#d97706",
-        phase: "Phases 1 & 2 · Cold Scan #1, 2nd Bucket & Vended Tokens",
-        where: "Java/C++ SDK (Tier 1 + warmUp) + Client Cache hook",
-        gain: "Cuts cold first read 2,270 ms → ~75 ms on cache misses",
-        merge: "Merged directly into GcsClientCache miss path (prefix-aware for downscoped vended tokens; ~1.7% extra on static-auth 1 TB TPC-DS, huge on vended tokens)."
+        num: "#3 · WITH ICEBERG",
+        gate: "Gate 2 + Read Tail",
+        title: "Bulk Open: Proactive Pool",
+        sub: "multiOpen lookahead + BiDi Read Hedging",
+        metric: "−15.7% scan POC",
+        metricNote: "≤128 MB read-once + 2.07× stall fix",
+        dep: "Needs Iceberg file lookahead + SDK Hedging",
+        color: "#0d9488"
       },
       {
-        step: "Priority 3 · Ecosystem Plumbing",
-        title: "Lookahead Bulk Open + SDK Handle Token Cache",
-        color: "#0d9488",
-        phase: "Phase 3 · ≤128 MB Single-Pass Files & Evicted Zonal Streams",
-        where: "Apache Iceberg Reader (lookahead) + Storage SDK",
-        gain: "−15.7% BiDi scan time in 1 TB Dataproc prewarm POC",
-        merge: "Prewarm skips files already in Small-Object Cache; SDK caches (BidiReadHandle, routingToken) for 4 min when Zonal sessions close."
+        num: "#4 · LOW PRIORITY",
+        gate: "Zonal Overflow",
+        title: "BidiReadHandle Cache",
+        sub: "Cache tiny byte ticket after stream eviction",
+        metric: "~8 ms reopen",
+        metricNote: "vs 40 ms open · 5-min Zonal TTL",
+        dep: "Separate SDK effort · Only helps >100 Zonal files",
+        color: "#d97706"
       }
     ];
 
-    let selPrio = 1;
+    let activeFundIdx = 1;
 
-    function selectPrio(i) {
-      selPrio = i;
-      renderPrio();
+    function selectFundCard(idx) {
+      activeFundIdx = idx;
+      renderFunding();
     }
 
-    function renderPrio() {
-      const grid = document.getElementById("prioGrid");
-      grid.innerHTML = PRIO_ITEMS.map((item, i) => {
-        const active = i === selPrio;
+    function renderFunding() {
+      const projMeta = [
+        { label: "Selected #1", width: "85.25%", color: "#10b981", text: "20,650 s · Eliminated repeated 2.3 s Gate 1 client rebuilds", tag: "Shipped" },
+        { label: "After #2",    width: "77.5%",  color: "#2563eb", text: "Bulk Open (Reactive Pool) + Warm-Up removes repeat opens & cold misses", tag: "0 Spark changes" },
+        { label: "After #3",    width: "71.6%",  color: "#0d9488", text: "Bulk Open (Proactive Pool) + Read Hedging closes read-once & tail gap", tag: "HTTP Parity" },
+        { label: "Optional #4", width: "71.0%",  color: "#d97706", text: "BidiReadHandle trims evicted >100-file Zonal reopens (40 ms → 8 ms)", tag: "Zonal >100 files" }
+      ][activeFundIdx];
+
+      const pLabel = document.getElementById("projRowLabel");
+      const pBar = document.getElementById("projRowBar");
+      pLabel.textContent = projMeta.label;
+      pLabel.style.color = `color-mix(in srgb, ${projMeta.color} 76%, var(--foreground))`;
+      pBar.style.width = projMeta.width;
+      pBar.style.background = projMeta.color;
+      document.getElementById("projRowText").textContent = projMeta.text;
+      document.getElementById("projRowTag").textContent = projMeta.tag;
+
+      document.getElementById("fundingCards").innerHTML = FUNDING_STEPS.map((s, i) => {
+        const sel = i === activeFundIdx;
         return `
-          <div onclick="selectPrio(${i})"
-               class="node-anim p-4 rounded-xl border-2 cursor-pointer flex flex-col justify-between gap-3"
-               style="border-color:${active ? item.color : 'var(--border)'}; background:${active ? item.color + '16' : 'var(--card)'}">
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-extrabold uppercase tracking-wide" style="color:${item.color}">${item.step}</span>
-              <span class="text-xs font-bold">${active ? "● Selected" : "Click"}</span>
+          <div onclick="selectFundCard(${i})"
+               class="step-card p-4 rounded-2xl border-2 flex flex-col justify-between gap-3.5"
+               style="border-color:${sel ? s.color : 'var(--border)'}; background:${sel ? 'color-mix(in srgb, ' + s.color + ' 10%, var(--card))' : 'var(--card)'}">
+            <div class="flex flex-col gap-1.5">
+              <div class="flex items-center justify-between gap-1.5 flex-wrap">
+                <span class="text-xs font-extrabold uppercase tracking-wider"
+                      style="color:color-mix(in srgb, ${s.color} 76%, var(--foreground))">${s.num}</span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-bold"
+                      style="background:color-mix(in srgb, ${s.color} 16%, var(--card)); color:color-mix(in srgb, ${s.color} 76%, var(--foreground))">
+                  ${s.gate}
+                </span>
+              </div>
+              <div class="text-base md:text-lg font-extrabold text-[var(--foreground)] mt-1">${s.title}</div>
+              <div class="text-xs font-medium text-[var(--muted-foreground)]">${s.sub}</div>
             </div>
-            <div class="text-base font-bold leading-snug">${item.title}</div>
-            <div class="text-xs text-[var(--muted-foreground)] font-medium pt-2 border-t border-[var(--border)]">
-              ${item.where}
+
+            <div class="soft-panel p-3">
+              <div class="text-lg md:text-xl font-black"
+                   style="color:color-mix(in srgb, ${s.color} 76%, var(--foreground))">${s.metric}</div>
+              <div class="text-xs text-[var(--muted-foreground)] font-medium mt-0.5">${s.metricNote}</div>
+            </div>
+
+            <div class="text-xs font-semibold text-[var(--muted-foreground)] pt-2 border-t border-[var(--border)]">
+              ${s.dep}
             </div>
           </div>
         `;
       }).join("");
-
-      const p = PRIO_ITEMS[selPrio];
-      document.getElementById("prioDetail").innerHTML = `
-        <div>
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <span class="text-xs font-bold uppercase tracking-wider" style="color:${p.color}">${p.step}</span>
-            <span class="px-2.5 py-0.5 rounded text-xs font-bold" style="background:${p.color}20; color:${p.color}">${p.phase}</span>
-          </div>
-          <div class="text-lg font-bold mt-1">${p.title}</div>
-          <div class="text-sm text-[var(--foreground)] mt-2">${p.merge}</div>
-        </div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[var(--border)]">
-          <div class="surface-card p-3">
-            <div class="text-xs text-[var(--muted-foreground)] font-semibold">Where Code Lives</div>
-            <div class="text-sm font-bold mt-0.5">${p.where}</div>
-          </div>
-          <div class="surface-card p-3">
-            <div class="text-xs text-[var(--muted-foreground)] font-semibold">Measured / Reference Impact</div>
-            <div class="text-sm font-bold mt-0.5" style="color:${p.color}">${p.gain}</div>
-          </div>
-        </div>
-      `;
     }
 
-    // Initialize all slides
-    renderWalkthrough();
-    renderSimulator();
+    // Boot
     renderVenns();
-    renderArch();
-    renderPrio();
+    renderFunding();
+    replayAnim();
   </script>
 </body>
 </html>
