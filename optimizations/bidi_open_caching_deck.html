@@ -1,0 +1,1247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GCS BiDi Scan Optimization — Visual Architecture & Prioritization</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--foreground);
+      font-family: 'Google Sans', Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .surface-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+    }
+    .subtle-box {
+      background: color-mix(in srgb, var(--foreground) 4%, var(--card));
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .pill-btn {
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--muted-foreground);
+      transition: all 0.16s ease;
+      cursor: pointer;
+    }
+    .pill-btn:hover {
+      border-color: #3b82f6;
+      color: var(--foreground);
+    }
+    .pill-btn.active {
+      background: rgba(37, 99, 235, 0.14);
+      border-color: #2563eb;
+      color: #2563eb;
+      font-weight: 600;
+    }
+    .dark .pill-btn.active {
+      background: rgba(59, 130, 246, 0.22);
+      border-color: #60a5fa;
+      color: #93c5fd;
+    }
+    .venn-slice {
+      cursor: pointer;
+      transition: opacity 0.18s ease, stroke-width 0.18s ease, filter 0.18s ease;
+    }
+    .venn-slice:hover {
+      filter: brightness(1.08);
+    }
+    .bar-anim {
+      transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.25s ease, opacity 0.25s ease;
+    }
+    .node-anim {
+      transition: all 0.25s ease;
+    }
+    .toggle-track {
+      width: 38px;
+      height: 22px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--foreground) 18%, transparent);
+      position: relative;
+      transition: background 0.18s ease;
+      flex-shrink: 0;
+    }
+    .toggle-track.on {
+      background: #2563eb;
+    }
+    .toggle-thumb {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #ffffff;
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      transition: transform 0.18s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+    }
+    .toggle-track.on .toggle-thumb {
+      transform: translateX(16px);
+    }
+    svg text {
+      font-family: inherit;
+      user-select: none;
+    }
+  </style>
+</head>
+<body class="p-4 md:p-6">
+
+  <div class="max-w-6xl mx-auto flex flex-col gap-4">
+
+    <!-- Top Deck Header & Slide Tabs -->
+    <header class="surface-card px-5 py-4 flex flex-col gap-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+            <span>GCS Analytics Core · BiDi Read Path</span>
+            <span>•</span>
+            <span id="slideBadge">Slide 1 of 5</span>
+          </div>
+          <h1 id="slideTitle" class="text-xl md:text-2xl font-bold mt-0.5 text-[var(--foreground)]">
+            Where BiDi Scan Time Goes
+          </h1>
+          <p id="slideSubtitle" class="text-sm text-[var(--muted-foreground)] mt-0.5">
+            Step through a 2-table query to see per-client cold setup vs per-file stream open.
+          </p>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button id="prevBtn" onclick="goSlide(currentSlide - 1)" class="pill-btn px-3 py-1.5 rounded-lg text-xs font-medium">
+            ← Prev
+          </button>
+          <button id="nextBtn" onclick="goSlide(currentSlide + 1)" class="pill-btn px-3 py-1.5 rounded-lg text-xs font-medium">
+            Next →
+          </button>
+        </div>
+      </div>
+
+      <!-- Slide Navigation Tabs -->
+      <nav class="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1 border-t border-[var(--border)]">
+        <button onclick="goSlide(0)" class="slide-tab pill-btn active px-3 py-2 rounded-lg text-xs text-left">
+          1 · Scan Phases
+        </button>
+        <button onclick="goSlide(1)" class="slide-tab pill-btn px-3 py-2 rounded-lg text-xs text-left">
+          2 · Live Simulator
+        </button>
+        <button onclick="goSlide(2)" class="slide-tab pill-btn px-3 py-2 rounded-lg text-xs text-left">
+          3 · Overlap Venns
+        </button>
+        <button onclick="goSlide(3)" class="slide-tab pill-btn px-3 py-2 rounded-lg text-xs text-left">
+          4 · Regional vs Zonal
+        </button>
+        <button onclick="goSlide(4)" class="slide-tab pill-btn px-3 py-2 rounded-lg text-xs text-left">
+          5 · Priority Stack
+        </button>
+      </nav>
+    </header>
+
+    <!-- ==================== SLIDE 1: STEP-BY-STEP SCAN WALKTHROUGH ==================== -->
+    <section id="slide-0" class="slide-pane surface-card p-5 flex flex-col gap-5">
+
+      <!-- Controls Row -->
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <!-- Step Selector -->
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] mr-1">Query Step:</span>
+          <button onclick="setWalkStep(0)" class="walk-step-btn pill-btn active px-3 py-1.5 rounded-lg text-xs">
+            1. Scan 1: orders (Split 1)
+          </button>
+          <button onclick="setWalkStep(1)" class="walk-step-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
+            2. Scan 1: orders (Split 2)
+          </button>
+          <button onclick="setWalkStep(2)" class="walk-step-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
+            3. Scan 2: customers
+          </button>
+          <button onclick="setWalkStep(3)" class="walk-step-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
+            4. Scan 3: 2nd Bucket
+          </button>
+        </div>
+
+        <!-- Mode Selector -->
+        <div class="flex flex-wrap items-center gap-1.5">
+          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] mr-1">Mode:</span>
+          <button onclick="setWalkMode('none')" id="wmode-none" class="pill-btn active px-2.5 py-1.5 rounded-lg text-xs">
+            No Cache
+          </button>
+          <button onclick="setWalkMode('client')" id="wmode-client" class="pill-btn px-2.5 py-1.5 rounded-lg text-xs">
+            Client Cache (Current)
+          </button>
+          <button onclick="setWalkMode('client_warm')" id="wmode-client_warm" class="pill-btn px-2.5 py-1.5 rounded-lg text-xs">
+            + Warm-Up
+          </button>
+          <button onclick="setWalkMode('all')" id="wmode-all" class="pill-btn px-2.5 py-1.5 rounded-lg text-xs">
+            + Session Pool
+          </button>
+        </div>
+      </div>
+
+      <!-- 4-Phase Visual Pipeline -->
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3" id="walkPhaseGrid">
+        <!-- Populated by JS -->
+      </div>
+
+      <!-- Visual Architecture Flow Diagram (Executor -> Client -> Bucket -> File) -->
+      <div class="subtle-box p-4">
+        <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]" id="walkScenarioLabel">
+            Executor Timeline for Selected Step
+          </span>
+          <div class="flex items-center gap-4 text-xs">
+            <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm" style="background:#ef4444"></span> Paid on critical path</span>
+            <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm" style="background:#f59e0b"></span> Paid once / backgrounded</span>
+            <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm" style="background:#10b981"></span> 0 ms Cache / Pool Hit</span>
+          </div>
+        </div>
+
+        <!-- Proportional Horizontal Time Bar -->
+        <div class="w-full h-11 rounded-lg overflow-hidden flex border border-[var(--border)] bg-[var(--card)]" id="walkTotalBar">
+        </div>
+
+        <div class="flex items-center justify-between mt-3 text-sm">
+          <span id="walkCalloutText" class="font-medium text-[var(--foreground)]"></span>
+          <span id="walkTotalMs" class="font-bold text-base"></span>
+        </div>
+      </div>
+
+      <!-- Bottom Visual Legend: Per-Client vs Per-File Split -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="subtle-box p-3.5 flex items-center justify-between gap-3">
+          <div>
+            <div class="text-xs font-bold uppercase tracking-wide" style="color:#2563eb">Group A · Phases 1 & 2 (Per-Client / Bucket)</div>
+            <div class="text-sm font-semibold mt-0.5">~2,270 ms cold setup in Java DirectPath</div>
+            <div class="text-xs text-[var(--muted-foreground)] mt-0.5">Targeted by: Client Caching & Channel Warm-Up</div>
+          </div>
+          <div class="px-3 py-1.5 rounded-lg text-xs font-bold" style="background:rgba(37,99,235,0.12); color:#2563eb">
+            Once per client
+          </div>
+        </div>
+        <div class="subtle-box p-3.5 flex items-center justify-between gap-3">
+          <div>
+            <div class="text-xs font-bold uppercase tracking-wide" style="color:#059669">Group B · Phase 3 (Per-File Stream Open)</div>
+            <div class="text-sm font-semibold mt-0.5">~35–40 ms on every file open (Spanner + IAM)</div>
+            <div class="text-xs text-[var(--muted-foreground)] mt-0.5">Targeted by: Session Pool, Handle Cache & Bulk Open</div>
+          </div>
+          <div class="px-3 py-1.5 rounded-lg text-xs font-bold" style="background:rgba(5,150,105,0.12); color:#059669">
+            × Every file
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 2: LIVE FEATURE SIMULATOR & PHASE MATRIX ==================== -->
+    <section id="slide-1" class="slide-pane hidden surface-card p-5 flex flex-col gap-4">
+
+      <!-- Top Preset Bar -->
+      <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[var(--border)]">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">Workload:</span>
+          <button onclick="setSimPreset('tpcds')" id="preset-tpcds" class="pill-btn active px-3 py-1.5 rounded-lg text-xs">
+            Multi-Scan · 500 MB Files (TPC-DS)
+          </button>
+          <button onclick="setSimPreset('single100')" id="preset-single100" class="pill-btn px-3 py-1.5 rounded-lg text-xs">
+            1 Scan · ≤128 MB Files (Read Once)
+          </button>
+          <button onclick="setSimPreset('vended')" id="preset-vended" class="pill-btn px-3 py-1.5 rounded-lg text-xs">
+            Per-Scan Vended Tokens
+          </button>
+        </div>
+
+        <div class="flex items-center gap-1.5">
+          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">Bucket:</span>
+          <button onclick="setSimBucket('regional')" id="bkt-regional" class="pill-btn active px-2.5 py-1.5 rounded-lg text-xs">
+            Regional Standard
+          </button>
+          <button onclick="setSimBucket('zonal')" id="bkt-zonal" class="pill-btn px-2.5 py-1.5 rounded-lg text-xs">
+            Zonal Rapid
+          </button>
+        </div>
+      </div>
+
+      <!-- Swimlane Matrix: Toggles on Left, 4 Phase Columns on Right -->
+      <div class="overflow-x-auto">
+        <div class="min-w-[680px] flex flex-col gap-2">
+          <!-- Column Headers -->
+          <div class="grid grid-cols-12 gap-2 text-xs font-bold uppercase tracking-wide text-[var(--muted-foreground)] px-2">
+            <div class="col-span-4">Feature Toggle (Click to Combine)</div>
+            <div class="col-span-2 text-center">P1 · Build Client</div>
+            <div class="col-span-2 text-center">P2 · Channel & Route</div>
+            <div class="col-span-2 text-center">P3 · Open File</div>
+            <div class="col-span-2 text-center">P4 · Range Read</div>
+          </div>
+
+          <!-- Swimlane Rows rendered by JS -->
+          <div id="swimlaneRows" class="flex flex-col gap-2"></div>
+        </div>
+      </div>
+
+      <!-- Live Executor Scan Overhead Comparison Bars -->
+      <div class="subtle-box p-4 flex flex-col gap-3 mt-1">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <span class="text-xs font-bold uppercase tracking-wide text-[var(--muted-foreground)]" id="simWorkloadDesc">
+            Sample Executor Cost: 6 Table Scans · 40 File Opens (10 unique 500 MB files × 4 splits)
+          </span>
+          <span id="simSavingsBadge" class="px-2.5 py-1 rounded-md text-xs font-bold" style="background:rgba(16,185,129,0.15); color:#059669"></span>
+        </div>
+
+        <!-- Cold Baseline Bar -->
+        <div class="flex flex-col gap-1">
+          <div class="flex justify-between text-xs">
+            <span class="text-[var(--muted-foreground)] font-medium">Unoptimized Cold Baseline</span>
+            <span id="simBaseLabel" class="font-semibold"></span>
+          </div>
+          <div class="w-full h-6 rounded-md overflow-hidden flex bg-[var(--card)] border border-[var(--border)]" id="simBaseBar"></div>
+        </div>
+
+        <!-- Active Toggles Bar -->
+        <div class="flex flex-col gap-1">
+          <div class="flex justify-between text-xs">
+            <span class="font-semibold text-[var(--foreground)]">With Selected Features Enabled</span>
+            <span id="simOptLabel" class="font-bold"></span>
+          </div>
+          <div class="w-full h-7 rounded-md overflow-hidden flex bg-[var(--card)] border border-[var(--border)]" id="simOptBar"></div>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-between gap-3 pt-1 text-xs">
+          <div class="flex flex-wrap items-center gap-4">
+            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block" style="background:#2563eb"></span> Per-Client & Bucket Setup (P1+P2)</span>
+            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block" style="background:#059669"></span> Per-File Stream Open (P3)</span>
+            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block" style="background:#64748b"></span> Steady Data Transfer + Tail Wait (P4)</span>
+          </div>
+          <span id="simNotice" class="font-semibold" style="color:#d97706"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 3: DUAL-VENN OVERLAP VS STACK DIAGRAM ==================== -->
+    <section id="slide-2" class="slide-pane hidden surface-card p-5 flex flex-col gap-4">
+
+      <div class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] text-center">
+        Click any of the 6 regions below to inspect where features overlap (merge) vs where they add unique value
+      </div>
+
+      <!-- Dual Container Grid with + Connector -->
+      <div class="grid grid-cols-1 lg:grid-cols-11 gap-3 items-stretch">
+
+        <!-- LEFT BOX: GROUP A VENN -->
+        <div class="lg:col-span-5 subtle-box p-4 flex flex-col items-center">
+          <div class="w-full flex items-center justify-between mb-1">
+            <span class="text-xs font-bold uppercase tracking-wide" style="color:#2563eb">Group A · Phases 1 & 2</span>
+            <span class="text-xs font-semibold px-2 py-0.5 rounded" style="background:rgba(37,99,235,0.12); color:#2563eb">~95% Overlap on Warm Runs</span>
+          </div>
+          <div class="text-sm font-bold w-full text-left mb-2">Per-Client & Bucket Setup (~2.3 s)</div>
+
+          <svg id="vennA" viewBox="0 0 460 245" class="w-full max-w-[460px] h-auto">
+            <!-- Populated by exact geometry JS -->
+          </svg>
+        </div>
+
+        <!-- CENTER PLUS BADGE -->
+        <div class="lg:col-span-1 flex lg:flex-col items-center justify-center gap-2 py-2">
+          <div class="w-11 h-11 rounded-full flex items-center justify-center text-xl font-black border-2"
+               style="border-color:#10b981; background:rgba(16,185,129,0.12); color:#059669">
+            +
+          </div>
+          <span class="text-xs font-bold uppercase tracking-wider text-center" style="color:#059669">
+            Stacks<br/>100%
+          </span>
+        </div>
+
+        <!-- RIGHT BOX: GROUP B VENN -->
+        <div class="lg:col-span-5 subtle-box p-4 flex flex-col items-center">
+          <div class="w-full flex items-center justify-between mb-1">
+            <span class="text-xs font-bold uppercase tracking-wide" style="color:#059669">Group B · Phase 3</span>
+            <span class="text-xs font-semibold px-2 py-0.5 rounded" style="background:rgba(5,150,105,0.12); color:#059669">Split by File Size & Reuse</span>
+          </div>
+          <div class="text-sm font-bold w-full text-left mb-2">Per-File Stream Open (~35 ms / file)</div>
+
+          <svg id="vennB" viewBox="0 0 460 245" class="w-full max-w-[460px] h-auto">
+            <!-- Populated by exact geometry JS -->
+          </svg>
+        </div>
+      </div>
+
+      <!-- Selected Region Visual Detail Strip -->
+      <div id="vennDetailBox" class="surface-card p-4 border-2" style="border-color:#2563eb">
+        <!-- Populated by JS -->
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 4: REGIONAL VS ZONAL HANDLE & SESSION FLOW ==================== -->
+    <section id="slide-3" class="slide-pane hidden surface-card p-5 flex flex-col gap-4">
+
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">Lifecycle Stage:</span>
+          <button onclick="setArchStage(0)" class="arch-btn pill-btn active px-3 py-1.5 rounded-lg text-xs">
+            1. Task 1 Opens File
+          </button>
+          <button onclick="setArchStage(1)" class="arch-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
+            2. Task 1 Closes Stream
+          </button>
+          <button onclick="setArchStage(2)" class="arch-btn pill-btn px-3 py-1.5 rounded-lg text-xs">
+            3. Task 2 Reopens Same File
+          </button>
+        </div>
+        <span class="text-xs text-[var(--muted-foreground)] font-medium">
+          Shows why Regional buckets have no BidiReadHandle token, making Live Session Pool essential
+        </span>
+      </div>
+
+      <!-- Two Parallel Visual Tracks -->
+      <div class="grid grid-cols-1 gap-4" id="archTracks">
+        <!-- Populated by JS -->
+      </div>
+
+      <!-- Server-Side Handle Cache Callout -->
+      <div class="subtle-box p-3.5 flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <span class="px-2.5 py-1 rounded text-xs font-bold" style="background:rgba(217,119,6,0.15); color:#d97706">
+            Server-Side Handle Bypass
+          </span>
+          <span class="text-xs md:text-sm text-[var(--foreground)]">
+            Relaxes Zonal 5-min TTL + VM IP binding in Fastpusher — scoped to <strong>BigQuery internal client (non-prod only)</strong>.
+          </span>
+        </div>
+        <span class="text-xs font-semibold text-[var(--muted-foreground)]">
+          3P Production Path → Wait for Auth Sessions
+        </span>
+      </div>
+    </section>
+
+    <!-- ==================== SLIDE 5: PRIORITIZATION & MERGE STACK ==================== -->
+    <section id="slide-4" class="slide-pane hidden surface-card p-5 flex flex-col gap-4">
+
+      <!-- 4-Step Visual Architecture Stack -->
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3" id="prioGrid">
+        <!-- Populated by JS -->
+      </div>
+
+      <!-- Visual Impact Waterfall + Dependency Detail -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+        <!-- Left: Selected Priority Breakdown -->
+        <div class="lg:col-span-7 subtle-box p-4 flex flex-col justify-between gap-3" id="prioDetail">
+          <!-- Populated by JS -->
+        </div>
+
+        <!-- Right: Parallel Track (Phase 4 Tail Stalls) -->
+        <div class="lg:col-span-5 subtle-box p-4 flex flex-col justify-between gap-3">
+          <div>
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold uppercase tracking-wide" style="color:#dc2626">Untouched Gap · Phase 4</span>
+              <span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:rgba(220,38,38,0.12); color:#dc2626">Separate Track</span>
+            </div>
+            <div class="text-base font-bold mt-1">Mid-Stream Range Tail Stalls</div>
+            <div class="text-xs text-[var(--muted-foreground)] mt-1">
+              On Regional Standard buckets, 1 BiDi stream routes ranges through 1 Bitpusher + 2 MiB BCL chunks (2.07× IO wait vs HTTP).
+            </div>
+          </div>
+
+          <div class="surface-card p-3 flex items-center justify-between">
+            <div>
+              <div class="text-xs font-semibold text-[var(--muted-foreground)]">Fix</div>
+              <div class="text-sm font-bold">BiDi Read Request Hedging</div>
+            </div>
+            <span class="px-2.5 py-1 rounded text-xs font-bold" style="background:rgba(37,99,235,0.12); color:#2563eb">
+              Stacks with P1–P3
+            </span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <script>
+    // ==================== SLIDE NAVIGATION ====================
+    const SLIDE_META = [
+      {
+        title: "Where BiDi Scan Time Goes",
+        subtitle: "Step through a 2-table query to see per-client cold setup vs per-file stream open."
+      },
+      {
+        title: "Which Feature Fixes Which Phase (Live Simulator)",
+        subtitle: "Toggle features across workloads to see what stacks vs what adds 0 ms."
+      },
+      {
+        title: "Where Features Overlap (Merge) vs Stack (Add Up)",
+        subtitle: "Inside a box = overlapping solutions (merge). Across boxes = independent phases (stack)."
+      },
+      {
+        title: "Regional Standard vs Zonal Rapid: How File Open Works",
+        subtitle: "Why Live BlobReadSession pooling works everywhere, while BidiReadHandle tokens only exist on Zonal Rapid."
+      },
+      {
+        title: "Prioritization & Merge Roadmap",
+        subtitle: "Click any stage to inspect target phase, code layer, and merge decision."
+      }
+    ];
+
+    let currentSlide = 0;
+
+    function goSlide(idx) {
+      if (idx < 0 || idx >= SLIDE_META.length) return;
+      currentSlide = idx;
+      document.getElementById("slideBadge").textContent = `Slide ${idx + 1} of ${SLIDE_META.length}`;
+      document.getElementById("slideTitle").textContent = SLIDE_META[idx].title;
+      document.getElementById("slideSubtitle").textContent = SLIDE_META[idx].subtitle;
+
+      document.querySelectorAll(".slide-pane").forEach((el, i) => {
+        el.classList.toggle("hidden", i !== idx);
+      });
+      document.querySelectorAll(".slide-tab").forEach((el, i) => {
+        el.classList.toggle("active", i === idx);
+      });
+      document.getElementById("prevBtn").style.opacity = idx === 0 ? "0.45" : "1";
+      document.getElementById("nextBtn").style.opacity = idx === SLIDE_META.length - 1 ? "0.45" : "1";
+    }
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") goSlide(currentSlide + 1);
+      if (e.key === "ArrowLeft") goSlide(currentSlide - 1);
+    });
+
+    // ==================== SLIDE 1 LOGIC ====================
+    let walkStep = 0;
+    let walkMode = "none";
+
+    function setWalkStep(s) {
+      walkStep = s;
+      document.querySelectorAll(".walk-step-btn").forEach((b, i) => b.classList.toggle("active", i === s));
+      renderWalkthrough();
+    }
+
+    function setWalkMode(m) {
+      walkMode = m;
+      ["none", "client", "client_warm", "all"].forEach(id => {
+        document.getElementById("wmode-" + id).classList.toggle("active", id === m);
+      });
+      renderWalkthrough();
+    }
+
+    function renderWalkthrough() {
+      // Costs in ms for [P1 build, P2 channel+route, P3 file open, P4 range read]
+      let p1 = 0, p2 = 0, p3 = 0, p4 = 8;
+      let s1State = "hit", s2State = "hit", s3State = "hit";
+      let note = "";
+
+      if (walkStep === 0) {
+        // Scan 1, orders Split 1 (Cold executor start)
+        if (walkMode === "none" || walkMode === "client") {
+          p1 = 906; p2 = 1324; p3 = 40;
+          s1State = "paid"; s2State = "paid"; s3State = "paid";
+          note = walkMode === "none"
+            ? "Cold Scan #1 builds a fresh Java gRPC client (~906 ms) + DirectPath channel/auth (~1,324 ms) + opens file (~40 ms)."
+            : "Cold Scan #1 still pays the initial ~2.23 s client setup once, then caches the Storage client for all later scans.";
+        } else if (walkMode === "client_warm") {
+          p1 = 0; p2 = 27; p3 = 40;
+          s1State = "bg"; s2State = "bg"; s3State = "paid";
+          note = "Tier 1 + warmUp(bucket) moved client build & DirectPath setup off the query path (~75 ms first read).";
+        } else {
+          p1 = 0; p2 = 27; p3 = 40;
+          s1State = "bg"; s2State = "bg"; s3State = "paid";
+          note = "Client warmed ahead of time; Split 1 pays one ~40 ms file stream open and puts BlobReadSession in the pool.";
+        }
+      } else if (walkStep === 1) {
+        // Scan 1, orders Split 2 (same 500 MB file, same scan!)
+        p1 = 0; p2 = 0;
+        s1State = "hit"; s2State = "hit";
+        if (walkMode === "all") {
+          p3 = 0; s3State = "hit";
+          note = "Split 2 reads row group 2 of the SAME 500 MB file → reuses pooled BlobReadSession (0 ms file open!).";
+        } else {
+          p3 = 40; s3State = "paid";
+          note = "Same scan reuses the client (0 ms setup), but Split 2 closed & reopened the file stream → pays 40 ms Spanner + IAM again.";
+        }
+      } else if (walkStep === 2) {
+        // Scan 2: customers table (same bucket, new Iceberg FileIO broadcast!)
+        if (walkMode === "none") {
+          p1 = 906; p2 = 1324; p3 = 40;
+          s1State = "paid"; s2State = "paid"; s3State = "paid";
+          note = "Without Client Caching, Iceberg's new FileIO broadcast builds ANOTHER cold gRPC client from scratch (+2,230 ms wasted!).";
+        } else if (walkMode === "all") {
+          p1 = 0; p2 = 0; p3 = 0;
+          s1State = "hit"; s2State = "hit"; s3State = "bg";
+          note = "Client Cache hits in <1 ms (0 ms client setup), and Bulk Open / Pool hides the file stream open!";
+        } else {
+          p1 = 0; p2 = 0; p3 = 40;
+          s1State = "hit"; s2State = "hit"; s3State = "paid";
+          note = "Client Cache HIT! Skips the entire 2,230 ms gRPC + DirectPath cold start. Only pays 40 ms for opening the new file.";
+        }
+      } else if (walkStep === 3) {
+        // Scan 3: 2nd Zonal Bucket on same executor
+        if (walkMode === "none") {
+          p1 = 906; p2 = 1390; p3 = 35;
+          s1State = "paid"; s2State = "paid"; s3State = "paid";
+          note = "No cache: rebuilds entire client + zonal subchannel from scratch (~2.33 s).";
+        } else if (walkMode === "client") {
+          p1 = 0; p2 = 126; p3 = 35;
+          s1State = "hit"; s2State = "paid"; s3State = "paid";
+          note = "Client Cache reuses parent channel, BUT first call to a 2nd Zonal bucket still pays +126 ms RLS + subchannel handshake!";
+        } else if (walkMode === "client_warm") {
+          p1 = 0; p2 = 0; p3 = 35;
+          s1State = "hit"; s2State = "bg"; s3State = "paid";
+          note = "warmUp(bucket2) pre-populated RLS routing & zonal subchannel → +126 ms cross-bucket penalty disappears.";
+        } else {
+          p1 = 0; p2 = 0; p3 = 0;
+          s1State = "hit"; s2State = "bg"; s3State = "hit";
+          note = "Both per-bucket routing and file session are warm → straight to 8 ms data transfer.";
+        }
+      }
+
+      const phases = [
+        { code: "Phase 1", name: "Build Client", ms: p1, state: s1State, target: "StorageOptions.grpc().getService()" },
+        { code: "Phase 2", name: "Connect & Bucket Route", ms: p2, state: s2State, target: "DirectPath ALTS + RLS + xDS" },
+        { code: "Phase 3", name: "Open File Stream", ms: p3, state: s3State, target: "Spanner Lookup + IAM Check" },
+        { code: "Phase 4", name: "Read Byte Ranges", ms: p4, state: "steady", target: "readVectored (steady 8 ms)" }
+      ];
+
+      const colorFor = (st) => {
+        if (st === "paid") return { bg: "rgba(239,68,68,0.12)", border: "#ef4444", badge: "#dc2626", tag: "Paid Inline" };
+        if (st === "bg") return { bg: "rgba(245,158,11,0.14)", border: "#f59e0b", badge: "#d97706", tag: "Pre-Warmed" };
+        if (st === "hit") return { bg: "rgba(16,185,129,0.13)", border: "#10b981", badge: "#059669", tag: "0 ms Hit" };
+        return { bg: "rgba(100,116,139,0.12)", border: "#64748b", badge: "#475569", tag: "Data Transfer" };
+      };
+
+      const grid = document.getElementById("walkPhaseGrid");
+      grid.innerHTML = phases.map(p => {
+        const c = colorFor(p.state);
+        return `
+          <div class="node-anim p-3.5 rounded-xl border-2 flex flex-col justify-between gap-2"
+               style="background:${c.bg}; border-color:${c.border}">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold uppercase tracking-wide" style="color:${c.badge}">${p.code}</span>
+              <span class="px-2 py-0.5 rounded text-xs font-bold" style="background:var(--card); color:${c.badge}">${c.tag}</span>
+            </div>
+            <div>
+              <div class="text-base font-bold">${p.name}</div>
+              <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${p.target}</div>
+            </div>
+            <div class="text-xl font-extrabold" style="color:${c.badge}">${p.ms} ms</div>
+          </div>
+        `;
+      }).join("");
+
+      const total = p1 + p2 + p3 + p4;
+      const maxScale = 2350;
+      const bar = document.getElementById("walkTotalBar");
+      const segs = [
+        { ms: p1, color: "#ef4444", label: `Build ${p1}ms` },
+        { ms: p2, color: s2State === "bg" ? "#f59e0b" : "#dc2626", label: `Route ${p2}ms` },
+        { ms: p3, color: "#d97706", label: `Open ${p3}ms` },
+        { ms: p4, color: "#10b981", label: `Read ${p4}ms` }
+      ].filter(s => s.ms > 0);
+
+      bar.innerHTML = segs.map(s => {
+        const pct = Math.max((s.ms / maxScale) * 100, s.ms > 0 ? 3.5 : 0);
+        return `<div class="bar-anim h-full flex items-center justify-center text-xs font-bold text-white px-1 truncate"
+                     style="width:${pct}%; background:${s.color}" title="${s.label}">
+                  ${pct > 9 ? s.label : ""}
+                </div>`;
+      }).join("");
+
+      document.getElementById("walkCalloutText").textContent = note;
+      document.getElementById("walkTotalMs").textContent = `Total Time to First Data: ${total.toLocaleString()} ms`;
+    }
+
+    // ==================== SLIDE 2 LOGIC (SIMULATOR) ====================
+    let simPreset = "tpcds";
+    let simBucket = "regional";
+    let simToggles = {
+      clientCache: true,
+      warmUp: false,
+      sessionPool: false,
+      bulkOpen: false,
+      handleToken: false
+    };
+
+    function setSimPreset(p) {
+      simPreset = p;
+      ["tpcds", "single100", "vended"].forEach(id => {
+        document.getElementById("preset-" + id).classList.toggle("active", id === p);
+      });
+      renderSimulator();
+    }
+
+    function setSimBucket(b) {
+      simBucket = b;
+      ["regional", "zonal"].forEach(id => {
+        document.getElementById("bkt-" + id).classList.toggle("active", id === b);
+      });
+      renderSimulator();
+    }
+
+    function flipToggle(key) {
+      simToggles[key] = !simToggles[key];
+      renderSimulator();
+    }
+
+    function renderSimulator() {
+      // Workload parameters on 1 executor
+      const cfg = {
+        tpcds: {
+          desc: "Executor Model: 6 Table Scans · 40 File Opens (10 files × 500 MB = 4 splits/file)",
+          scans: 6,
+          totalOpens: 40,
+          uniqueFiles: 10,
+          reusableOpens: 30 // 30 of 40 opens are repeat opens on same executor
+        },
+        single100: {
+          desc: "Executor Model: 1 Table Scan · 40 File Opens (40 files × 100 MB, 1 split/file, read once)",
+          scans: 1,
+          totalOpens: 40,
+          uniqueFiles: 40,
+          reusableOpens: 0 // 0 repeat opens!
+        },
+        vended: {
+          desc: "Executor Model: 6 Table Scans w/ Per-Scan Vended Tokens · 40 File Opens (500 MB files)",
+          scans: 6,
+          totalOpens: 40,
+          uniqueFiles: 10,
+          reusableOpens: 20 // within-scan reuse only
+        }
+      }[simPreset];
+
+      const openCost = simBucket === "zonal" ? 28 : 38;
+      const coldClientCost = simBucket === "zonal" ? 2310 : 2230;
+      const warmClientCost = 75; // with Tier1 + warmUp(bucket)
+      const dataTransferMs = 1200; // steady P4 transfer + tail baseline
+
+      // Baseline (nothing enabled)
+      const baseSetupMs = cfg.scans * coldClientCost;
+      const baseOpenMs = cfg.totalOpens * openCost;
+      const baseTotal = baseSetupMs + baseOpenMs + dataTransferMs;
+
+      // Calculate optimized P1+P2 setup
+      let optSetupMs = baseSetupMs;
+      const cacheEffectiveAcrossScans = simToggles.clientCache && simPreset !== "vended";
+
+      if (cacheEffectiveAcrossScans && simToggles.warmUp) {
+        optSetupMs = warmClientCost; // 1st scan warmed, 2..N cached (0ms)
+      } else if (cacheEffectiveAcrossScans && !simToggles.warmUp) {
+        optSetupMs = coldClientCost; // paid once on Scan 1, 0ms on Scans 2..N
+      } else if (!cacheEffectiveAcrossScans && simToggles.warmUp) {
+        optSetupMs = cfg.scans * warmClientCost; // every new client/token gets fast warmup
+      }
+
+      // Calculate optimized P3 file opens
+      let firstOpens = cfg.totalOpens - cfg.reusableOpens;
+      let repeatOpens = cfg.reusableOpens;
+
+      // Repeat opens:
+      let repeatOpenUnitCost = openCost;
+      if (simToggles.sessionPool) {
+        repeatOpenUnitCost = 0; // 0 RTT live session hit
+      } else if (simToggles.handleToken && simBucket === "zonal") {
+        repeatOpenUnitCost = 8; // 1 fast RTT skipping Spanner/IAM on Zonal Rapid
+      }
+
+      // First-time opens:
+      let firstOpenUnitCost = openCost;
+      if (simToggles.bulkOpen) {
+        // First file in partition pays inline, subsequent files hidden in background (~85% hidden)
+        firstOpenUnitCost = Math.round(openCost * 0.18);
+      }
+
+      const optOpenMs = (firstOpens * firstOpenUnitCost) + (repeatOpens * repeatOpenUnitCost);
+      const optTotal = optSetupMs + optOpenMs + dataTransferMs;
+
+      // Status pill per feature row (shows WHY something works or adds 0ms!)
+      const rows = [
+        {
+          key: "clientCache",
+          name: "Client Caching",
+          tag: "Shipped",
+          spans: [true, true, false, false],
+          color: "#2563eb",
+          status: simPreset === "vended"
+            ? { text: "Misses across scans (new token)", warn: true }
+            : (cfg.scans === 1 ? { text: "1 scan only (helps Scan 2+)", warn: true } : { text: `Skips ${cfg.scans - 1}× rebuilds`, warn: false })
+        },
+        {
+          key: "warmUp",
+          name: "Channel Warm-Up (Ajay)",
+          tag: "SDK Proposal",
+          spans: [true, true, false, false],
+          color: "#3b82f6",
+          status: (cacheEffectiveAcrossScans && cfg.scans > 1)
+            ? { text: "Only helps Cold Scan #1", warn: true }
+            : { text: "Cuts 2.2s cold start → 75ms", warn: false }
+        },
+        {
+          key: "sessionPool",
+          name: "Live Session Pool",
+          tag: "analytics-core",
+          spans: [false, false, true, false],
+          color: "#059669",
+          status: cfg.reusableOpens === 0
+            ? { text: "0% Hit Rate (files read once!)", warn: true }
+            : { text: `0 ms on ${cfg.reusableOpens} repeat opens`, warn: false }
+        },
+        {
+          key: "bulkOpen",
+          name: "Proactive Bulk Open",
+          tag: "Needs Lookahead",
+          spans: [false, false, true, false],
+          color: "#0d9488",
+          status: { text: `Hides ${firstOpens} first-time opens`, warn: false }
+        },
+        {
+          key: "handleToken",
+          name: "Read Handle Token",
+          tag: "Zonal Only",
+          spans: [false, false, true, false],
+          color: "#d97706",
+          status: simBucket === "regional"
+            ? { text: "0 ms — Regional has no handle", warn: true }
+            : (simToggles.sessionPool
+                ? { text: "Fallback after pool eviction", warn: true }
+                : (cfg.reusableOpens === 0 ? { text: "0% Hit Rate (files read once)", warn: true } : { text: "Fast 1-RTT Zonal reopen", warn: false }))
+        }
+      ];
+
+      const container = document.getElementById("swimlaneRows");
+      const laneHtml = rows.map(r => {
+        const on = simToggles[r.key];
+        const cells = r.spans.map(covered => {
+          if (!covered) {
+            return `<div class="col-span-2 h-10 rounded-lg border border-dashed border-[var(--border)] opacity-35"></div>`;
+          }
+          const bg = on
+            ? (r.status.warn ? "rgba(245,158,11,0.16)" : `${r.color}22`)
+            : "rgba(148,163,184,0.10)";
+          const brd = on ? (r.status.warn ? "#f59e0b" : r.color) : "var(--border)";
+          const txtColor = on ? (r.status.warn ? "#d97706" : r.color) : "var(--muted-foreground)";
+          return `
+            <div class="col-span-2 h-10 rounded-lg border-2 flex items-center justify-center px-2 text-xs font-bold truncate"
+                 style="background:${bg}; border-color:${brd}; color:${txtColor}">
+              ${on ? "Active" : "Off"}
+            </div>
+          `;
+        }).join("");
+
+        return `
+          <div onclick="flipToggle('${r.key}')"
+               class="grid grid-cols-12 gap-2 items-center p-2 rounded-xl border border-[var(--border)] cursor-pointer hover:border-blue-400 transition">
+            <div class="col-span-4 flex items-center justify-between gap-2 pr-2">
+              <div class="flex items-center gap-2.5 min-w-0">
+                <div class="toggle-track ${on ? 'on' : ''}"><div class="toggle-thumb"></div></div>
+                <div class="min-w-0">
+                  <div class="text-xs md:text-sm font-bold truncate">${r.name}</div>
+                  <div class="text-xs ${r.status.warn && on ? 'font-semibold' : 'text-[var(--muted-foreground)]'} truncate"
+                       style="${r.status.warn && on ? 'color:#d97706' : ''}">
+                    ${on ? r.status.text : r.tag}
+                  </div>
+                </div>
+              </div>
+            </div>
+            ${cells}
+          </div>
+        `;
+      }).join("");
+
+      // Static gray row for Phase 4 Read Hedging
+      const p4Row = `
+        <div class="grid grid-cols-12 gap-2 items-center p-2 rounded-xl border border-dashed border-[var(--border)] opacity-80">
+          <div class="col-span-4 flex items-center gap-2.5 pl-1">
+            <span class="px-2 py-0.5 rounded text-xs font-bold" style="background:rgba(220,38,38,0.14); color:#dc2626">P4 Gap</span>
+            <div>
+              <div class="text-xs md:text-sm font-bold">Read Hedging</div>
+              <div class="text-xs text-[var(--muted-foreground)]">Separate SDK track (mid-stream stalls)</div>
+            </div>
+          </div>
+          <div class="col-span-2 h-9 rounded-lg border border-dashed border-[var(--border)] opacity-30"></div>
+          <div class="col-span-2 h-9 rounded-lg border border-dashed border-[var(--border)] opacity-30"></div>
+          <div class="col-span-2 h-9 rounded-lg border border-dashed border-[var(--border)] opacity-30"></div>
+          <div class="col-span-2 h-9 rounded-lg border-2 flex items-center justify-center text-xs font-bold"
+               style="border-color:#dc2626; background:rgba(220,38,38,0.10); color:#dc2626">
+            Fixes 2.07× Stall
+          </div>
+        </div>
+      `;
+
+      container.innerHTML = laneHtml + p4Row;
+
+      // Render Bars
+      document.getElementById("simWorkloadDesc").textContent = cfg.desc;
+      const savedPct = Math.round(((baseTotal - optTotal) / baseTotal) * 100);
+      document.getElementById("simSavingsBadge").textContent =
+        savedPct > 0 ? `−${savedPct}% Overhead (${((baseTotal - optTotal)/1000).toFixed(1)}s saved)` : "0% Saved";
+
+      document.getElementById("simBaseLabel").textContent =
+        `${(baseTotal / 1000).toFixed(2)}s  (Client: ${(baseSetupMs/1000).toFixed(2)}s · File Opens: ${(baseOpenMs/1000).toFixed(2)}s · Data: ${(dataTransferMs/1000).toFixed(2)}s)`;
+      document.getElementById("simOptLabel").textContent =
+        `${(optTotal / 1000).toFixed(2)}s  (Client: ${(optSetupMs/1000).toFixed(2)}s · File Opens: ${(optOpenMs/1000).toFixed(2)}s · Data: ${(dataTransferMs/1000).toFixed(2)}s)`;
+
+      const renderBar = (setup, open, data) => {
+        const pSetup = (setup / baseTotal) * 100;
+        const pOpen = (open / baseTotal) * 100;
+        const pData = (data / baseTotal) * 100;
+        return `
+          <div class="bar-anim h-full" style="width:${pSetup}%; background:#2563eb" title="Client Setup ${setup}ms"></div>
+          <div class="bar-anim h-full" style="width:${pOpen}%; background:#059669" title="File Opens ${open}ms"></div>
+          <div class="bar-anim h-full" style="width:${pData}%; background:#64748b" title="Data Transfer ${data}ms"></div>
+        `;
+      };
+
+      document.getElementById("simBaseBar").innerHTML = renderBar(baseSetupMs, baseOpenMs, dataTransferMs);
+      document.getElementById("simOptBar").innerHTML = renderBar(optSetupMs, optOpenMs, dataTransferMs);
+
+      let notice = "";
+      if (simToggles.handleToken && simBucket === "regional") {
+        notice = "Note: Regional Standard buckets do not mint BidiReadHandle tokens — toggle Zonal Rapid or use Live Session Pool.";
+      } else if (simToggles.sessionPool && simPreset === "single100") {
+        notice = "Note: On ≤128 MB single-pass files, reactive Session Pool has 0% hits — enable Proactive Bulk Open!";
+      } else if (simToggles.clientCache && simPreset === "vended" && !simToggles.warmUp) {
+        notice = "Note: Per-scan vended tokens miss Client Cache across scans — combine with Channel Warm-Up!";
+      }
+      document.getElementById("simNotice").textContent = notice;
+    }
+
+    // ==================== SLIDE 3 LOGIC (EXACT SVG DUAL-VENN) ====================
+    const VENN_INFO = {
+      A_left: {
+        group: "Group A · Left Only (Client Caching Only)",
+        color: "#2563eb",
+        title: "Eliminates Rebuilding Storage & Analytics Caches on Scans 2..N",
+        example: "Example: TPC-DS runs 103 queries (hundreds of table scans) with the same VM credential.",
+        why: "Warm-up alone still builds a fresh Storage object (+906 ms) if clients aren't reused; Client Caching skips creation completely (&lt;1 ms) and shares Parquet footer & small-object caches.",
+        action: "Already shipped on branch (+14.7% 1 TB / +8.3% 10 TB BiDi scan speedup)."
+      },
+      A_mid: {
+        group: "Group A · Center Overlap (Both Fix This — Merge Zone)",
+        color: "#0284c7",
+        title: "Warm gRPC Channel, DirectPath Auth & Bucket Routing on Repeat Scans",
+        example: "Example: Scans 2..6 hitting gs://sales-bucket on an already-used executor.",
+        why: "Once Client Caching keeps one client alive, the channel and RLS route stay warm automatically — doing 95% of what Warm-Up would do on long workloads.",
+        action: "Do NOT treat as double scan-time savings; merge Warm-Up as a cache-miss hook."
+      },
+      A_right: {
+        group: "Group A · Right Only (Channel Warm-Up Unique Value)",
+        color: "#d97706",
+        title: "Cold Scan #1, 2nd Bucket First Touch, & Per-Scan Vended Tokens",
+        example: "Example: Iceberg REST Catalog vends a fresh downscoped token per scan plan → Client Cache misses every scan!",
+        why: "Client Caching cannot share a Storage client across different tokens today. SDK Tier 1 + prefix-aware warmUp cuts every cold client miss from ~2.3 s → ~75 ms.",
+        action: "Trigger background warmUp(bucket) inside Client Cache on every cache miss."
+      },
+      B_left: {
+        group: "Group B · Left Only (Reactive Session / Handle Cache)",
+        color: "#059669",
+        title: "Multi-Split Large Files (>128 MB), Self-Joins/CTEs, & Repeat Queries — Zero Engine Changes",
+        example: "Example: 500 MB Parquet file split into 4 tasks on the same executor, or dimension tables read across CTEs.",
+        why: "Requires zero Spark or Iceberg planner changes! Live BlobReadSession pooling works on BOTH Regional Standard and Zonal Rapid buckets (-17% scan time in Connector 10 TB POC).",
+        action: "Build bounded BlobReadSession pool inside LeasedClientEntry in gcs-analytics-core first."
+      },
+      B_mid: {
+        group: "Group B · Center Overlap (Both Help)",
+        color: "#0d9488",
+        title: "Multi-Split or Repeated Files When Engine Lookahead Also Exists",
+        example: "Example: Dataproc Spark with multiOpen enabled scanning 500 MB Parquet files.",
+        why: "Proactive prewarm hides Split #1's open in the background, and the Session Pool reuses that live stream for Splits #2–#4 without reopening.",
+        action: "In go/connector-bidi-bulk-open, multiOpen + CHANNEL_POOL already share one single pool."
+      },
+      B_right: {
+        group: "Group B · Right Only (Proactive Bulk Open Unique Value)",
+        color: "#ea580c",
+        title: "Single-Pass Scans of ≤128 MB Files (Touched Once Only)",
+        example: "Example: One batch query scans 1,000 × 100 MB Parquet files (1 split per file, never reopened).",
+        why: "Reactive caching gets a 0% hit rate when every file is opened once! Only background pre-opening of files 2..N while reading file 1 hides the ~35 ms open cost (-15.7% in Dataproc 1 TB POC).",
+        action: "Requires adding task-level file lookahead in Iceberg's reader + skipping small-object cache hits."
+      }
+    };
+
+    let selectedVenn = "A_right";
+
+    function buildVennSvg(svgId, cx1, cx2, cy, r, labels, keys, colors) {
+      const xm = (cx1 + cx2) / 2;
+      const dx = (cx2 - cx1) / 2;
+      const dy = Math.sqrt(r * r - dx * dx);
+      const yTop = (cy - dy).toFixed(2);
+      const yBot = (cy + dy).toFixed(2);
+
+      const pathLeft = `M ${xm} ${yTop} A ${r} ${r} 0 1 0 ${xm} ${yBot} A ${r} ${r} 0 0 1 ${xm} ${yTop} Z`;
+      const pathMid  = `M ${xm} ${yTop} A ${r} ${r} 0 0 1 ${xm} ${yBot} A ${r} ${r} 0 0 1 ${xm} ${yTop} Z`;
+      const pathRight= `M ${xm} ${yTop} A ${r} ${r} 0 0 1 ${xm} ${yBot} A ${r} ${r} 0 1 0 ${xm} ${yTop} Z`;
+
+      const leftCenterX = ((cx1 - r) + (cx2 - r)) / 2;
+      const rightCenterX = ((cx1 + r) + (cx2 + r)) / 2;
+
+      const isSel = (k) => selectedVenn === k;
+
+      const svg = document.getElementById(svgId);
+      svg.innerHTML = `
+        <!-- Circle Titles Above -->
+        <text x="${cx1 - 24}" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="${colors[0]}">${labels.c1}</text>
+        <text x="${cx2 + 24}" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="${colors[2]}">${labels.c2}</text>
+
+        <!-- Left Crescent -->
+        <path d="${pathLeft}" onclick="selectVenn('${keys[0]}')" class="venn-slice"
+              fill="${colors[0]}" fill-opacity="${isSel(keys[0]) ? '0.34' : '0.16'}"
+              stroke="${colors[0]}" stroke-width="${isSel(keys[0]) ? '3.5' : '1.8'}" />
+
+        <!-- Center Intersection -->
+        <path d="${pathMid}" onclick="selectVenn('${keys[1]}')" class="venn-slice"
+              fill="${colors[1]}" fill-opacity="${isSel(keys[1]) ? '0.38' : '0.20'}"
+              stroke="${colors[1]}" stroke-width="${isSel(keys[1]) ? '3.5' : '1.8'}" />
+
+        <!-- Right Crescent -->
+        <path d="${pathRight}" onclick="selectVenn('${keys[2]}')" class="venn-slice"
+              fill="${colors[2]}" fill-opacity="${isSel(keys[2]) ? '0.34' : '0.16'}"
+              stroke="${colors[2]}" stroke-width="${isSel(keys[2]) ? '3.5' : '1.8'}" />
+
+        <!-- Region Labels (>=12px) -->
+        <text x="${leftCenterX}" y="${cy - 8}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="700" fill="currentColor">${labels.l1}</text>
+        <text x="${leftCenterX}" y="${cy + 10}" text-anchor="middle" pointer-events="none" font-size="12" fill="currentColor" opacity="0.8">${labels.l2}</text>
+
+        <text x="${xm}" y="${cy - 8}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="800" fill="currentColor">${labels.m1}</text>
+        <text x="${xm}" y="${cy + 10}" text-anchor="middle" pointer-events="none" font-size="12" fill="currentColor" opacity="0.85">${labels.m2}</text>
+
+        <text x="${rightCenterX}" y="${cy - 8}" text-anchor="middle" pointer-events="none" font-size="12.5" font-weight="700" fill="currentColor">${labels.r1}</text>
+        <text x="${rightCenterX}" y="${cy + 10}" text-anchor="middle" pointer-events="none" font-size="12" fill="currentColor" opacity="0.8">${labels.r2}</text>
+      `;
+    }
+
+    function selectVenn(key) {
+      selectedVenn = key;
+      renderVenns();
+    }
+
+    function renderVenns() {
+      // Group A: High overlap (closer centers: 185 & 275, r=96 -> lens=102px, crescents=90px)
+      buildVennSvg(
+        "vennA", 185, 275, 136, 96,
+        {
+          c1: "Client Caching", c2: "Channel Warm-Up",
+          l1: "Build Skip", l2: "& Caches",
+          m1: "Warm Pipe", m2: "(Scans 2..N)",
+          r1: "Scan #1 &", r2: "Vended Auth"
+        },
+        ["A_left", "A_mid", "A_right"],
+        ["#2563eb", "#0284c7", "#d97706"]
+      );
+
+      // Group B: Moderate overlap (centers: 170 & 290, r=96 -> lens=72px, crescents=120px)
+      buildVennSvg(
+        "vennB", 170, 290, 136, 96,
+        {
+          c1: "Session / Handle Cache", c2: "Proactive Bulk Open",
+          l1: ">128MB Splits", l2: "& Repeat SQL",
+          m1: "Multi-Split", m2: "+ Prewarm",
+          r1: "≤128MB", r2: "Read Once"
+        },
+        ["B_left", "B_mid", "B_right"],
+        ["#059669", "#0d9488", "#ea580c"]
+      );
+
+      const d = VENN_INFO[selectedVenn];
+      const box = document.getElementById("vennDetailBox");
+      box.style.borderColor = d.color;
+      box.innerHTML = `
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <span class="text-xs font-bold uppercase tracking-wider" style="color:${d.color}">${d.group}</span>
+          <span class="px-2.5 py-0.5 rounded text-xs font-bold" style="background:${d.color}20; color:${d.color}">
+            Decision: ${d.action}
+          </span>
+        </div>
+        <div class="text-base font-bold mt-1">${d.title}</div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2 text-xs md:text-sm">
+          <div class="subtle-box p-2.5"><strong>Concrete Example:</strong> ${d.example}</div>
+          <div class="subtle-box p-2.5"><strong>Why:</strong> ${d.why}</div>
+        </div>
+      `;
+    }
+
+    // ==================== SLIDE 4 LOGIC (REGIONAL VS ZONAL) ====================
+    let archStage = 0;
+
+    function setArchStage(s) {
+      archStage = s;
+      document.querySelectorAll(".arch-btn").forEach((b, i) => b.classList.toggle("active", i === s));
+      renderArch();
+    }
+
+    function renderArch() {
+      const stages = [
+        {
+          regClient: { label: "BlobReadSession Open", sub: "Sends (bucket, object)", color: "#2563eb" },
+          regMid:    { label: "read_handle = EMPTY", sub: "No token minted on Standard", color: "#dc2626" },
+          regServer: { label: "Bitpusher Stream RAM", sub: "Spanner + IAM (~38 ms) pinned to stream", color: "#d97706" },
+          zonClient: { label: "BlobReadSession Open", sub: "Sends (bucket, object)", color: "#059669" },
+          zonMid:    { label: "BidiReadHandle Minted", sub: "Encrypted OFL + 5-min VM auth", color: "#059669" },
+          zonServer: { label: "Fastpusher + Local SSD", sub: "16 KiB OFL fragments resolved (~28 ms)", color: "#059669" }
+        },
+        {
+          regClient: { label: "Task 1 Calls close()", sub: "Pool intercepts vs Normal close", color: "#2563eb" },
+          regMid:    { label: "No Token Left Behind", sub: "Nothing for SDK token cache to save!", color: "#dc2626" },
+          regServer: { label: "If Closed → RAM Wiped!", sub: "If Pooled → Bitpusher RAM stays warm", color: "#d97706" },
+          zonClient: { label: "Task 1 Calls close()", sub: "Pool keeps stream OR SDK saves ticket", color: "#059669" },
+          zonMid:    { label: "Ticket Valid 5 Min", sub: "Bound to this exact GCE VM", color: "#059669" },
+          zonServer: { label: "Fastpusher Stateless Resume", sub: "Ticket carries SSD fragment map", color: "#059669" }
+        },
+        {
+          regClient: { label: "Task 2 Reopens File", sub: "Reads Row Group 2", color: "#2563eb" },
+          regMid:    { label: "Live Session Pool = 0 ms!", sub: "Raw Handle Cache = 38 ms MISS", color: "#059669" },
+          regServer: { label: "Reuses Open Stream RAM", sub: "Skips Spanner & IAM completely", color: "#059669" },
+          zonClient: { label: "Task 2 Reopens File", sub: "Reads Row Group 2", color: "#059669" },
+          zonMid:    { label: "Pool = 0 RTT · Ticket = 1 Fast RTT", sub: "Both work on Zonal Rapid!", color: "#059669" },
+          zonServer: { label: "Decrypts Ticket in &lt;1 ms", sub: "Skips Spanner & Access Service", color: "#059669" }
+        }
+      ][archStage];
+
+      const renderTrack = (title, badge, badgeCol, c, m, s, verdict) => `
+        <div class="subtle-box p-4 flex flex-col gap-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="text-sm md:text-base font-bold">${title}</div>
+            <span class="px-2.5 py-0.5 rounded text-xs font-bold" style="background:${badgeCol}20; color:${badgeCol}">${badge}</span>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-11 gap-2 items-center">
+            <div class="md:col-span-3 surface-card p-3 border-2" style="border-color:${c.color}">
+              <div class="text-xs font-semibold text-[var(--muted-foreground)]">Executor Client</div>
+              <div class="text-sm font-bold mt-0.5">${c.label}</div>
+              <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${c.sub}</div>
+            </div>
+
+            <div class="md:col-span-1 text-center font-black text-lg text-[var(--muted-foreground)]">⇄</div>
+
+            <div class="md:col-span-3 surface-card p-3 border-2" style="border-color:${m.color}">
+              <div class="text-xs font-semibold text-[var(--muted-foreground)]">Wire Handle / Pool</div>
+              <div class="text-sm font-bold mt-0.5" style="color:${m.color}">${m.label}</div>
+              <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${m.sub}</div>
+            </div>
+
+            <div class="md:col-span-1 text-center font-black text-lg text-[var(--muted-foreground)]">⇄</div>
+
+            <div class="md:col-span-3 surface-card p-3 border-2" style="border-color:${s.color}">
+              <div class="text-xs font-semibold text-[var(--muted-foreground)]">GCS Backend</div>
+              <div class="text-sm font-bold mt-0.5">${s.label}</div>
+              <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${s.sub}</div>
+            </div>
+          </div>
+
+          <div class="text-xs font-semibold text-[var(--muted-foreground)] pt-1 border-t border-[var(--border)]">
+            ${verdict}
+          </div>
+        </div>
+      `;
+
+      document.getElementById("archTracks").innerHTML =
+        renderTrack(
+          "Track 1 · Regional Standard Bucket (Bitpusher + 2 MiB BCL + Shard Service)",
+          "Live Session Pool Only", "#2563eb",
+          stages.regClient, stages.regMid, stages.regServer,
+          "Takeaway: Open state lives ONLY inside the live gRPC stream — pooling BlobReadSession in analytics-core works on Regional buckets with zero SDK/server blockers."
+        ) +
+        renderTrack(
+          "Track 2 · Zonal Rapid Bucket (Fastpusher + 16 KiB Colossus SSD OFL)",
+          "Session Pool + SDK Handle Fallback", "#059669",
+          stages.zonClient, stages.zonMid, stages.zonServer,
+          "Takeaway: Live Session Pool gives 0-RTT hits; caching BidiReadHandle inside the SDK gives a cheap 1-RTT fallback when streams are evicted within 5 minutes."
+        );
+    }
+
+    // ==================== SLIDE 5 LOGIC (PRIORITIZATION STACK) ====================
+    const PRIO_ITEMS = [
+      {
+        step: "Done · Foundation",
+        title: "Auth-Safe Client Cache + Shared Analytics Cache",
+        color: "#059669",
+        phase: "Phases 1 & 2 (Scans 2..N) + Cached Footers",
+        where: "gcs-analytics-core (LeasedClientEntry)",
+        gain: "+14.7% (1 TB) / +8.3% (10 TB) BiDi scan speedup measured",
+        merge: "Base foundation — eliminates repeated 2.3 s client rebuilds and shares footer/small-object caches safely per CredentialKey."
+      },
+      {
+        step: "Priority 1 · Next Build",
+        title: "Live BlobReadSession Reuse Pool",
+        color: "#2563eb",
+        phase: "Phase 3 · Repeat & Multi-Split File Opens",
+        where: "gcs-analytics-core ONLY (Zero SDK / Engine blocks)",
+        gain: "−17% BiDi scan time in 10 TB Connector POC (500 MB files)",
+        merge: "Works on BOTH Regional Standard & Zonal Rapid buckets; thread-safe readAs lets concurrent tasks share 1 live session per file."
+      },
+      {
+        step: "Priority 2 · Merge Into Miss",
+        title: "Channel Warm-Up on Client Cache Miss",
+        color: "#d97706",
+        phase: "Phases 1 & 2 · Cold Scan #1, 2nd Bucket & Vended Tokens",
+        where: "Java/C++ SDK (Tier 1 + warmUp) + Client Cache hook",
+        gain: "Cuts cold first read 2,270 ms → ~75 ms on cache misses",
+        merge: "Merged directly into GcsClientCache miss path (prefix-aware for downscoped vended tokens; ~1.7% extra on static-auth 1 TB TPC-DS, huge on vended tokens)."
+      },
+      {
+        step: "Priority 3 · Ecosystem Plumbing",
+        title: "Lookahead Bulk Open + SDK Handle Token Cache",
+        color: "#0d9488",
+        phase: "Phase 3 · ≤128 MB Single-Pass Files & Evicted Zonal Streams",
+        where: "Apache Iceberg Reader (lookahead) + Storage SDK",
+        gain: "−15.7% BiDi scan time in 1 TB Dataproc prewarm POC",
+        merge: "Prewarm skips files already in Small-Object Cache; SDK caches (BidiReadHandle, routingToken) for 4 min when Zonal sessions close."
+      }
+    ];
+
+    let selPrio = 1;
+
+    function selectPrio(i) {
+      selPrio = i;
+      renderPrio();
+    }
+
+    function renderPrio() {
+      const grid = document.getElementById("prioGrid");
+      grid.innerHTML = PRIO_ITEMS.map((item, i) => {
+        const active = i === selPrio;
+        return `
+          <div onclick="selectPrio(${i})"
+               class="node-anim p-4 rounded-xl border-2 cursor-pointer flex flex-col justify-between gap-3"
+               style="border-color:${active ? item.color : 'var(--border)'}; background:${active ? item.color + '16' : 'var(--card)'}">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-extrabold uppercase tracking-wide" style="color:${item.color}">${item.step}</span>
+              <span class="text-xs font-bold">${active ? "● Selected" : "Click"}</span>
+            </div>
+            <div class="text-base font-bold leading-snug">${item.title}</div>
+            <div class="text-xs text-[var(--muted-foreground)] font-medium pt-2 border-t border-[var(--border)]">
+              ${item.where}
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      const p = PRIO_ITEMS[selPrio];
+      document.getElementById("prioDetail").innerHTML = `
+        <div>
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-xs font-bold uppercase tracking-wider" style="color:${p.color}">${p.step}</span>
+            <span class="px-2.5 py-0.5 rounded text-xs font-bold" style="background:${p.color}20; color:${p.color}">${p.phase}</span>
+          </div>
+          <div class="text-lg font-bold mt-1">${p.title}</div>
+          <div class="text-sm text-[var(--foreground)] mt-2">${p.merge}</div>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[var(--border)]">
+          <div class="surface-card p-3">
+            <div class="text-xs text-[var(--muted-foreground)] font-semibold">Where Code Lives</div>
+            <div class="text-sm font-bold mt-0.5">${p.where}</div>
+          </div>
+          <div class="surface-card p-3">
+            <div class="text-xs text-[var(--muted-foreground)] font-semibold">Measured / Reference Impact</div>
+            <div class="text-sm font-bold mt-0.5" style="color:${p.color}">${p.gain}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    // Initialize all slides
+    renderWalkthrough();
+    renderSimulator();
+    renderVenns();
+    renderArch();
+    renderPrio();
+  </script>
+</body>
+</html>
