@@ -22,7 +22,7 @@ limitations under the License.
     <url>https://github.com/GoogleCloudPlatform/gcs-analytics-core</url>
     <groupId>com.google.cloud.gcs.analytics</groupId>
     <artifactId>gcs-analytics-core-parent</artifactId>
-    <version>1.7.0</version>
+    <version>1.7.1-WARMUP-SNAPSHOT</version>
     <packaging>pom</packaging>
     <modules>
         <module>core</module>
@@ -78,6 +78,8 @@ limitations under the License.
           upgrades to 26.91.0 or later.
         -->
         <google.api-client.bom.version>2.9.2</google.api-client.bom.version>
+        <google.gax.bom.version>2.90.0</google.gax.bom.version>
+        <google.cloud-storage.bom.version>2.78.0</google.cloud-storage.bom.version>
         <google.guava.version>33.6.0-jre</google.guava.version>
         <google.java-format.version>1.17.0</google.java-format.version>
         <google.error-prone.version>2.16</google.error-prone.version>
@@ -241,6 +243,27 @@ limitations under the License.
                 <groupId>com.google.auto.value</groupId>
                 <artifactId>auto-value-annotations</artifactId>
                 <version>${google.auto-value.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.cloud</groupId>
+                <artifactId>first-party-dependencies</artifactId>
+                <version>3.72.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.google.api</groupId>
+                <artifactId>gax-bom</artifactId>
+                <version>${google.gax.bom.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.google.cloud</groupId>
+                <artifactId>google-cloud-storage-bom</artifactId>
+                <version>${google.cloud-storage.bom.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
             <dependency>
                 <groupId>com.google.api-client</groupId>

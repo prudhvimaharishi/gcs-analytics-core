@@ -18,6 +18,9 @@ package com.google.cloud.gcs.analyticscore.client;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
+import com.google.api.core.ApiFuture;
+import com.google.api.core.ApiFutureCallback;
+import com.google.api.core.ApiFutures;
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.paging.Page;
 import com.google.api.gax.retrying.RetrySettings;
@@ -46,11 +49,13 @@ import com.google.cloud.storage.BucketInfo.IamConfiguration;
 import com.google.cloud.storage.BucketInfo.LifecycleRule;
 import com.google.cloud.storage.BucketInfo.LifecycleRule.LifecycleAction;
 import com.google.cloud.storage.BucketInfo.LifecycleRule.LifecycleCondition;
+import com.google.cloud.storage.GrpcStorageOptions;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.Storage.BlobField;
 import com.google.cloud.storage.Storage.BlobListOption;
 import com.google.cloud.storage.Storage.BlobWriteOption;
 import com.google.cloud.storage.Storage.BucketField;
+import com.google.cloud.storage.Storage.BucketSourceOption;
 import com.google.cloud.storage.StorageClass;
 import com.google.cloud.storage.StorageException;
 import com.google.cloud.storage.StorageOptions;
@@ -61,6 +66,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.io.BaseEncoding;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.protobuf.Timestamp;
 import com.google.storage.control.v2.CreateFolderRequest;
 import com.google.storage.control.v2.Folder;
@@ -192,6 +198,7 @@ class GcsClientImpl implements GcsClient {
         resolveUniverseDomain(
             clientOptions.getUniverseDomain(), System.getenv(UNIVERSE_DOMAIN_ENV_VAR));
     this.storage = createStorage(credentials);
+    startConfiguredWarmUp(this.storage);
   }
 
   /**
@@ -777,7 +784,7 @@ class GcsClientImpl implements GcsClient {
 
   @VisibleForTesting
   protected Storage createGrpcStorage(Optional<Credentials> credentials) {
-    return buildStorage(StorageOptions.grpc(), credentials);
+    return buildStorage(createGrpcStorageBuilder(), credentials);
   }
 
   @VisibleForTesting
@@ -790,7 +797,7 @@ class GcsClientImpl implements GcsClient {
                 + " client.protocol is {}; data requests use the JVM proxy settings.",
             clientOptions.getProtocol());
       }
-      builder = StorageOptions.grpc();
+      builder = createGrpcStorageBuilder();
     } else {
       builder =
           StorageOptions.newBuilder()
@@ -801,6 +808,43 @@ class GcsClientImpl implements GcsClient {
                       universeDomain.orElse(null)));
     }
     return buildStorage(builder, credentials);
+  }
+
+  private GrpcStorageOptions.Builder createGrpcStorageBuilder() {
+    GrpcStorageOptions.Builder grpcBuilder = StorageOptions.grpc();
+    clientOptions
+        .getGrpcWarmUpOnCreationEnabled()
+        .ifPresent(grpcBuilder::setWarmUpOnCreationEnabled);
+    return grpcBuilder;
+  }
+
+  private void startConfiguredWarmUp(Storage targetStorage) {
+    if (!clientOptions.isGrpcEnabled() || clientOptions.getGrpcWarmUpBuckets().isEmpty()) {
+      return;
+    }
+    BucketSourceOption[] bucketOptions =
+        clientOptions
+            .getGcsReadOptions()
+            .getUserProjectId()
+            .map(projectId -> new BucketSourceOption[] {BucketSourceOption.userProject(projectId)})
+            .orElseGet(() -> new BucketSourceOption[0]);
+    for (String bucket : clientOptions.getGrpcWarmUpBuckets()) {
+      ApiFuture<Void> future = targetStorage.warmUp(bucket, bucketOptions);
+      ApiFutures.addCallback(
+          future,
+          new ApiFutureCallback<Void>() {
+            @Override
+            public void onSuccess(Void result) {
+              LOG.debug("Completed asynchronous GCS warm-up for bucket {}", bucket);
+            }
+
+            @Override
+            public void onFailure(Throwable t) {
+              LOG.warn("Asynchronous GCS warm-up failed for bucket {}", bucket, t);
+            }
+          },
+          MoreExecutors.directExecutor());
+    }
   }
 
   private Storage buildStorage(StorageOptions.Builder builder, Optional<Credentials> credentials) {

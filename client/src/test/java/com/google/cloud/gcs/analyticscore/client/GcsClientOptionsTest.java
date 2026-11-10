@@ -280,6 +280,21 @@ class GcsClientOptionsTest {
                 .build());
   }
 
+  @Test
+  void createFromOptions_withGrpcWarmUpProperties_normalizesBucketsAndFlag() {
+    Map<String, String> rawOptions =
+        ImmutableMap.of(
+            "gcs.client.grpc.warmup-on-creation.enabled",
+            "true",
+            "gcs.client.grpc.warmup.buckets",
+            "gs://bucket-a/warehouse, bucket-b , gs://bucket-c/");
+
+    GcsClientOptions options = GcsClientOptions.createFromOptions(rawOptions, "gcs.");
+
+    assertThat(options.getGrpcWarmUpOnCreationEnabled()).hasValue(true);
+    assertThat(options.getGrpcWarmUpBuckets()).containsExactly("bucket-a", "bucket-b", "bucket-c");
+  }
+
   private static GcsClientOptions.Protocol protocolFor(String value) {
     return GcsClientOptions.createFromOptions(ImmutableMap.of("gcs.client.protocol", value), "gcs.")
         .getProtocol();

@@ -47,6 +47,9 @@ public abstract class GcsClientOptions {
   private static final String USER_AGENT_KEY = "user-agent";
   static final String PROJECT_ID_KEY = "project-id";
   private static final String CLIENT_PROTOCOL_KEY = "client.protocol";
+  private static final String GRPC_WARMUP_ON_CREATION_ENABLED_KEY =
+      "client.grpc.warmup-on-creation.enabled";
+  private static final String GRPC_WARMUP_BUCKETS_KEY = "client.grpc.warmup.buckets";
 
   private static final String UPLOAD_CHUNK_SIZE_KEY = "channel.write.chunk-size-bytes";
   private static final String UPLOAD_TYPE_KEY = "channel.write.upload-type";
@@ -141,6 +144,10 @@ public abstract class GcsClientOptions {
 
   public abstract ImmutableSet<String> getTemporaryPaths();
 
+  public abstract Optional<Boolean> getGrpcWarmUpOnCreationEnabled();
+
+  public abstract ImmutableSet<String> getGrpcWarmUpBuckets();
+
   public abstract Builder toBuilder();
 
   // TODO: Benchmark and determine the optimal default values for write options.
@@ -156,7 +163,8 @@ public abstract class GcsClientOptions {
         .setPcuBufferCapacity(32 * MB)
         .setPcuPartFileCleanupType(PartFileCleanupType.ALWAYS)
         .setPcuPartFileNamePrefix("")
-        .setTemporaryPaths(ImmutableSet.of());
+        .setTemporaryPaths(ImmutableSet.of())
+        .setGrpcWarmUpBuckets(ImmutableSet.of());
   }
 
   public static GcsClientOptions createFromOptions(
@@ -180,6 +188,13 @@ public abstract class GcsClientOptions {
     Optional.ofNullable(analyticsCoreOptions.get(prefix + CLIENT_PROTOCOL_KEY))
         .map(s -> Protocol.valueOf(s.trim().toUpperCase(Locale.ROOT)))
         .ifPresent(optionsBuilder::setProtocol);
+    ConfigurationUtil.getTrimmedValue(
+            analyticsCoreOptions, prefix + GRPC_WARMUP_ON_CREATION_ENABLED_KEY)
+        .map(Boolean::parseBoolean)
+        .ifPresent(optionsBuilder::setGrpcWarmUpOnCreationEnabled);
+    ConfigurationUtil.getTrimmedValue(analyticsCoreOptions, prefix + GRPC_WARMUP_BUCKETS_KEY)
+        .map(GcsClientOptions::parseBucketList)
+        .ifPresent(optionsBuilder::setGrpcWarmUpBuckets);
 
     Optional.ofNullable(analyticsCoreOptions.get(prefix + UPLOAD_CHUNK_SIZE_KEY))
         .map(val -> ConfigurationUtil.safeParseInteger(prefix + UPLOAD_CHUNK_SIZE_KEY, val))
@@ -258,6 +273,14 @@ public abstract class GcsClientOptions {
       return setTemporaryPaths(ImmutableSet.copyOf(paths));
     }
 
+    public abstract Builder setGrpcWarmUpOnCreationEnabled(boolean enabled);
+
+    public abstract Builder setGrpcWarmUpBuckets(ImmutableSet<String> buckets);
+
+    public Builder setGrpcWarmUpBuckets(Collection<String> buckets) {
+      return setGrpcWarmUpBuckets(ImmutableSet.copyOf(buckets));
+    }
+
     abstract GcsClientOptions autoBuild();
 
     public GcsClientOptions build() {
@@ -321,6 +344,22 @@ public abstract class GcsClientOptions {
 
   private static List<Path> toPaths(Collection<String> pathStrings) {
     return pathStrings.stream().map(Paths::get).collect(Collectors.toList());
+  }
+
+  private static ImmutableSet<String> parseBucketList(String rawBuckets) {
+    return Arrays.stream(rawBuckets.split(","))
+        .map(GcsClientOptions::normalizeBucketName)
+        .filter(s -> !s.isEmpty())
+        .collect(ImmutableSet.toImmutableSet());
+  }
+
+  private static String normalizeBucketName(String raw) {
+    String trimmed = raw.trim();
+    if (trimmed.startsWith("gs://")) {
+      trimmed = trimmed.substring("gs://".length());
+    }
+    int slashIndex = trimmed.indexOf('/');
+    return slashIndex >= 0 ? trimmed.substring(0, slashIndex).trim() : trimmed;
   }
 
   private static ParallelCompositeUploadBlobWriteSessionConfig.PartCleanupStrategy

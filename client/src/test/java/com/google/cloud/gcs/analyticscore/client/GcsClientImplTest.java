@@ -31,6 +31,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.api.core.ApiFuture;
+import com.google.api.core.ApiFutures;
 import com.google.api.gax.paging.Page;
 import com.google.api.gax.rpc.AlreadyExistsException;
 import com.google.api.gax.rpc.NotFoundException;
@@ -77,6 +78,7 @@ import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.io.BaseEncoding;
 import com.google.protobuf.Timestamp;
 import com.google.storage.control.v2.CreateFolderRequest;
@@ -3442,5 +3444,29 @@ class GcsClientImplTest {
     verify(mockGrpcStorage, times(1))
         .get(eq(BlobId.of(TEST_BUCKET_NAME, TEST_DIR)), any(Storage.BlobGetOption[].class));
     verify(mockHttpStorage, never()).get(any(BlobId.class), any(Storage.BlobGetOption[].class));
+  }
+
+  @Test
+  void constructor_withGrpcWarmUpBuckets_triggersWarmUpForEachBucket() {
+    Storage mockGrpcStorage = mock(Storage.class);
+    when(mockGrpcStorage.warmUp(any(String.class), any(Storage.BucketSourceOption[].class)))
+        .thenReturn(ApiFutures.immediateFuture(null));
+    GcsClientOptions options =
+        GcsClientOptions.builder()
+            .setProtocol(GcsClientOptions.Protocol.BIDI)
+            .setGrpcWarmUpOnCreationEnabled(true)
+            .setGrpcWarmUpBuckets(ImmutableSet.of("bucket-one", "bucket-two"))
+            .build();
+
+    GcsClientImpl unused =
+        new GcsClientImpl(options, executorServiceSupplier, telemetry, newBucketPropertiesCache()) {
+          @Override
+          protected Storage createStorage(Optional<Credentials> credentials) {
+            return mockGrpcStorage;
+          }
+        };
+
+    verify(mockGrpcStorage).warmUp(eq("bucket-one"), any(Storage.BucketSourceOption[].class));
+    verify(mockGrpcStorage).warmUp(eq("bucket-two"), any(Storage.BucketSourceOption[].class));
   }
 }
